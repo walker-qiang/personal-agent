@@ -292,8 +292,9 @@ class TestBuildGraph:
             }},
         ))
         final = events[-1]
-        assert "测试技能" in final.get("final_answer", "")
         assert final.get("tool_call_count", 0) >= 1
+        # summarize_node should generate answer from tool results
+        assert len(final.get("final_answer", "")) > 0
 
 
 class TestSkillNode:
@@ -323,8 +324,10 @@ class TestSkillNode:
         result = skill_node(state, config={
             "configurable": {"llm": llm, "tools": registry, "skills": [skill]},
         })
-        assert "测试技能" in result["final_answer"]
         assert result["tool_call_count"] == 1
+        assert len(result["tool_results"]) == 1
+        # skill_node should NOT set final_answer — let summarize_node do it
+        assert result.get("final_answer", "") == ""
 
     def test_unknown_skill(self, registry):
         llm = FakeLLM([])

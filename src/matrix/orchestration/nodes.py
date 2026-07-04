@@ -17,37 +17,41 @@ from .state import AgentState
 
 CLASSIFY_PROMPT = """You are a routing classifier. Based on the user's message, classify the intent.
 
-Return only a JSON object:
-{{"intent": "skill", "skill_name": "anomaly-diagnosis"}} — for structured tasks matching a known skill
-{{"intent": "react"}} — for simple factual questions requiring tool calls
-{{"intent": "plan_execute"}} — for complex multi-step analysis requiring planning
+Return only a JSON object with one of these intents:
+- {{"intent": "skill", "skill_name": "anomaly-diagnosis"}} — ONLY when the user explicitly asks for anomaly diagnosis, change detection, or root cause analysis of portfolio changes
+- {{"intent": "skill", "skill_name": "portfolio-review"}} — ONLY when the user asks for a portfolio review, performance summary, or monthly/quarterly recap
+- {{"intent": "skill", "skill_name": "allocation-check"}} — ONLY when the user asks about allocation deviation, rebalancing, or target vs actual comparison
+- {{"intent": "react"}} — for simple questions that can be answered with one or two tool calls (e.g., holdings count, balance check, asset lookup)
+- {{"intent": "plan_execute"}} — for complex multi-step analysis that requires planning multiple tool calls
 
 Available skills:
 {skills}
 
-If no skill matches, use react for simple questions or plan_execute for complex analysis.
+IMPORTANT: Only use "skill" intent when the user's request CLEARLY matches a skill's purpose. Default to "react" for simple questions and "plan_execute" for complex analysis.
 """
 
 REACT_SYSTEM = """You are an investment analyst agent operating in ReAct mode.
 
 Available tools: {tools}
 
-Reply in the same language as the user. Follow this format precisely:
+You MUST follow this EXACT format in every response. Do NOT add any other text outside this format.
 
-Thought: reason about what to do next
-Action: tool_name
-Action Input: JSON arguments for the tool
+When you need to call a tool:
+Thought: [reason about what to do next in one sentence]
+Action: [tool_name exactly as listed]
+Action Input: [valid JSON arguments for the tool]
 
-Or, if you have enough information:
-
+When you have enough information to answer the user:
 Thought: I have enough information to answer
-Final Answer: your answer to the user
+Final Answer: [your answer to the user]
 
-Rules:
+Strict rules:
 - ONE action per turn, never return multiple actions
+- Action MUST be exactly the tool name from the list above
 - Use only the listed tool names with valid JSON arguments
 - Never fabricate data; if tool data is missing, say so
 - Keep answers concise; money is CNY unless stated otherwise
+- Reply in the same language as the user
 """
 
 PLAN_SYSTEM = """You are an investment analyst agent operating in Plan-Execute mode.
@@ -222,16 +226,30 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    # Parse Action
+    # Parse Action — try strict ReAct format first, then fallback
     action_match = re.search(r"Action:\s*(.+?)(?:\n|$)", response)
-    if not action_match:
+    tool_name = ""
+    if action_match:
+        tool_name = action_match.group(1).strip()
+    else:
+        # Fallback: try to find a tool name mentioned anywhere in the response
+        for tname in tools.tool_names():
+            if tname in response:
+                tool_name = tname
+                break
+
+    if not tool_name:
+        if iteration > 0 and tool_results:
+            return {
+                "final_answer": response.strip()[:2000],
+                "react_iteration": iteration + 1,
+            }
         return {
-            "error": "No action or final answer in LLM response",
-            "final_answer": "无法确定下一步操作，请基于已有数据回答。",
+            "error": "LLM did not follow ReAct format",
+            "final_answer": "无法确定下一步操作，请尝试更具体地描述问题。",
             "react_iteration": iteration + 1,
         }
 
-    tool_name = action_match.group(1).strip()
     if tool_name not in tools.tool_names():
         return {
             "error": f"Unknown tool: {tool_name}",
@@ -403,8 +421,10 @@ def summarize_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     user_msg = state["user_message"]
     tool_results = state.get("tool_results", [])
 
-    if state.get("final_answer"):
-        return {"final_answer": state["final_answer"]}
+    # Only use existing final_answer if it's a real answer (not a skill placeholder)
+    existing = state.get("final_answer", "")
+    if existing and not existing.startswith("技能「"):
+        return {"final_answer": existing}
 
     if not tool_results:
         return {"final_answer": "未获取到任何数据，请检查工具调用。"}
@@ -427,7 +447,10 @@ def summarize_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
 
 
 def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Execute a predefined skill workflow and return results."""
+    """Execute a predefined skill workflow and return results.
+
+    Does NOT set final_answer — let summarize_node generate the real answer.
+    """
     cfg = _get_configurable(config)
     tools: ToolRegistry = cfg["tools"]
     skills = cfg.get("skills", [])
@@ -466,9 +489,9 @@ def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             ),
         }
 
+    # Let summarize_node generate the real answer from tool results
     return {
         "tool_results": result.get("results", []),
         "tool_call_count": result.get("steps_executed", 0),
         "findings": findings,
-        "final_answer": f"技能「{skill.title}」执行完成，共 {result['steps_executed']} 步。",
     }

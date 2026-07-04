@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Matrix - 投资分析员</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --text-secondary: #8b8fa3;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --error: #ef4444;
+    --tool-call: #1e293b;
+    --tool-result: #0f172a;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .mode-selector {
+    display: flex;
+    gap: 4px;
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 2px;
+    margin-left: auto;
+  }
+  .mode-selector button {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+  }
+  .mode-selector button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .mode-selector button:hover:not(.active) {
+    color: var(--text);
+  }
+  .status {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+  }
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .welcome {
+    text-align: center;
+    margin-top: 80px;
+  }
+  .welcome h2 {
+    font-size: 24px;
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .welcome p {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .welcome .hints {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 20px;
+  }
+  .hint {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: all 0.15s;
+  }
+  .hint:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  .message {
+    max-width: 800px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .message.user {
+    align-self: flex-end;
+    text-align: right;
+  }
+  .message.user .bubble {
+    background: var(--accent);
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    display: inline-block;
+    max-width: 85%;
+    text-align: left;
+    font-size: 14px;
+  }
+  .message.assistant {
+    align-self: flex-start;
+  }
+  .message.assistant .bubble {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 16px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    line-height: 1.7;
+    max-width: 85%;
+    overflow-x: auto;
+  }
+  .message.assistant .bubble table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 8px 0;
+    font-size: 13px;
+  }
+  .message.assistant .bubble th,
+  .message.assistant .bubble td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+  }
+  .message.assistant .bubble th {
+    background: var(--bg);
+    font-weight: 600;
+  }
+  .tool-section {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .tool-header {
+    background: var(--tool-call);
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tool-header .icon {
+    font-size: 14px;
+  }
+  .tool-header .name {
+    font-family: monospace;
+    color: var(--warning);
+  }
+  .tool-body {
+    background: var(--tool-result);
+    padding: 10px 12px;
+    font-size: 12px;
+    font-family: monospace;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none;
+    white-space: pre-wrap;
+    color: var(--text-secondary);
+  }
+  .tool-section.open .tool-body {
+    display: block;
+  }
+  .tool-section .tool-header .arrow {
+    margin-left: auto;
+    transition: transform 0.15s;
+  }
+  .tool-section.open .tool-header .arrow {
+    transform: rotate(180deg);
+  }
+  .thinking {
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 8px 0;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+  footer {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    flex-shrink: 0;
+  }
+  .input-row {
+    display: flex;
+    gap: 10px;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+  .input-row input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .input-row input:focus {
+    border-color: var(--accent);
+  }
+  .input-row input::placeholder {
+    color: var(--text-secondary);
+  }
+  .input-row button {
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius);
+    padding: 10px 20px;
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .input-row button:hover {
+    background: var(--accent-hover);
+  }
+  .input-row button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .reset-btn {
+    background: transparent !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    padding: 10px 12px !important;
+  }
+  .reset-btn:hover {
+    border-color: var(--error) !important;
+    color: var(--error) !important;
+  }
+  .error-block {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid var(--error);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--error);
+    margin: 8px 0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Project Matrix</h1>
+  <span class="status"><span class="dot"></span> 投资分析员 V1</span>
+  <div class="mode-selector">
+    <button class="active" data-mode="graph">Graph 编排</button>
+    <button data-mode="planner">Planner</button>
+  </div>
+</header>
+<main id="chat">
+  <div class="welcome" id="welcome">
+    <h2>Project Matrix</h2>
+    <p>个人智能协作网络 · 投资分析员</p>
+    <div class="hints">
+      <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
+      <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
+      <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
+      <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
+      <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+    </div>
+  </div>
+</main>
+<footer>
+  <div class="input-row">
+    <input type="text" id="input" placeholder="输入问题..." autofocus>
+    <button id="send" onclick="send()">发送</button>
+    <button class="reset-btn" onclick="resetSession()">重置</button>
+  </div>
+</footer>
+
+<script>
+const SESSION = 'web-' + Math.random().toString(36).slice(2, 8);
+let mode = 'graph';
+let sending = false;
+
+document.querySelectorAll('.mode-selector button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-selector button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    mode = btn.dataset.mode;
+  });
+});
+
+document.querySelectorAll('.hint').forEach(hint => {
+  hint.addEventListener('click', () => {
+    document.getElementById('input').value = hint.dataset.msg;
+    send();
+  });
+});
+
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+
+function send() {
+  if (sending) return;
+  const input = document.getElementById('input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  sending = true;
+
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
+
+  const chat = document.getElementById('chat');
+  chat.appendChild(userBubble(msg));
+  const asst = assistantBubble();
+  chat.appendChild(asst);
+  chat.scrollTop = chat.scrollHeight;
+
+  const toolCache = new Map();
+  let thinking = addThinking(asst);
+
+  fetch('/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: msg, session_id: SESSION, mode }),
+  }).then(async resp => {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(data);
+          handleEvent(ev, asst, thinking, toolCache);
+        } catch (e) {}
+      }
+    }
+  }).catch(err => {
+    if (thinking) thinking.remove();
+    asst.appendChild(errorBlock(err.message));
+  }).finally(() => {
+    sending = false;
+    document.getElementById('input').focus();
+  });
+}
+
+function handleEvent(ev, asst, thinking, toolCache) {
+  if (ev.type === 'tool_call') {
+    if (thinking) { thinking.remove(); thinking = null; }
+    const name = ev.name || '';
+    toolCache.set(name, { name, args: ev.args, preview: '' });
+  } else if (ev.type === 'tool_result') {
+    if (thinking) { thinking.remove(); thinking = null; }
+    const name = ev.name || '';
+    const cached = toolCache.get(name);
+    if (cached) {
+      cached.preview = ev.preview || '';
+      asst.appendChild(toolSection(cached));
+      toolCache.delete(name);
+    }
+  } else if (ev.type === 'token') {
+    if (thinking) { thinking.remove(); thinking = null; }
+    let content = asst.querySelector('.content');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'content';
+      asst.appendChild(content);
+    }
+    content.textContent += ev.content || '';
+    const chat = document.getElementById('chat');
+    chat.scrollTop = chat.scrollHeight;
+  } else if (ev.type === 'error') {
+    if (thinking) { thinking.remove(); thinking = null; }
+    asst.appendChild(errorBlock(ev.message));
+  } else if (ev.type === 'done') {
+    if (thinking) { thinking.remove(); thinking = null; }
+  }
+}
+
+function addThinking(asst) {
+  const el = document.createElement('div');
+  el.className = 'thinking';
+  el.textContent = '思考中...';
+  asst.appendChild(el);
+  return el;
+}
+
+function userBubble(msg) {
+  const div = document.createElement('div');
+  div.className = 'message user';
+  div.innerHTML = `<div class="bubble">${escapeHtml(msg)}</div>`;
+  return div;
+}
+
+function assistantBubble() {
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.innerHTML = '<div class="bubble"></div>';
+  return div;
+}
+
+function toolSection(tool) {
+  const div = document.createElement('div');
+  div.className = 'tool-section';
+  div.innerHTML = `
+    <div class="tool-header" onclick="this.parentElement.classList.toggle('open')">
+      <span class="icon">&#9881;</span>
+      <span class="name">${escapeHtml(tool.name)}</span>
+      <span class="arrow">&#9660;</span>
+    </div>
+    <div class="tool-body">${escapeHtml(tool.preview)}</div>
+  `;
+  return div;
+}
+
+function errorBlock(msg) {
+  const div = document.createElement('div');
+  div.className = 'error-block';
+  div.textContent = msg;
+  return div;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function resetSession() {
+  fetch('/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: SESSION }),
+  }).then(() => {
+    const chat = document.getElementById('chat');
+    chat.innerHTML = `
+      <div class="welcome" id="welcome">
+        <h2>Project Matrix</h2>
+        <p>个人智能协作网络 · 投资分析员</p>
+        <div class="hints">
+          <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
+          <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
+          <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
+          <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
+          <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+        </div>
+      </div>`;
+    document.querySelectorAll('.hint').forEach(hint => {
+      hint.addEventListener('click', () => {
+        document.getElementById('input').value = hint.dataset.msg;
+        send();
+      });
+    });
+  });
+}
+</script>
+</body>
+</html>
