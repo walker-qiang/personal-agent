@@ -209,6 +209,20 @@ def react_node(
             + json.dumps(tool_results, ensure_ascii=False, indent=2)
             + "\n\n"
         )
+        # Check for duplicate calls and warn
+        seen = set()
+        dupes = set()
+        for tr in tool_results:
+            key = (tr.get("name"), json.dumps(tr.get("arguments", {}), sort_keys=True))
+            if key in seen:
+                dupes.add(key[0])
+            seen.add(key)
+        if dupes:
+            context += (
+                "WARNING: The following tools were already called with the same arguments: "
+                + ", ".join(dupes)
+                + ". Do NOT call them again. Use the existing results to answer the question.\n\n"
+            )
     context += "What should be the next action?"
 
     try:
@@ -275,6 +289,25 @@ def react_node(
             arguments = {}
 
     started = time.perf_counter()
+
+    # Deduplication: if same tool + same args was already called, reuse result
+    args_key = json.dumps(arguments, sort_keys=True)
+    for prev in tool_results:
+        if prev.get("name") == tool_name and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key:
+            # Reuse previous result, but add a note
+            tool_results.append({
+                "name": tool_name,
+                "arguments": arguments,
+                "result": prev.get("result", prev.get("error", {})),
+                "elapsed_ms": 0,
+                "duplicate": True,
+            })
+            return {
+                "tool_results": tool_results,
+                "react_iteration": iteration + 1,
+                "tool_call_count": state.get("tool_call_count", 0) + 1,
+            }
+
     try:
         result = tools.call(tool_name, arguments)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
