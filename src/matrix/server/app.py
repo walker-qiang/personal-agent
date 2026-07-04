@@ -8,7 +8,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from ..chat import ChatService
 from ..config import AgentConfig, load_config
@@ -16,6 +16,12 @@ from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from .routes import chat, health, tools
+
+# Pre-load the Web UI HTML content at module level
+_INDEX_HTML = ""
+_index_path = Path(__file__).parent / "static" / "index.html"
+if _index_path.exists():
+    _INDEX_HTML = _index_path.read_text(encoding="utf-8")
 
 
 @asynccontextmanager
@@ -53,19 +59,16 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Register routes
-    app.include_router(health.router)
+    # Register API routes FIRST (before any catch-all routes)
     app.include_router(tools.router)
     app.include_router(chat.router)
+    app.include_router(health.router)
 
-    # Serve Web UI
-    static_dir = Path(__file__).parent / "static"
-    index_path = static_dir / "index.html"
-
-    @app.get("/")
+    # Serve Web UI at root (LAST, so API routes take priority)
+    @app.get("/", include_in_schema=False)
     async def serve_ui():
-        if index_path.exists():
-            return FileResponse(str(index_path))
-        return RedirectResponse("/healthz")
+        if _INDEX_HTML:
+            return HTMLResponse(_INDEX_HTML)
+        return HTMLResponse("<h1>Project Matrix</h1><p>UI not found.</p>", status_code=404)
 
     return app

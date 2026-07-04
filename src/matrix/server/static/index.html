@@ -375,56 +375,33 @@ function send() {
   const toolCache = new Map();
   let thinking = addThinking(asst);
 
-  fetch('/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: msg, session_id: SESSION, mode }),
-  }).then(async resp => {
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') continue;
-        try {
-          const ev = JSON.parse(data);
-          handleEvent(ev, asst, thinking, toolCache);
-        } catch (e) {}
-      }
-    }
-  }).catch(err => {
-    if (thinking) thinking.remove();
-    asst.appendChild(errorBlock(err.message));
-  }).finally(() => {
-    sending = false;
-    document.getElementById('input').focus();
+  const params = new URLSearchParams({
+    message: encodeURIComponent(msg),
+    session_id: SESSION,
+    mode: mode,
   });
-}
+  const es = new EventSource('/chat/stream?' + params.toString());
 
-function handleEvent(ev, asst, thinking, toolCache) {
-  if (ev.type === 'tool_call') {
+  es.addEventListener('tool_call', (e) => {
     if (thinking) { thinking.remove(); thinking = null; }
-    const name = ev.name || '';
-    toolCache.set(name, { name, args: ev.args, preview: '' });
-  } else if (ev.type === 'tool_result') {
+    const data = JSON.parse(e.data);
+    const name = data.name || '';
+    toolCache.set(name, { name, args: data.args, preview: '' });
+  });
+
+  es.addEventListener('tool_result', (e) => {
     if (thinking) { thinking.remove(); thinking = null; }
-    const name = ev.name || '';
+    const data = JSON.parse(e.data);
+    const name = data.name || '';
     const cached = toolCache.get(name);
     if (cached) {
-      cached.preview = ev.preview || '';
+      cached.preview = data.preview || '';
       asst.appendChild(toolSection(cached));
       toolCache.delete(name);
     }
-  } else if (ev.type === 'token') {
+  });
+
+  es.addEventListener('token', (e) => {
     if (thinking) { thinking.remove(); thinking = null; }
     let content = asst.querySelector('.content');
     if (!content) {
@@ -432,15 +409,32 @@ function handleEvent(ev, asst, thinking, toolCache) {
       content.className = 'content';
       asst.appendChild(content);
     }
-    content.textContent += ev.content || '';
+    content.textContent += (e.data ? JSON.parse(e.data).content : '') || '';
     const chat = document.getElementById('chat');
     chat.scrollTop = chat.scrollHeight;
-  } else if (ev.type === 'error') {
+  });
+
+  es.addEventListener('error', (e) => {
     if (thinking) { thinking.remove(); thinking = null; }
-    asst.appendChild(errorBlock(ev.message));
-  } else if (ev.type === 'done') {
+    try {
+      const data = JSON.parse(e.data);
+      asst.appendChild(errorBlock(data.message || ''));
+    } catch (_) {}
+  });
+
+  es.addEventListener('done', () => {
     if (thinking) { thinking.remove(); thinking = null; }
-  }
+    es.close();
+    sending = false;
+    document.getElementById('input').focus();
+  });
+
+  es.onerror = () => {
+    if (thinking) { thinking.remove(); thinking = null; }
+    es.close();
+    sending = false;
+    document.getElementById('input').focus();
+  };
 }
 
 function addThinking(asst) {
@@ -493,11 +487,9 @@ function escapeHtml(s) {
 }
 
 function resetSession() {
-  fetch('/reset', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: SESSION }),
-  }).then(() => {
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', '/reset?session_id=' + encodeURIComponent(SESSION), true);
+  xhr.onload = function() {
     const chat = document.getElementById('chat');
     chat.innerHTML = `
       <div class="welcome" id="welcome">
@@ -517,7 +509,8 @@ function resetSession() {
         send();
       });
     });
-  });
+  };
+  xhr.send();
 }
 </script>
 </body>
