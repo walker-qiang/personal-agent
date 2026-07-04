@@ -5,6 +5,8 @@ description = "Project Matrix — 个人智能协作网络，通用 Agent 底座
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
+    "langgraph>=0.6.0",
+    "openai>=1.0.0",
     "uvicorn[standard]>=0.30.0",
 ]
 

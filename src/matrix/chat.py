@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Iterator, Protocol
+
+from langgraph.checkpoint.memory import MemorySaver
 
 from .config import AgentConfig
 from .llm import LLMClient, build_llm_client
+from .orchestration import build_graph
+from .orchestration.state import AgentState
+from .role import INVESTMENT_ANALYST, RoleDefinition
+from .skills import SkillDefinition, load_skills
 from .tools import FinanceToolError, ToolRegistry
 
 
@@ -44,6 +52,9 @@ Answer using only the provided tool results and conversation context. If tool da
 """
 )
 
+# Default skills directory relative to the project root
+_DEFAULT_SKILLS_DIR = Path("skills/investment")
+
 
 class TraceSink(Protocol):
     def record(self, event: dict[str, Any]) -> None:
@@ -69,7 +80,12 @@ class ToolCall:
 
 
 class ChatService:
-    """Planner-Final two-phase chat orchestration engine."""
+    """Planner-Final two-phase chat orchestration engine.
+
+    Supports two modes:
+    - ``mode=planner`` (default): legacy Planner-Final two-phase
+    - ``mode=graph``: LangGraph-based classify → react/plan/skill → summarize
+    """
 
     def __init__(
         self,
@@ -77,6 +93,9 @@ class ChatService:
         tools: ToolRegistry,
         trace: TraceSink | None = None,
         llm: LLMClient | None = None,
+        role: RoleDefinition | None = None,
+        skills: list[SkillDefinition] | None = None,
+        skills_dir: str | Path | None = None,
     ):
         self.config = config
         self.tools = tools
@@ -90,13 +109,25 @@ class ChatService:
             max_tokens=config.agent_max_tokens,
             timeout_sec=config.agent_model_timeout_sec,
         )
+        self.role = role or INVESTMENT_ANALYST
+        self.skills = skills if skills is not None else _load_default_skills(skills_dir)
         self.memory: dict[str, list[dict[str, str]]] = {}
+        self._memory_lock = threading.Lock()
+
+        # Pre-build and compile the LangGraph graph once
+        self._graph = build_graph()
+        self._checkpointer = MemorySaver()
+        self._compiled_graph = self._graph.compile(checkpointer=self._checkpointer)
+
+    # ---- Public API ----
 
     def reset(self, session_id: str) -> None:
         if session_id:
-            self.memory.pop(session_id, None)
+            with self._memory_lock:
+                self.memory.pop(session_id, None)
 
     def stream_chat(self, message: str, session_id: str | None = None) -> Iterator[dict[str, Any]]:
+        """Legacy Planner-Final streaming chat (mode=planner)."""
         started = time.perf_counter()
         sid = session_id or uuid.uuid4().hex
         text = message.strip()
@@ -165,14 +196,108 @@ class ChatService:
             duration_ms = round((time.perf_counter() - started) * 1000)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
+    def stream_chat_graph(self, message: str, session_id: str | None = None) -> Iterator[dict[str, Any]]:
+        """LangGraph-based streaming chat with classify → react/plan/skill → summarize."""
+        started = time.perf_counter()
+        sid = session_id or uuid.uuid4().hex
+        text = message.strip()
+        if not text:
+            yield {"type": "error", "message": "message is required"}
+            yield {"type": "done", "session_id": sid, "duration_ms": 0}
+            return
+
+        if not self.config.llm_available:
+            yield {
+                "type": "error",
+                "message": f"LLM unavailable: {self.config.llm_unavailable_reason}",
+            }
+            yield {"type": "done", "session_id": sid, "duration_ms": 0}
+            return
+
+        # Inject conversation history into user message for context
+        history = self._get_history(sid)
+        full_message = text
+        if history:
+            history_text = "\n".join(
+                f"[{h['role']}]: {h['content']}" for h in history[-4:]
+            )
+            full_message = f"对话历史:\n{history_text}\n\n当前问题: {text}"
+
+        initial_state: AgentState = {
+            "messages": [],
+            "user_message": full_message,
+            "session_id": sid,
+            "intent": "",
+            "skill_name": "",
+            "tool_results": [],
+            "tool_call_count": 0,
+            "current_plan": [],
+            "react_iteration": 0,
+            "findings": [],
+            "final_answer": "",
+            "error": "",
+        }
+
+        try:
+            for event in self._compiled_graph.stream(
+                initial_state,
+                stream_mode="values",
+                config={
+                    "configurable": {
+                        "llm": self.llm,
+                        "tools": self.tools,
+                        "role": self.role,
+                        "skills": self.skills,
+                        "trace": self.trace,
+                    },
+                    "thread_id": sid,
+                },
+            ):
+                if not isinstance(event, dict):
+                    continue
+
+                # Yield tool calls (only the last, since graph streams whole state)
+                tool_results = event.get("tool_results", [])
+                if tool_results:
+                    last = tool_results[-1]
+                    yield {
+                        "type": "tool_call",
+                        "name": last.get("name", ""),
+                        "args": last.get("arguments", {}),
+                    }
+                    yield {
+                        "type": "tool_result",
+                        "name": last.get("name", ""),
+                        "preview": preview_json(
+                            last.get("error", last.get("result", {})),
+                            limit=500,
+                        ),
+                    }
+
+                # Yield error
+                error = event.get("error", "")
+                if error:
+                    yield {"type": "error", "message": error}
+
+                # Yield final answer
+                answer = event.get("final_answer", "")
+                if answer:
+                    yield {"type": "token", "content": answer}
+                    self._remember(sid, text, answer)
+        except Exception as err:
+            yield {"type": "error", "message": f"graph agent error: {err}"}
+        finally:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
+
+    # ---- Internal ----
+
     def _planner_messages(
         self, session_id: str, message: str, tool_results: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
         payload = {
             "available_tools": self.tools.list_tools(),
-            "conversation": self.memory.get(session_id, [])[
-                -self.config.memory_max_turns * 2 :
-            ],
+            "conversation": self._get_history(session_id),
             "question": message,
             "tool_results": compact_tool_results(tool_results),
         }
@@ -182,13 +307,16 @@ class ChatService:
         self, session_id: str, message: str, tool_results: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
         payload = {
-            "conversation": self.memory.get(session_id, [])[
-                -self.config.memory_max_turns * 2 :
-            ],
+            "conversation": self._get_history(session_id),
             "question": message,
             "tool_results": tool_results,
         }
         return [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+    def _get_history(self, session_id: str) -> list[dict[str, str]]:
+        with self._memory_lock:
+            history = self.memory.get(session_id, [])
+            return history[-self.config.memory_max_turns * 2 :]
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
@@ -224,16 +352,26 @@ class ChatService:
             self.trace.record(event)
 
     def _remember(self, session_id: str, question: str, answer: str) -> None:
-        history = self.memory.setdefault(session_id, [])
-        history.extend(
-            [
-                {"role": "user", "content": question},
-                {"role": "assistant", "content": answer},
-            ]
-        )
-        max_items = self.config.memory_max_turns * 2
-        if len(history) > max_items:
-            self.memory[session_id] = history[-max_items:]
+        with self._memory_lock:
+            history = self.memory.setdefault(session_id, [])
+            history.extend(
+                [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": answer},
+                ]
+            )
+            max_items = self.config.memory_max_turns * 2
+            if len(history) > max_items:
+                self.memory[session_id] = history[-max_items:]
+
+
+# ---- Module-level helpers ----
+
+def _load_default_skills(skills_dir: str | Path | None) -> list[SkillDefinition]:
+    path = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
+    if not path.exists():
+        return []
+    return load_skills(path)
 
 
 def parse_tool_calls(text: str, allowed: set[str]) -> list[ToolCall]:

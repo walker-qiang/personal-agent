@@ -249,3 +249,121 @@ class TestChatService:
         events = list(chat_service.stream_chat("test"))
         tool_calls = [e for e in events if e["type"] == "tool_call"]
         assert len(tool_calls) == 1  # cross-round duplicate removed
+
+
+class TestChatServiceGraph:
+    """Tests for stream_chat_graph (LangGraph-based orchestration)."""
+
+    def test_empty_message_returns_error(self, chat_service):
+        events = list(chat_service.stream_chat_graph(""))
+        types = [e["type"] for e in events]
+        assert "error" in types
+        assert "done" in types
+
+    def test_no_llm_returns_error(self, tmp_cache_path):
+        from matrix.tools import ToolRegistry
+        from matrix.tools.finance import register_all
+        config = AgentConfig(
+            root_path=tmp_cache_path.parent,
+            cache_path=tmp_cache_path,
+            trace_path=tmp_cache_path.parent / "trace.jsonl",
+            host="127.0.0.1",
+            port=0,
+        )
+        registry = ToolRegistry()
+        register_all(registry, tmp_cache_path)
+        service = ChatService(config, registry)
+        events = list(service.stream_chat_graph("test"))
+        types = [e["type"] for e in events]
+        assert "error" in types
+
+    def test_returns_done_event(self, chat_service):
+        """Graph mode should return done event at the end."""
+        chat_service.llm = FakeLLM([
+            # classify — keyword matching doesn't match, so LLM classify
+            '{"intent": "react", "skill_name": ""}',
+            # react
+            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
+            # react again
+            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
+        ])
+        events = list(chat_service.stream_chat_graph("当前持仓怎么样？"))
+        types = [e["type"] for e in events]
+        assert "done" in types
+        # Should have tool_call and tool_result events
+        assert "tool_call" in types
+        assert "tool_result" in types
+
+    def test_returns_tool_calls(self, chat_service):
+        chat_service.llm = FakeLLM([
+            '{"intent": "react", "skill_name": ""}',
+            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
+            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
+        ])
+        events = list(chat_service.stream_chat_graph("当前持仓怎么样？"))
+        tool_calls = [e for e in events if e["type"] == "tool_call"]
+        assert len(tool_calls) >= 1
+        assert tool_calls[0]["name"] == "finance.holdings_summary"
+
+    def test_returns_token_events(self, chat_service):
+        chat_service.llm = FakeLLM([
+            '{"intent": "react", "skill_name": ""}',
+            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
+            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
+        ])
+        events = list(chat_service.stream_chat_graph("当前持仓怎么样？"))
+        tokens = [e for e in events if e["type"] == "token"]
+        assert len(tokens) >= 1
+
+    def test_session_memory_persists(self, chat_service):
+        """Conversation memory should persist across graph calls."""
+        chat_service.llm = FakeLLM([
+            # First call
+            '{"intent": "react", "skill_name": ""}',
+            "Thought: 查询\nAction: finance.holdings_summary\nAction Input: {}",
+            "Thought: done\nFinal Answer: 持仓健康。",
+            # Second call
+            '{"intent": "react", "skill_name": ""}',
+            "Thought: 回忆\nAction: finance.holdings_summary\nAction Input: {}",
+            "Thought: done\nFinal Answer: 仍然健康。",
+        ])
+        sid = "mem-test-graph"
+        # First call
+        list(chat_service.stream_chat_graph("当前持仓怎么样？", sid))
+        # Second call
+        events = list(chat_service.stream_chat_graph("还有变化吗？", sid))
+        tokens = [e for e in events if e["type"] == "token"]
+        assert len(tokens) >= 1
+
+    def test_reset_clears_session(self, chat_service):
+        chat_service.llm = FakeLLM([
+            '{"intent": "react", "skill_name": ""}',
+            "Thought: q\nAction: finance.holdings_summary\nAction Input: {}",
+            "Thought: done\nFinal Answer: ok.",
+        ])
+        sid = "reset-test-graph"
+        list(chat_service.stream_chat_graph("test", sid))
+        chat_service.reset(sid)
+        with chat_service._memory_lock:
+            assert sid not in chat_service.memory
+
+    def test_skill_flow_in_graph(self, chat_service):
+        """Graph should route to skill node when keyword matches."""
+        chat_service.llm = FakeLLM([
+            # classify — keyword match should bypass LLM
+            '{"intent": "skill", "skill_name": "test-skill"}',
+        ])
+        from matrix.skills import SkillDefinition
+        chat_service.skills = [
+            SkillDefinition(
+                name="test-skill",
+                title="测试技能",
+                trigger_keywords=["测试"],
+                workflow=[
+                    {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
+                ],
+            ),
+        ]
+        events = list(chat_service.stream_chat_graph("跑测试技能"))
+        tokens = [e for e in events if e["type"] == "token"]
+        assert len(tokens) >= 1
