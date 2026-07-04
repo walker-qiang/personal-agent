@@ -218,8 +218,8 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    # Check for Final Answer
-    final_match = re.search(r"Final Answer:\s*(.+)", response, re.DOTALL)
+    # Check for Final Answer — strict format first
+    final_match = re.search(r"Final Answer:\s*(.+)", response, re.DOTALL | re.IGNORECASE)
     if final_match:
         return {
             "final_answer": final_match.group(1).strip(),
@@ -239,14 +239,17 @@ def react_node(
                 break
 
     if not tool_name:
+        # No tool call found — LLM probably answered directly
+        # If we have tool results from a previous iteration, use them as context
         if iteration > 0 and tool_results:
             return {
                 "final_answer": response.strip()[:2000],
                 "react_iteration": iteration + 1,
             }
+        # First iteration: trust the LLM response as a direct answer
+        # (e.g., simple greetings or questions that don't need tools)
         return {
-            "error": "LLM did not follow ReAct format",
-            "final_answer": "无法确定下一步操作，请尝试更具体地描述问题。",
+            "final_answer": response.strip()[:2000],
             "react_iteration": iteration + 1,
         }
 
