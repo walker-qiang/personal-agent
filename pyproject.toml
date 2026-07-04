@@ -1,0 +1,19 @@
+[project]
+name = "matrix"
+version = "0.1.0"
+description = "Project Matrix — 个人智能协作网络，通用 Agent 底座"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.scripts]
+matrix = "matrix.__main__:main"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
