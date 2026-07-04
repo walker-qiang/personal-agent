@@ -43,7 +43,7 @@ Action Input: [valid JSON arguments for the tool]
 
 When you have enough information to answer the user:
 Thought: I have enough information to answer
-Final Answer: [your answer to the user]
+Final Answer: [your answer to the user, using Markdown for formatting — use **bold** for key numbers, tables for comparisons, and bullet lists for breakdowns]
 
 Strict rules:
 - ONE action per turn, never return multiple actions
@@ -52,6 +52,7 @@ Strict rules:
 - Never fabricate data; if tool data is missing, say so
 - Keep answers concise; money is CNY unless stated otherwise
 - Reply in the same language as the user
+- Use Markdown formatting: **bold** for key figures, `code` for asset codes, tables for data, bullet lists for breakdowns
 """
 
 PLAN_SYSTEM = """You are an investment analyst agent operating in Plan-Execute mode.
@@ -72,9 +73,10 @@ Context:
 
 Rules:
 - Use only the provided data, never fabricate
-- Money is CNY unless stated otherwise
-- Keep answers concise
+- Money is CNY unless stated otherwise, format large numbers with commas
+- Keep answers concise and well-structured
 - Reply in the same language as the user
+- Use Markdown formatting: **bold** for key figures and conclusions, tables for numerical comparisons, bullet lists for breakdowns, `code` for asset codes
 """
 
 # ---- Limits ----

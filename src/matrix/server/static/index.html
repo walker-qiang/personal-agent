@@ -19,6 +19,8 @@
     --tool-call: #1e293b;
     --tool-result: #0f172a;
     --radius: 8px;
+    --code-bg: #1e293b;
+    --table-stripe: #1e2233;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -63,26 +65,10 @@
     font-size: 13px;
     transition: all 0.15s;
   }
-  .mode-selector button.active {
-    background: var(--accent);
-    color: #fff;
-  }
-  .mode-selector button:hover:not(.active) {
-    color: var(--text);
-  }
-  .status {
-    font-size: 12px;
-    color: var(--text-secondary);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .status .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--success);
-  }
+  .mode-selector button.active { background: var(--accent); color: #fff; }
+  .mode-selector button:hover:not(.active) { color: var(--text); }
+  .status { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
   main {
     flex: 1;
     overflow-y: auto;
@@ -91,156 +77,138 @@
     flex-direction: column;
     gap: 16px;
   }
-  .welcome {
-    text-align: center;
-    margin-top: 80px;
-  }
-  .welcome h2 {
-    font-size: 24px;
-    margin-bottom: 8px;
-    background: linear-gradient(135deg, var(--accent), #a78bfa);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .welcome p {
-    color: var(--text-secondary);
-    font-size: 14px;
-    line-height: 1.6;
-  }
-  .welcome .hints {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: center;
-    margin-top: 20px;
-  }
-  .hint {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 8px 14px;
-    font-size: 13px;
-    cursor: pointer;
-    color: var(--text-secondary);
-    transition: all 0.15s;
-  }
-  .hint:hover {
-    border-color: var(--accent);
-    color: var(--text);
-  }
-  .message {
-    max-width: 800px;
-    width: 100%;
-    margin: 0 auto;
-  }
-  .message.user {
-    align-self: flex-end;
-    text-align: right;
-  }
-  .message.user .bubble {
-    background: var(--accent);
-    padding: 10px 16px;
-    border-radius: var(--radius);
-    display: inline-block;
-    max-width: 85%;
-    text-align: left;
-    font-size: 14px;
-  }
-  .message.assistant {
-    align-self: flex-start;
-  }
+  .welcome { text-align: center; margin-top: 80px; }
+  .welcome h2 { font-size: 24px; margin-bottom: 8px; background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .welcome p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+  .welcome .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
+  .hint { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 14px; font-size: 13px; cursor: pointer; color: var(--text-secondary); transition: all 0.15s; }
+  .hint:hover { border-color: var(--accent); color: var(--text); }
+  .message { max-width: 860px; width: 100%; margin: 0 auto; }
+  .message.user { align-self: flex-end; text-align: right; }
+  .message.user .bubble { background: var(--accent); padding: 10px 16px; border-radius: var(--radius); display: inline-block; max-width: 85%; text-align: left; font-size: 14px; }
+  .message.assistant { align-self: flex-start; }
   .message.assistant .bubble {
     background: var(--surface);
     border: 1px solid var(--border);
-    padding: 16px;
+    padding: 18px 20px;
     border-radius: var(--radius);
     font-size: 14px;
-    line-height: 1.7;
-    max-width: 85%;
+    line-height: 1.8;
+    max-width: 100%;
     overflow-x: auto;
   }
-  .message.assistant .bubble table {
-    border-collapse: collapse;
-    width: 100%;
+  /* Markdown content styles */
+  .content h1, .content h2, .content h3 { margin: 16px 0 8px; font-weight: 600; }
+  .content h1 { font-size: 1.3em; }
+  .content h2 { font-size: 1.15em; }
+  .content h3 { font-size: 1.05em; }
+  .content p { margin: 6px 0; }
+  .content ul, .content ol { margin: 6px 0; padding-left: 20px; }
+  .content li { margin: 3px 0; }
+  .content strong { color: #fff; font-weight: 600; }
+  .content em { color: #c4b5fd; }
+  .content code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.9em;
+    color: #a78bfa;
+  }
+  .content pre {
+    background: var(--code-bg);
+    padding: 14px;
+    border-radius: var(--radius);
+    overflow-x: auto;
     margin: 8px 0;
     font-size: 13px;
-  }
-  .message.assistant .bubble th,
-  .message.assistant .bubble td {
+    line-height: 1.5;
     border: 1px solid var(--border);
-    padding: 6px 10px;
+  }
+  .content pre code { padding: 0; background: none; color: var(--text-secondary); }
+  .content blockquote {
+    border-left: 3px solid var(--accent);
+    padding: 6px 14px;
+    margin: 8px 0;
+    color: var(--text-secondary);
+    background: rgba(99,102,241,0.05);
+    border-radius: 0 4px 4px 0;
+  }
+  .content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0;
+    font-size: 13px;
+  }
+  .content th, .content td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
     text-align: left;
   }
-  .message.assistant .bubble th {
-    background: var(--bg);
-    font-weight: 600;
-  }
+  .content th { background: var(--code-bg); font-weight: 600; color: var(--text); }
+  .content tr:nth-child(even) td { background: var(--table-stripe); }
+  .content hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .content a { color: var(--accent-hover); }
+  /* Tool section */
   .tool-section {
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    margin: 8px 0;
+    margin: 6px 0;
     overflow: hidden;
   }
   .tool-header {
     background: var(--tool-call);
-    padding: 8px 12px;
+    padding: 7px 12px;
     font-size: 12px;
     color: var(--text-secondary);
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 8px;
+    user-select: none;
   }
-  .tool-header .icon {
-    font-size: 14px;
-  }
-  .tool-header .name {
-    font-family: monospace;
-    color: var(--warning);
-  }
+  .tool-header .name { font-family: monospace; color: var(--warning); }
+  .tool-header .arrow { margin-left: auto; transition: transform 0.15s; }
+  .tool-section.open .tool-header .arrow { transform: rotate(180deg); }
   .tool-body {
     background: var(--tool-result);
-    padding: 10px 12px;
+    padding: 0;
     font-size: 12px;
-    font-family: monospace;
-    max-height: 200px;
-    overflow-y: auto;
-    display: none;
-    white-space: pre-wrap;
-    color: var(--text-secondary);
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s ease-out, padding 0.2s;
   }
   .tool-section.open .tool-body {
-    display: block;
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 10px 12px;
   }
-  .tool-section .tool-header .arrow {
-    margin-left: auto;
-    transition: transform 0.15s;
+  .tool-body pre {
+    margin: 0;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
   }
-  .tool-section.open .tool-header .arrow {
-    transform: rotate(180deg);
-  }
+  .tool-body table { width: 100%; border-collapse: collapse; margin: 0; }
+  .tool-body th, .tool-body td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; font-size: 12px; }
+  .tool-body th { background: var(--code-bg); color: var(--text); }
+  .tool-body .stat { color: var(--warning); font-weight: 600; }
   .thinking {
     font-size: 13px;
     color: var(--text-secondary);
-    padding: 8px 0;
+    padding: 10px 0;
     animation: pulse 1.5s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%, 100% { opacity: 0.5; }
-    50% { opacity: 1; }
-  }
+  @keyframes pulse { 0%,100%{opacity:0.5;} 50%{opacity:1;} }
   footer {
     background: var(--surface);
     border-top: 1px solid var(--border);
     padding: 12px 20px;
     flex-shrink: 0;
   }
-  .input-row {
-    display: flex;
-    gap: 10px;
-    max-width: 800px;
-    margin: 0 auto;
-  }
+  .input-row { display: flex; gap: 10px; max-width: 860px; margin: 0 auto; }
   .input-row input {
     flex: 1;
     background: var(--bg);
@@ -252,12 +220,8 @@
     outline: none;
     transition: border-color 0.15s;
   }
-  .input-row input:focus {
-    border-color: var(--accent);
-  }
-  .input-row input::placeholder {
-    color: var(--text-secondary);
-  }
+  .input-row input:focus { border-color: var(--accent); }
+  .input-row input::placeholder { color: var(--text-secondary); }
   .input-row button {
     background: var(--accent);
     border: none;
@@ -269,33 +233,12 @@
     transition: background 0.15s;
     white-space: nowrap;
   }
-  .input-row button:hover {
-    background: var(--accent-hover);
-  }
-  .input-row button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .reset-btn {
-    background: transparent !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text-secondary) !important;
-    font-size: 12px !important;
-    padding: 10px 12px !important;
-  }
-  .reset-btn:hover {
-    border-color: var(--error) !important;
-    color: var(--error) !important;
-  }
-  .error-block {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid var(--error);
-    border-radius: var(--radius);
-    padding: 10px 14px;
-    font-size: 13px;
-    color: var(--error);
-    margin: 8px 0;
-  }
+  .input-row button:hover { background: var(--accent-hover); }
+  .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .reset-btn { background: transparent!important; border: 1px solid var(--border)!important; color: var(--text-secondary)!important; font-size: 12px!important; padding: 10px 12px!important; }
+  .reset-btn:hover { border-color: var(--error)!important; color: var(--error)!important; }
+  .error-block { background: rgba(239,68,68,0.1); border: 1px solid var(--error); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; color: var(--error); margin: 8px 0; }
+  .duration { font-size: 11px; color: var(--text-secondary); margin-top: 6px; opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -349,12 +292,168 @@ document.querySelectorAll('.hint').forEach(hint => {
 });
 
 document.getElementById('input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    send();
-  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
+// ---- Markdown renderer ----
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = text;
+  // Code blocks (fenced)
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Blockquote
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // Horizontal rule
+  html = html.replace(/^---$/gm, '<hr>');
+  // Unordered list items
+  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+  // Ordered list items
+  html = html.replace(/^(\d+)\. (.+)$/gm, '<li>$1. $2</li>');
+  // Wrap consecutive <li> in <ul> or <ol>
+  html = html.replace(/((?:<li>.*?<\/li>\n?)+)/g, (match) => {
+    if (match.match(/<li>\d+\./)) return '<ol>' + match + '</ol>';
+    return '<ul>' + match + '</ul>';
+  });
+  // Tables
+  html = html.replace(/^\|(.+)\|\s*\n\|[-:| ]+\|\s*\n((?:\|.+\|\s*\n?)*)/gm, (_, header, rows) => {
+    const hcells = header.split('|').map(c => c.trim()).filter(c => c);
+    let tbl = '<table><thead><tr>';
+    hcells.forEach(c => { tbl += '<th>' + c + '</th>'; });
+    tbl += '</tr></thead><tbody>';
+    rows.trim().split('\n').forEach(row => {
+      const cells = row.split('|').map(c => c.trim()).filter(c => c);
+      tbl += '<tr>';
+      cells.forEach(c => { tbl += '<td>' + c + '</td>'; });
+      tbl += '</tr>';
+    });
+    tbl += '</tbody></table>';
+    return tbl;
+  });
+  // Paragraphs (double newline)
+  html = html.replace(/\n\n/g, '</p><p>');
+  html = '<p>' + html + '</p>';
+  // Clean up empty paragraphs
+  html = html.replace(/<p><\/p>/g, '');
+  html = html.replace(/<p>(\s*<[^>]+>.*?<\/[^>]+>\s*)<\/p>/g, '$1');
+  return html;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---- Format tool result as readable HTML ----
+function formatToolResult(data) {
+  let obj;
+  try {
+    obj = typeof data === 'string' ? JSON.parse(data) : data;
+  } catch (_) {
+    return '<pre>' + escapeHtml(String(data)) + '</pre>';
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return '<pre>[]</pre>';
+    // Array of objects → table
+    if (typeof obj[0] === 'object' && obj[0] !== null) {
+      const keys = Object.keys(obj[0]);
+      let tbl = '<table><thead><tr>';
+      keys.forEach(k => { tbl += '<th>' + escapeHtml(k) + '</th>'; });
+      tbl += '</tr></thead><tbody>';
+      obj.forEach(row => {
+        tbl += '<tr>';
+        keys.forEach(k => {
+          let val = row[k];
+          if (val === null || val === undefined) val = '-';
+          else if (typeof val === 'number') {
+            val = Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2);
+            val = '<span class="stat">' + val + '</span>';
+          }
+          tbl += '<td>' + (typeof val === 'string' ? escapeHtml(val) : val) + '</td>';
+        });
+        tbl += '</tr>';
+      });
+      tbl += '</tbody></table>';
+      return tbl;
+    }
+    return '<pre>' + escapeHtml(JSON.stringify(obj, null, 2)) + '</pre>';
+  }
+  if (typeof obj === 'object' && obj !== null) {
+    return formatToolResultObject(obj);
+  }
+  return '<pre>' + escapeHtml(JSON.stringify(obj, null, 2)) + '</pre>';
+}
+
+function formatToolResultObject(obj) {
+  // Special handling for holdings_summary
+  if (obj.buckets && obj.holdings) {
+    let html = '';
+
+    // Bucket overview
+    if (obj.buckets.length > 0) {
+      html += '<h4 style="margin:8px 0 4px;color:#a78bfa;">分桶概览</h4>';
+      html += '<table><thead><tr><th>分桶</th><th>数量</th><th>金额</th><th>币种</th></tr></thead><tbody>';
+      obj.buckets.forEach(b => {
+        html += '<tr><td>' + escapeHtml(b.name || '') + '</td>';
+        html += '<td class="stat">' + (b.count || 0) + '</td>';
+        html += '<td class="stat">' + formatMoney(b.total) + '</td>';
+        html += '<td>' + escapeHtml(b.currency || '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // Holdings detail
+    if (obj.holdings.length > 0) {
+      html += '<h4 style="margin:8px 0 4px;color:#a78bfa;">持仓明细</h4>';
+      const cols = ['code', 'name', 'bucket', 'type', 'balance', 'currency'];
+      html += '<table><thead><tr>';
+      cols.forEach(c => { html += '<th>' + c + '</th>'; });
+      html += '</tr></thead><tbody>';
+      obj.holdings.forEach(h => {
+        html += '<tr>';
+        cols.forEach(c => {
+          let val = h[c];
+          if (c === 'balance') val = formatMoney(val);
+          html += '<td>' + (val != null ? escapeHtml(String(val)) : '-') + '</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    return html;
+  }
+
+  // Generic object → key-value table
+  const keys = Object.keys(obj);
+  if (keys.length === 0) return '<pre>{}</pre>';
+  let html = '<table><tbody>';
+  keys.forEach(k => {
+    let val = obj[k];
+    if (typeof val === 'number') val = '<span class="stat">' + formatMoney(val) + '</span>';
+    else if (val && typeof val === 'object') val = '<pre style="margin:0;font-size:11px;">' + escapeHtml(JSON.stringify(val, null, 2)) + '</pre>';
+    else val = escapeHtml(String(val));
+    html += '<tr><td style="color:var(--text-secondary);width:140px;">' + escapeHtml(k) + '</td><td>' + val + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function formatMoney(v) {
+  if (typeof v !== 'number') return escapeHtml(String(v));
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ---- Send message ----
 function send() {
   if (sending) return;
   const input = document.getElementById('input');
@@ -409,8 +508,8 @@ function send() {
       content.className = 'content';
       asst.appendChild(content);
     }
-    content.textContent += (e.data ? JSON.parse(e.data).content : '') || '';
-    const chat = document.getElementById('chat');
+    const raw = (e.data ? JSON.parse(e.data).content : '') || '';
+    content.innerHTML = renderMarkdown(raw);
     chat.scrollTop = chat.scrollHeight;
   });
 
@@ -422,8 +521,18 @@ function send() {
     } catch (_) {}
   });
 
-  es.addEventListener('done', () => {
+  es.addEventListener('done', (e) => {
     if (thinking) { thinking.remove(); thinking = null; }
+    try {
+      const data = JSON.parse(e.data);
+      const dur = data.duration_ms ? (data.duration_ms / 1000).toFixed(1) + 's' : '';
+      if (dur) {
+        const durEl = document.createElement('div');
+        durEl.className = 'duration';
+        durEl.textContent = '耗时 ' + dur;
+        asst.appendChild(durEl);
+      }
+    } catch (_) {}
     es.close();
     sending = false;
     document.getElementById('input').focus();
@@ -448,7 +557,7 @@ function addThinking(asst) {
 function userBubble(msg) {
   const div = document.createElement('div');
   div.className = 'message user';
-  div.innerHTML = `<div class="bubble">${escapeHtml(msg)}</div>`;
+  div.innerHTML = '<div class="bubble">' + escapeHtml(msg) + '</div>';
   return div;
 }
 
@@ -462,14 +571,7 @@ function assistantBubble() {
 function toolSection(tool) {
   const div = document.createElement('div');
   div.className = 'tool-section';
-  div.innerHTML = `
-    <div class="tool-header" onclick="this.parentElement.classList.toggle('open')">
-      <span class="icon">&#9881;</span>
-      <span class="name">${escapeHtml(tool.name)}</span>
-      <span class="arrow">&#9660;</span>
-    </div>
-    <div class="tool-body">${escapeHtml(tool.preview)}</div>
-  `;
+  div.innerHTML = '<div class="tool-header" onclick="this.parentElement.classList.toggle(\'open\')"><span>&#9881;</span><span class="name">' + escapeHtml(tool.name) + '</span><span class="arrow">&#9660;</span></div><div class="tool-body">' + formatToolResult(tool.preview) + '</div>';
   return div;
 }
 
@@ -480,32 +582,14 @@ function errorBlock(msg) {
   return div;
 }
 
-function escapeHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
-
 function resetSession() {
-  const xhr = new XMLHttpRequest();
+  var xhr = new XMLHttpRequest();
   xhr.open('GET', '/reset?session_id=' + encodeURIComponent(SESSION), true);
   xhr.onload = function() {
-    const chat = document.getElementById('chat');
-    chat.innerHTML = `
-      <div class="welcome" id="welcome">
-        <h2>Project Matrix</h2>
-        <p>个人智能协作网络 · 投资分析员</p>
-        <div class="hints">
-          <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
-          <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
-          <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
-          <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
-          <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
-        </div>
-      </div>`;
-    document.querySelectorAll('.hint').forEach(hint => {
-      hint.addEventListener('click', () => {
-        document.getElementById('input').value = hint.dataset.msg;
+    document.getElementById('chat').innerHTML = '<div class="welcome" id="welcome"><h2>Project Matrix</h2><p>个人智能协作网络 · 投资分析员</p><div class="hints"><span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span><span class="hint" data-msg="做一次组合复盘">组合复盘</span><span class="hint" data-msg="检查配置偏离度">配置偏离检查</span><span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span><span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span></div></div>';
+    document.querySelectorAll('.hint').forEach(function(h) {
+      h.addEventListener('click', function() {
+        document.getElementById('input').value = h.dataset.msg;
         send();
       });
     });
