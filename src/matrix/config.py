@@ -54,7 +54,7 @@ class AgentConfig:
     port: int
     agent_provider: str = "deepseek"
     agent_model: str = DEFAULT_DEEPSEEK_MODEL
-    agent_max_tokens: int = 4096
+    agent_max_tokens: int = 8192
     agent_model_timeout_sec: float = 45.0
     deepseek_api_key: str = ""
     anthropic_api_key: str = ""
@@ -115,7 +115,7 @@ def load_config() -> AgentConfig:
         port=port,
         agent_provider=provider,
         agent_model=model,
-        agent_max_tokens=clamp_int_env(ENV_AGENT_MAX_TOKENS, 4096, 128, 8000),
+        agent_max_tokens=clamp_int_env(ENV_AGENT_MAX_TOKENS, 8192, 128, 8192),
         agent_model_timeout_sec=clamp_float_env(ENV_AGENT_MODEL_TIMEOUT_SEC, 45.0, 5.0, 180.0),
         deepseek_api_key=os.environ.get(ENV_DEEPSEEK_API_KEY, "").strip(),
         anthropic_api_key=os.environ.get(ENV_ANTHROPIC_API_KEY, "").strip(),

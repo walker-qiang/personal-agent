@@ -13,7 +13,7 @@ class AnthropicClient:
         self,
         api_key: str,
         model: str = "claude-3-5-sonnet-latest",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         timeout_sec: float = 45.0,
     ):
         self.api_key = api_key
