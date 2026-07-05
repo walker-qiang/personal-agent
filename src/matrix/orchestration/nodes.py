@@ -290,22 +290,14 @@ def react_node(
 
     started = time.perf_counter()
 
-    # Deduplication: if same tool + same args was already called, reuse result
+    # Deduplication: if same tool + same args was already called, skip silently
     args_key = json.dumps(arguments, sort_keys=True)
     for prev in tool_results:
         if prev.get("name") == tool_name and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key:
-            # Reuse previous result, but add a note
-            tool_results.append({
-                "name": tool_name,
-                "arguments": arguments,
-                "result": prev.get("result", prev.get("error", {})),
-                "elapsed_ms": 0,
-                "duplicate": True,
-            })
+            # Return empty update — no new tool_result, no SSE event
             return {
-                "tool_results": tool_results,
+                "tool_call_count": state.get("tool_call_count", 0),
                 "react_iteration": iteration + 1,
-                "tool_call_count": state.get("tool_call_count", 0) + 1,
             }
 
     try:

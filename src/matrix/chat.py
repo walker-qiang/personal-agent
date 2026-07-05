@@ -239,6 +239,7 @@ class ChatService:
         }
 
         try:
+            emitted_tool_count = 0
             for event in self._compiled_graph.stream(
                 initial_state,
                 stream_mode="values",
@@ -256,23 +257,28 @@ class ChatService:
                 if not isinstance(event, dict):
                     continue
 
-                # Yield tool calls (only the last, since graph streams whole state)
+                # Yield only NEW tool calls (skip duplicates)
                 tool_results = event.get("tool_results", [])
-                if tool_results:
-                    last = tool_results[-1]
-                    yield {
-                        "type": "tool_call",
-                        "name": last.get("name", ""),
-                        "args": last.get("arguments", {}),
-                    }
-                    yield {
-                        "type": "tool_result",
-                        "name": last.get("name", ""),
-                        "preview": preview_json(
-                            last.get("error", last.get("result", {})),
-                            limit=500,
-                        ),
-                    }
+                new_count = len(tool_results)
+                if new_count > emitted_tool_count:
+                    for i in range(emitted_tool_count, new_count):
+                        tr = tool_results[i]
+                        if tr.get("duplicate"):
+                            continue
+                        yield {
+                            "type": "tool_call",
+                            "name": tr.get("name", ""),
+                            "args": tr.get("arguments", {}),
+                        }
+                        yield {
+                            "type": "tool_result",
+                            "name": tr.get("name", ""),
+                            "preview": preview_json(
+                                tr.get("error", tr.get("result", {})),
+                                limit=500,
+                            ),
+                        }
+                    emitted_tool_count = new_count
 
                 # Yield error
                 error = event.get("error", "")
