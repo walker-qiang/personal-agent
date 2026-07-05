@@ -75,8 +75,9 @@ async def list_skills(request: Request):
 
 @router.post("/skills")
 async def create_skill(request: Request):
-    """Create a new skill (writes to Markdown file)."""
+    """Create a new skill (writes to Markdown file with YAML frontmatter)."""
     from ...chat import ChatService
+    from ...skills import SkillDefinition, render_skill
 
     chat: ChatService = request.app.state.chat
     payload = await request.json()
@@ -90,7 +91,6 @@ async def create_skill(request: Request):
     if not name or not title:
         return {"error": "name and title are required"}, 400
 
-    # Sanitize filename
     safe_name = "".join(c for c in name if c.isalnum() or c in "_-").lower()
     if not safe_name:
         return {"error": "invalid name"}, 400
@@ -99,19 +99,23 @@ async def create_skill(request: Request):
     if md_path.exists():
         return {"error": "skill already exists"}, 409
 
-    kw_lines = "\n".join(f"- `{kw}`" for kw in keywords if kw)
-    workflow = str(payload.get("workflow", "")).strip()
-    output_format = str(payload.get("output_format", "")).strip()
-    content = f"# {title}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n{workflow}\n\n## 输出格式\n{output_format}\n"
-    md_path.write_text(content, encoding="utf-8")
+    skill = SkillDefinition(
+        name=safe_name,
+        title=title,
+        description=description,
+        trigger_keywords=keywords,
+        output_format=str(payload.get("output_format", "")).strip(),
+    )
+    md_path.write_text(render_skill(skill), encoding="utf-8")
     chat.reload_skills()
     return {"ok": True, "name": safe_name}
 
 
 @router.put("/skills/{skill_name}")
 async def update_skill(request: Request, skill_name: str):
-    """Update a skill's Markdown file."""
+    """Update a skill's Markdown file with YAML frontmatter."""
     from ...chat import ChatService
+    from ...skills import SkillDefinition, render_skill
 
     chat: ChatService = request.app.state.chat
     payload = await request.json()
@@ -125,11 +129,14 @@ async def update_skill(request: Request, skill_name: str):
     if not md_path.exists():
         return {"error": "skill not found"}, 404
 
-    kw_lines = "\n".join(f"- `{kw}`" for kw in keywords if kw)
-    workflow = str(payload.get("workflow", "")).strip()
-    output_format = str(payload.get("output_format", "")).strip()
-    content = f"# {title or skill_name}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n{workflow}\n\n## 输出格式\n{output_format}\n"
-    md_path.write_text(content, encoding="utf-8")
+    skill = SkillDefinition(
+        name=skill_name,
+        title=title or skill_name,
+        description=description,
+        trigger_keywords=keywords,
+        output_format=str(payload.get("output_format", "")).strip(),
+    )
+    md_path.write_text(render_skill(skill), encoding="utf-8")
     chat.reload_skills()
     return {"ok": True}
 

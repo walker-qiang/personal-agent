@@ -1,4 +1,4 @@
-"""Skill loader: parse Markdown skill definitions."""
+"""Skill loader: parse Markdown skill definitions with YAML frontmatter."""
 
 from __future__ import annotations
 
@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 @dataclass
 class SkillDefinition:
-    """Parsed skill definition from a Markdown file."""
+    """Parsed skill definition from a Markdown file with YAML frontmatter."""
 
     name: str
     title: str
@@ -21,20 +23,19 @@ class SkillDefinition:
 
     @classmethod
     def from_markdown(cls, path: Path) -> "SkillDefinition":
-        """Parse a skill definition from a Markdown file."""
+        """Parse a skill definition from a Markdown file with YAML frontmatter."""
         content = path.read_text(encoding="utf-8")
         name = path.stem
 
-        title = _extract_section(content, r"#\s+(.+)", "", re.MULTILINE)
-        description = _extract_section(content, r"##\s+简介\s*\n(.+?)(?=\n##|\Z)", "")
-        trigger_text = _extract_section(content, r"##\s+触发条件\s*\n(.+?)(?=\n##|\Z)", "")
-        trigger_keywords = [
-            kw.strip().strip("`")
-            for kw in re.findall(r"[-*]\s*`?([^`\n]+)`?", trigger_text)
-            if kw.strip()
-        ]
-        workflow = _parse_workflow(content)
-        output_format = _extract_section(content, r"##\s+输出格式\s*\n(.+?)(?=\n##|\Z)", "")
+        frontmatter, body = _split_frontmatter(content)
+        title = frontmatter.get("title", name)
+        description = frontmatter.get("description", "")
+        trigger_keywords = frontmatter.get("trigger_keywords", [])
+        if not isinstance(trigger_keywords, list):
+            trigger_keywords = []
+
+        workflow = _parse_workflow(body)
+        output_format = _extract_section(body, r"##\s+输出格式\s*\n(.+)", "", re.DOTALL)
 
         return cls(
             name=name,
@@ -64,6 +65,30 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
     return skills
 
 
+def render_skill(skill: SkillDefinition) -> str:
+    """Serialize a skill back to Markdown with YAML frontmatter."""
+    lines = [
+        "---",
+        f"name: {skill.name}",
+        f"title: {skill.title}",
+        f"description: {skill.description}",
+        "trigger_keywords:",
+    ]
+    for kw in skill.trigger_keywords:
+        lines.append(f"  - {kw}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {skill.title}")
+    lines.append("")
+    lines.append("## 工作流")
+    lines.append(render_workflow(skill.workflow) or "")
+    lines.append("")
+    lines.append("## 输出格式")
+    lines.append(skill.output_format)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_workflow(workflow: list[dict[str, Any]]) -> str:
     """Serialize parsed workflow steps back to markdown text."""
     lines = []
@@ -83,6 +108,22 @@ def render_workflow(workflow: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# ---- Internal helpers ----
+
+def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Split YAML frontmatter from markdown body."""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return {}, text
+    return fm, parts[2]
+
+
 def _extract_section(text: str, pattern: str, default: str, flags: int = re.DOTALL) -> str:
     match = re.search(pattern, text, flags)
     if match:
@@ -97,19 +138,16 @@ def _parse_workflow(text: str) -> list[dict[str, Any]]:
         return []
 
     steps = []
-    # Match numbered steps like "1. tool_name(args)" or "1. 描述"
     step_pattern = r"(\d+)\.\s*(.+?)(?=\n\d+\.|\Z)"
     for match in re.finditer(step_pattern, workflow_text, re.DOTALL):
         step_num = int(match.group(1))
         step_text = match.group(2).strip()
 
-        # Try to parse tool call: "tool_name(parameters)"
         tool_match = re.match(r"(\w[\w.]*)\s*\((.*)\)", step_text)
         if tool_match:
             tool_name = tool_match.group(1)
             args_str = tool_match.group(2).strip()
             try:
-                # Simple key=value parsing
                 args = _parse_args(args_str)
             except Exception:
                 args = {}
