@@ -17,7 +17,7 @@ def build_llm_client(
     anthropic_api_key: str = "",
     model: str = "",
     deepseek_base_url: str = "https://api.deepseek.com",
-    max_tokens: int = 1200,
+    max_tokens: int = 4096,
     timeout_sec: float = 45.0,
 ) -> LLMClient:
     """Build an LLM client from configuration."""

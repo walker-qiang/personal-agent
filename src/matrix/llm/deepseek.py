@@ -14,7 +14,7 @@ class DeepSeekClient:
         api_key: str,
         model: str = "deepseek-chat",
         base_url: str = "https://api.deepseek.com",
-        max_tokens: int = 1200,
+        max_tokens: int = 4096,
         timeout_sec: float = 45.0,
     ):
         self.api_key = api_key

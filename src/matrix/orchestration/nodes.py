@@ -259,13 +259,13 @@ def react_node(
         # If we have tool results from a previous iteration, use them as context
         if iteration > 0 and tool_results:
             return {
-                "final_answer": response.strip()[:2000],
+                "final_answer": response.strip(),
                 "react_iteration": iteration + 1,
             }
         # First iteration: trust the LLM response as a direct answer
         # (e.g., simple greetings or questions that don't need tools)
         return {
-            "final_answer": response.strip()[:2000],
+            "final_answer": response.strip(),
             "react_iteration": iteration + 1,
         }
 
