@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import time
 from urllib.parse import unquote_plus
 
 from fastapi import APIRouter, Query, Request
@@ -27,7 +27,6 @@ async def chat(request: Request):
         message = str(payload.get("message", "")).strip()
         raw_session_id = payload.get("session_id")
         session_id = str(raw_session_id).strip() if raw_session_id else None
-        mode = str(payload.get("mode", "")).strip().lower()
     except (FinanceToolError, json.JSONDecodeError) as err:
         _trace_error(request, str(err))
         return JSONResponse(
@@ -35,11 +34,7 @@ async def chat(request: Request):
         )
 
     def iter_events():
-        if mode == "graph":
-            stream = chat_service.stream_chat_graph(message, session_id)
-        else:
-            stream = chat_service.stream_chat(message, session_id)
-        for event in stream:
+        for event in chat_service.stream_chat(message, session_id):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)
@@ -52,22 +47,16 @@ async def chat_stream(
     request: Request,
     message: str = Query(..., description="User message"),
     session_id: str = Query(default="", description="Session ID"),
-    mode: str = Query(default="graph", description="Mode: graph or planner"),
 ):
     """SSE streaming via EventSource (GET). Compatible with all browsers."""
     chat_service: ChatService = request.app.state.chat
     message = unquote_plus(message).strip()
     session_id = session_id.strip() or None
-    mode = mode.strip().lower()
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
 
     def iter_events():
-        if mode == "graph":
-            stream = chat_service.stream_chat_graph(message, session_id)
-        else:
-            stream = chat_service.stream_chat(message, session_id)
-        for event in stream:
+        for event in chat_service.stream_chat(message, session_id):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)
@@ -105,13 +94,11 @@ async def reset_post(request: Request):
 
 def _trace_error(request: Request, error: str) -> None:
     trace = request.app.state.trace
-    from ...chat import timestamp
-
     trace.record(
         {
             "ok": False,
             "error": error,
             "path": request.url.path,
-            "ts": timestamp(),
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     )

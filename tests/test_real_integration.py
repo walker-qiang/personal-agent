@@ -385,18 +385,18 @@ class TestSkillReal:
 # ---- Chat Service Graph Mode ----
 
 class TestChatServiceGraphReal:
-    def test_stream_chat_graph(self, real_llm, real_tools):
-        """ChatService stream_chat_graph with real LLM."""
+    def test_stream_chat(self, real_llm, real_tools):
+        """ChatService stream_chat with real LLM."""
         config = load_config()
         service = ChatService(config, real_tools, llm=real_llm)
 
-        events = list(service.stream_chat_graph("当前持仓怎么样？"))
+        events = list(service.stream_chat("当前持仓怎么样？"))
         types = [e["type"] for e in events]
         tokens = [e for e in events if e["type"] == "token"]
         tool_calls = [e for e in events if e["type"] == "tool_call"]
         errors = [e for e in events if e["type"] == "error"]
 
-        print(f"\n  [chat service graph] events: {len(events)}")
+        print(f"\n  [chat service] events: {len(events)}")
         print(f"  types: {types}")
         if tokens:
             print(f"  answer: {tokens[-1]['content'][:300]}")
@@ -414,12 +414,12 @@ class TestChatServiceGraphReal:
         sid = "real-memory-test"
 
         # Turn 1
-        events1 = list(service.stream_chat_graph("当前持仓有哪些？", sid))
+        events1 = list(service.stream_chat("当前持仓有哪些？", sid))
         tokens1 = [e for e in events1 if e["type"] == "token"]
         print(f"\n  [memory turn 1] answer: {tokens1[-1]['content'][:200] if tokens1 else 'N/A'}")
 
         # Turn 2 — should remember context
-        events2 = list(service.stream_chat_graph("刚才提到的那个分桶占比最高？", sid))
+        events2 = list(service.stream_chat("刚才提到的那个分桶占比最高？", sid))
         tokens2 = [e for e in events2 if e["type"] == "token"]
         print(f"  [memory turn 2] answer: {tokens2[-1]['content'][:200] if tokens2 else 'N/A'}")
 

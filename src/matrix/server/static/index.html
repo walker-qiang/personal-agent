@@ -45,31 +45,6 @@
     -webkit-user-select: none;
     user-select: none;
   }
-  /* Segmented control */
-  .segmented {
-    display: flex;
-    background: #e5e5ea;
-    border-radius: 9px;
-    padding: 2px;
-  }
-  .segmented button {
-    flex: 1;
-    background: none;
-    border: none;
-    color: #3a3a3c;
-    padding: 6px 0;
-    border-radius: 7px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 500;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-  .segmented button.active {
-    background: #fff;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
-    color: #000;
-  }
   /* New session button */
   .new-session-btn {
     display: flex;
@@ -179,26 +154,6 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
   }
-  .mode-selector {
-    display: flex;
-    gap: 4px;
-    background: var(--bg);
-    border-radius: 6px;
-    padding: 2px;
-    margin-left: auto;
-  }
-  .mode-selector button {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    transition: all 0.15s;
-  }
-  .mode-selector button.active { background: var(--accent); color: #fff; }
-  .mode-selector button:hover:not(.active) { color: var(--text); }
   .status { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
   .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
   main {
@@ -380,12 +335,6 @@
 </header>
 <div class="layout">
   <aside class="sidebar">
-    <!-- Segmented control -->
-    <div class="segmented">
-      <button class="active" data-mode="graph" onclick="switchMode('graph', this)">Graph 编排</button>
-      <button data-mode="planner" onclick="switchMode('planner', this)">Planner</button>
-    </div>
-
     <!-- New session -->
     <button class="new-session-btn" onclick="newSession()">
       <span class="left">
@@ -455,7 +404,6 @@
 <script>
 const SESSION = localStorage.getItem('mx_session') || ('web-' + Math.random().toString(36).slice(2, 8));
 localStorage.setItem('mx_session', SESSION);
-let mode = 'graph';
 let sending = false;
 
 // ---- Session management ----
@@ -482,12 +430,6 @@ function loadSessions() {
           '</div>';
       }).join('');
     });
-}
-
-function switchMode(m, btn) {
-  mode = m;
-  document.querySelectorAll('.segmented button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
 }
 
 function newSession() {
@@ -747,7 +689,6 @@ function send() {
   const params = new URLSearchParams({
     message: encodeURIComponent(msg),
     session_id: SESSION,
-    mode: mode,
   });
   const es = new EventSource('/chat/stream?' + params.toString());
 
