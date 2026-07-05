@@ -39,3 +39,13 @@ async def delete_session(request: Request, session_id: str):
     if not deleted:
         return {"error": "session not found"}, 404
     return {"ok": True}
+
+
+@router.get("/sessions/{session_id}/messages")
+async def get_messages(request: Request, session_id: str):
+    """Get all messages for a session."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    messages = store.get_history(session_id, max_turns=999)
+    return {"messages": messages}

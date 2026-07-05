@@ -388,6 +388,37 @@ function deleteSession(id) {
 }
 
 loadSessions();
+loadHistory();
+
+// ---- Load chat history on page load ----
+function loadHistory() {
+  fetch('/sessions/' + SESSION + '/messages')
+    .then(r => r.json())
+    .then(data => {
+      const msgs = data.messages || [];
+      if (msgs.length === 0) return;
+      const welcome = document.getElementById('welcome');
+      if (welcome) welcome.remove();
+      const chat = document.getElementById('chat');
+      msgs.forEach(m => {
+        if (m.role === 'user') {
+          chat.appendChild(userBubble(m.content));
+        } else {
+          const div = document.createElement('div');
+          div.className = 'message assistant';
+          const bubble = document.createElement('div');
+          bubble.className = 'bubble';
+          const content = document.createElement('div');
+          content.className = 'content';
+          content.innerHTML = renderMarkdown(m.content);
+          bubble.appendChild(content);
+          div.appendChild(bubble);
+          chat.appendChild(div);
+        }
+      });
+      chat.scrollTop = chat.scrollHeight;
+    });
+}
 
 document.querySelectorAll('.mode-selector button').forEach(btn => {
   btn.addEventListener('click', () => {
