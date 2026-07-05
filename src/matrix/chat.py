@@ -112,6 +112,7 @@ class ChatService:
         self.role = role or INVESTMENT_ANALYST
         self.skills = skills if skills is not None else _load_default_skills(skills_dir)
         self.store = SessionStore(config.store_path)
+        self.store.backfill_titles()  # migrate existing sessions
 
         # Pre-build and compile the LangGraph graph once
         self._graph = build_graph()
@@ -356,6 +357,8 @@ class ChatService:
     def _remember(self, session_id: str, question: str, answer: str) -> None:
         self.store.save_message(session_id, "user", question)
         self.store.save_message(session_id, "assistant", answer)
+        # Auto-title: use first 30 chars of first user message
+        self.store.update_title(session_id, question[:30].strip())
 
 
 # ---- Module-level helpers ----

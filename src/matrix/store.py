@@ -105,6 +105,15 @@ class SessionStore:
             self._get_conn().commit()
             return cur.rowcount > 0
 
+    def update_title(self, session_id: str, title: str) -> None:
+        """Set the session title (e.g. from first user message)."""
+        with self._lock:
+            self._get_conn().execute(
+                "UPDATE sessions SET title=? WHERE id=? AND (title='' OR title IS NULL)",
+                (title, session_id),
+            )
+            self._get_conn().commit()
+
     # ---- Message CRUD ----
 
     def save_message(self, session_id: str, role: str, content: str) -> None:
@@ -158,6 +167,20 @@ class SessionStore:
             self._get_conn().commit()
             return cur.rowcount
 
+    def backfill_titles(self) -> int:
+        """Set titles for sessions that have messages but no title."""
+        with self._lock:
+            cur = self._get_conn().execute(
+                "UPDATE sessions SET title = ("
+                "  SELECT substr(content, 1, 30) FROM messages "
+                "  WHERE messages.session_id = sessions.id AND messages.role = 'user' "
+                "  ORDER BY messages.created_at ASC LIMIT 1"
+                ") WHERE title = '' OR title IS NULL"
+            )
+            self._get_conn().commit()
+            return cur.rowcount
+
 
 def _default_title(session_id: str) -> str:
-    return session_id[:8] + "..."
+    # Show last 8 chars of session ID (after the hyphen prefix)
+    return session_id.split("-", 1)[-1][:8]
