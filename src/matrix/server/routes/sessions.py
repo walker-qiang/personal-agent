@@ -55,6 +55,7 @@ async def get_messages(request: Request, session_id: str):
 async def list_skills(request: Request):
     """List available skills."""
     from ...chat import ChatService
+    from ...skills import render_workflow
 
     chat: ChatService = request.app.state.chat
     skills = [
@@ -64,6 +65,8 @@ async def list_skills(request: Request):
             "description": s.description,
             "trigger_keywords": s.trigger_keywords,
             "workflow": s.workflow,
+            "workflow_text": render_workflow(s.workflow),
+            "output_format": s.output_format,
         }
         for s in chat.skills
     ]
@@ -97,7 +100,9 @@ async def create_skill(request: Request):
         return {"error": "skill already exists"}, 409
 
     kw_lines = "\n".join(f"- `{kw}`" for kw in keywords if kw)
-    content = f"# {title}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n\n## 输出格式\n"
+    workflow = str(payload.get("workflow", "")).strip()
+    output_format = str(payload.get("output_format", "")).strip()
+    content = f"# {title}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n{workflow}\n\n## 输出格式\n{output_format}\n"
     md_path.write_text(content, encoding="utf-8")
     chat.reload_skills()
     return {"ok": True, "name": safe_name}
@@ -121,7 +126,9 @@ async def update_skill(request: Request, skill_name: str):
         return {"error": "skill not found"}, 404
 
     kw_lines = "\n".join(f"- `{kw}`" for kw in keywords if kw)
-    content = f"# {title or skill_name}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n\n## 输出格式\n"
+    workflow = str(payload.get("workflow", "")).strip()
+    output_format = str(payload.get("output_format", "")).strip()
+    content = f"# {title or skill_name}\n\n## 简介\n{description}\n\n## 触发条件\n{kw_lines}\n\n## 工作流\n{workflow}\n\n## 输出格式\n{output_format}\n"
     md_path.write_text(content, encoding="utf-8")
     chat.reload_skills()
     return {"ok": True}

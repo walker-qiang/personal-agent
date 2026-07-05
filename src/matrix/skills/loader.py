@@ -64,6 +64,25 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
     return skills
 
 
+def render_workflow(workflow: list[dict[str, Any]]) -> str:
+    """Serialize parsed workflow steps back to markdown text."""
+    lines = []
+    for step in workflow:
+        num = step.get("step", len(lines) + 1)
+        tool = step.get("tool", "")
+        purpose = step.get("purpose", "")
+        if tool:
+            args = step.get("arguments", {})
+            if args:
+                args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+                lines.append(f"{num}. {tool}({args_str})")
+            else:
+                lines.append(f"{num}. {tool}()")
+        elif purpose:
+            lines.append(f"{num}. {purpose}")
+    return "\n".join(lines)
+
+
 def _extract_section(text: str, pattern: str, default: str, flags: int = re.DOTALL) -> str:
     match = re.search(pattern, text, flags)
     if match:

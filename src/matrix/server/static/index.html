@@ -124,8 +124,10 @@
     background: #fff;
     border-radius: 12px;
     padding: 24px;
-    width: 400px;
+    width: 520px;
     max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
     box-shadow: 0 10px 40px rgba(0,0,0,0.15);
   }
   .modal h3 { font-size: 16px; font-weight: 600; margin: 0 0 16px; color: #1d1d1f; }
@@ -577,8 +579,11 @@ function showSkillModal(skillName) {
       '<h3>' + (isEdit ? '编辑技能' : '新建技能') + '</h3>' +
       (isEdit ? '' : '<label>标识 (英文)</label><input id="skillName" value="" placeholder="my-skill">') +
       '<label>名称</label><input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '">' +
-      '<label>简介</label><textarea id="skillDesc">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
+      '<label>简介</label><textarea id="skillDesc" rows="2">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
       '<label>触发关键词</label>' + kwHtml +
+      '<label>工作流 <span style="font-weight:400;color:#aeaeb2">(每行一步，格式: 1. tool_name())</span></label>' +
+      '<textarea id="skillWorkflow" rows="4" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
+      '<label>输出格式</label><textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
       '<div class="btn-row">' +
         '<button class="btn-cancel" onclick="closeModal()">取消</button>' +
         '<button class="btn-primary" onclick="saveSkill(\'' + (skillName || '') + '\')">' + (isEdit ? '保存' : '创建') + '</button>' +
@@ -634,6 +639,8 @@ function saveSkill(skillName) {
   const title = document.getElementById('skillTitle').value.trim();
   const description = document.getElementById('skillDesc').value.trim();
   const keywords = window._kwList || [];
+  const workflow = document.getElementById('skillWorkflow').value.trim();
+  const output_format = document.getElementById('skillOutput').value.trim();
 
   if (!name || !title) { alert('请填写标识和名称'); return; }
 
@@ -642,7 +649,7 @@ function saveSkill(skillName) {
   fetch(url, {
     method: method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name, title: title, description: description, trigger_keywords: keywords }),
+    body: JSON.stringify({ name: name, title: title, description: description, trigger_keywords: keywords, workflow: workflow, output_format: output_format }),
   }).then(r => r.json()).then(d => {
     closeModal();
     if (d.error) { alert(d.error); return; }
