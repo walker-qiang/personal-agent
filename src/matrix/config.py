@@ -35,6 +35,7 @@ ENV_AGENT_MAX_TOKENS = "AGENT_MAX_TOKENS"
 ENV_AGENT_MODEL_TIMEOUT_SEC = "AGENT_MODEL_TIMEOUT_SEC"
 ENV_DEEPSEEK_BASE_URL = "DEEPSEEK_BASE_URL"
 ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
+ENV_STORE_PATH = "MATRIX_STORE_PATH"
 
 # ---- Defaults ----
 
@@ -50,6 +51,7 @@ class AgentConfig:
     root_path: Path
     cache_path: Path
     trace_path: Path
+    store_path: Path
     host: str
     port: int
     agent_provider: str = "deepseek"
@@ -103,6 +105,12 @@ def load_config() -> AgentConfig:
         root / "var" / "agent" / "tool-calls.jsonl",
     )
 
+    # Store path: MATRIX_STORE_PATH > default
+    store_path = _resolve_path(
+        [ENV_STORE_PATH],
+        root / "var" / "agent" / "sessions.db",
+    )
+
     host, port = load_bind_addr()
     provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
@@ -111,6 +119,7 @@ def load_config() -> AgentConfig:
         root_path=root,
         cache_path=cache_path,
         trace_path=trace_path,
+        store_path=store_path,
         host=host,
         port=port,
         agent_provider=provider,

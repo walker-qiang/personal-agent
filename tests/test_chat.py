@@ -40,6 +40,7 @@ def chat_service(tmp_cache_path: Path) -> ChatService:
         root_path=tmp_cache_path.parent,
         cache_path=tmp_cache_path,
         trace_path=tmp_cache_path.parent / "trace.jsonl",
+        store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
@@ -178,6 +179,7 @@ class TestChatService:
             root_path=tmp_cache_path.parent,
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
+            store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             host="127.0.0.1",
             port=0,
         )
@@ -209,25 +211,22 @@ class TestChatService:
             if event["type"] == "done":
                 sid = event["session_id"]
         assert sid is not None
-        assert sid in chat_service.memory
-        assert len(chat_service.memory[sid]) == 2
+        assert len(chat_service._get_history(sid)) == 2
 
         for event in chat_service.stream_chat("help", session_id=sid):
             if event["type"] == "done":
                 pass
-        assert len(chat_service.memory[sid]) == 4
+        assert len(chat_service._get_history(sid)) == 4
 
     def test_reset_clears_session(self, chat_service):
-        chat_service.memory["test-session"] = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ]
+        chat_service._remember("test-session", "hi", "hello")
+        assert len(chat_service._get_history("test-session")) == 2
         chat_service.reset("test-session")
-        assert "test-session" not in chat_service.memory
+        assert len(chat_service._get_history("test-session")) == 0
 
     def test_reset_nonexistent_session_is_noop(self, chat_service):
         chat_service.reset("nonexistent")
-        assert "nonexistent" not in chat_service.memory
+        assert len(chat_service._get_history("nonexistent")) == 0
 
     def test_tool_call_deduplication(self, chat_service):
         """Duplicate tool calls across planner rounds should be skipped."""
@@ -267,6 +266,7 @@ class TestChatServiceGraph:
             root_path=tmp_cache_path.parent,
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
+            store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             host="127.0.0.1",
             port=0,
         )
@@ -344,8 +344,7 @@ class TestChatServiceGraph:
         sid = "reset-test-graph"
         list(chat_service.stream_chat_graph("test", sid))
         chat_service.reset(sid)
-        with chat_service._memory_lock:
-            assert sid not in chat_service.memory
+        assert len(chat_service._get_history(sid)) == 0
 
     def test_skill_flow_in_graph(self, chat_service):
         """Graph should route to skill node when keyword matches."""

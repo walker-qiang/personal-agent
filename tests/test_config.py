@@ -124,6 +124,7 @@ class TestAgentConfig:
             root_path=tmp_cache_path.parent,
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
+            store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             host="127.0.0.1",
             port=0,
         )
@@ -138,6 +139,7 @@ class TestAgentConfig:
             root_path=tmp_cache_path.parent,
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
+            store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             host="127.0.0.1",
             port=0,
             agent_provider="anthropic",

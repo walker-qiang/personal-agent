@@ -15,7 +15,7 @@ from ..config import AgentConfig, load_config
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
-from .routes import chat, health, tools
+from .routes import chat, health, sessions, tools
 
 # Pre-load the Web UI HTML content at module level
 _INDEX_HTML = ""
@@ -63,6 +63,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(tools.router)
     app.include_router(chat.router)
     app.include_router(health.router)
+    app.include_router(sessions.router)
 
     # Serve Web UI at root (LAST, so API routes take priority)
     @app.get("/", include_in_schema=False)

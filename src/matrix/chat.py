@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +17,7 @@ from .orchestration import build_graph
 from .orchestration.state import AgentState
 from .role import INVESTMENT_ANALYST, RoleDefinition
 from .skills import SkillDefinition, load_skills
+from .store import SessionStore
 from .tools import FinanceToolError, ToolRegistry
 
 
@@ -111,8 +111,7 @@ class ChatService:
         )
         self.role = role or INVESTMENT_ANALYST
         self.skills = skills if skills is not None else _load_default_skills(skills_dir)
-        self.memory: dict[str, list[dict[str, str]]] = {}
-        self._memory_lock = threading.Lock()
+        self.store = SessionStore(config.store_path)
 
         # Pre-build and compile the LangGraph graph once
         self._graph = build_graph()
@@ -123,8 +122,7 @@ class ChatService:
 
     def reset(self, session_id: str) -> None:
         if session_id:
-            with self._memory_lock:
-                self.memory.pop(session_id, None)
+            self.store.reset(session_id)
 
     def stream_chat(self, message: str, session_id: str | None = None) -> Iterator[dict[str, Any]]:
         """Legacy Planner-Final streaming chat (mode=planner)."""
@@ -320,9 +318,7 @@ class ChatService:
         return [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
     def _get_history(self, session_id: str) -> list[dict[str, str]]:
-        with self._memory_lock:
-            history = self.memory.get(session_id, [])
-            return history[-self.config.memory_max_turns * 2 :]
+        return self.store.get_history(session_id, self.config.memory_max_turns)
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
@@ -358,17 +354,8 @@ class ChatService:
             self.trace.record(event)
 
     def _remember(self, session_id: str, question: str, answer: str) -> None:
-        with self._memory_lock:
-            history = self.memory.setdefault(session_id, [])
-            history.extend(
-                [
-                    {"role": "user", "content": question},
-                    {"role": "assistant", "content": answer},
-                ]
-            )
-            max_items = self.config.memory_max_turns * 2
-            if len(history) > max_items:
-                self.memory[session_id] = history[-max_items:]
+        self.store.save_message(session_id, "user", question)
+        self.store.save_message(session_id, "assistant", answer)
 
 
 # ---- Module-level helpers ----
