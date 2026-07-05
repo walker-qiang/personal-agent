@@ -534,6 +534,10 @@ function renderSkills() {
         skills.map(s =>
           '<div class="quick-entry" onclick="runSkill(\'' + s.name + '\')" style="padding-left:36px">' +
             '<span>' + escapeHtml(s.title) + '</span>' +
+            '<span style="font-size:10px;color:#aeaeb2;margin-left:auto;margin-right:4px">' +
+              (s.knowledge_files && s.knowledge_files.length ? '📄' + s.knowledge_files.length : '') +
+              (s.script_files && s.script_files.length ? ' ⚡' + s.script_files.length : '') +
+            '</span>' +
             '<span class="actions">' +
               editIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')"') +
               trashIcon.replace('<svg', '<svg onclick="event.stopPropagation();deleteSkill(\'' + s.name + '\')"') +
@@ -567,6 +571,8 @@ function showSkillModal(skillName) {
       '<label>工作流 <span style="font-weight:400;color:#aeaeb2">(每行一步，格式: 1. tool_name())</span></label>' +
       '<textarea id="skillWorkflow" rows="4" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
       '<label>输出格式</label><textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
+      (isEdit ? _renderFileSection('知识库', 'knowledge', skillName, existing ? existing.knowledge_files : []) : '') +
+      (isEdit ? _renderFileSection('脚本', 'script', skillName, existing ? existing.script_files : []) : '') +
       '<div class="btn-row">' +
         '<button class="btn-cancel" onclick="closeModal()">取消</button>' +
         '<button class="btn-primary" onclick="saveSkill(\'' + (skillName || '') + '\')">' + (isEdit ? '保存' : '创建') + '</button>' +
@@ -579,6 +585,36 @@ function showSkillModal(skillName) {
     const el = document.getElementById(isEdit ? 'skillTitle' : 'skillName');
     if (el) el.focus();
   }, 100);
+}
+
+function _renderFileSection(label, type, skillName, files) {
+  const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:12px;height:12px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:12px;height:12px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  const fileList = files.map(f =>
+    '<div style="display:flex;align-items:center;gap:4px;font-size:12px;padding:2px 0">' +
+      folderIcon + ' ' + escapeHtml(f) +
+      '<span style="margin-left:auto;cursor:pointer;color:#aeaeb2" onclick="deleteFile(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + trashIcon + '</span>' +
+    '</div>'
+  ).join('');
+  return '<label>' + label + ' <span style="font-weight:400;color:#aeaeb2">(' + files.length + '个)</span></label>' +
+    '<div style="margin-bottom:8px">' + (fileList || '<div style="font-size:12px;color:#aeaeb2">暂无</div>') + '</div>' +
+    '<div class="kw-input" style="margin-bottom:12px"><input id="fileInput_' + type + '" placeholder="文件名" style="flex:1"><button onclick="addFile(\'' + skillName + '\',\'' + type + '\')">' + plusIcon + '</button></div>';
+}
+
+function addFile(skillName, type) {
+  const input = document.getElementById('fileInput_' + type);
+  const filename = input.value.trim();
+  if (!filename) return;
+  const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '' }) })
+    .then(r => r.json()).then(() => { closeModal(); loadSkills(); setTimeout(() => showSkillModal(skillName), 100); });
+}
+
+function deleteFile(skillName, type, filename) {
+  if (!confirm('删除 ' + filename + '？')) return;
+  const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'DELETE' }).then(() => { closeModal(); loadSkills(); setTimeout(() => showSkillModal(skillName), 100); });
 }
 
 function closeModal() {

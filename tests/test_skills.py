@@ -36,7 +36,7 @@ class TestSkillDefinition:
 
 
 class TestLoadSkills:
-    def test_loads_from_markdown_files(self):
+    def test_loads_from_skill_dirs(self):
         """Test loading skills from the investment skills directory."""
         skills_dir = Path("skills/investment")
         if not skills_dir.exists():
