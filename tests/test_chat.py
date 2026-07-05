@@ -148,7 +148,7 @@ class TestChatService:
             SkillDefinition(
                 name="test-skill",
                 title="测试技能",
-                trigger_keywords=["测试"],
+                description="跑测试技能",
                 workflow=[
                     {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
                 ],

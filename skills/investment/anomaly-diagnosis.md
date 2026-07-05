@@ -2,16 +2,6 @@
 name: anomaly-diagnosis
 title: 持仓异动诊断
 description: 对持仓数据进行异动诊断，识别异常变化并进行归因分析。
-trigger_keywords:
-  - 异动
-  - 异常
-  - 波动
-  - 为什么跌了
-  - 为什么涨了
-  - 变化
-  - 诊断
-  - 归因
-  - 异常变化
 ---
 
 # 持仓异动诊断

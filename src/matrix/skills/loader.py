@@ -17,7 +17,6 @@ class SkillDefinition:
     name: str
     title: str
     description: str = ""
-    trigger_keywords: list[str] = field(default_factory=list)
     workflow: list[dict[str, Any]] = field(default_factory=list)
     output_format: str = ""
 
@@ -29,10 +28,6 @@ class SkillDefinition:
 
         frontmatter, body = _split_frontmatter(content)
         title = frontmatter.get("title", name)
-        description = frontmatter.get("description", "")
-        trigger_keywords = frontmatter.get("trigger_keywords", [])
-        if not isinstance(trigger_keywords, list):
-            trigger_keywords = []
 
         workflow = _parse_workflow(body)
         output_format = _extract_section(body, r"##\s+输出格式\s*\n(.+)", "", re.DOTALL)
@@ -40,16 +35,29 @@ class SkillDefinition:
         return cls(
             name=name,
             title=title or name,
-            description=description.strip(),
-            trigger_keywords=trigger_keywords,
+            description=frontmatter.get("description", "").strip(),
             workflow=workflow,
             output_format=output_format.strip(),
         )
 
     def matches(self, query: str) -> bool:
-        """Check if the query matches this skill's trigger keywords."""
-        query_lower = query.lower()
-        return any(kw.lower() in query_lower for kw in self.trigger_keywords)
+        """Check if the query matches this skill's title or description."""
+        q = query.lower()
+        text = (self.title + " " + self.description).lower()
+        # Split into words (handles both English and Chinese)
+        words = [w for w in re.split(r"[\s,，。！？、；：""''（）\(\)]+", text) if len(w) >= 2]
+        if any(w in q for w in words):
+            return True
+        # Also check if query is a substring of skill text
+        if len(q) >= 2 and q in text:
+            return True
+        # For Chinese: 2-char n-grams from skill text
+        for w in words:
+            if len(w) > 2:
+                for i in range(len(w) - 1):
+                    if w[i:i+2] in q:
+                        return True
+        return False
 
 
 def load_skills(skills_dir: Path) -> list[SkillDefinition]:
@@ -67,26 +75,22 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
 
 def render_skill(skill: SkillDefinition) -> str:
     """Serialize a skill back to Markdown with YAML frontmatter."""
-    lines = [
+    return "\n".join([
         "---",
         f"name: {skill.name}",
         f"title: {skill.title}",
         f"description: {skill.description}",
-        "trigger_keywords:",
-    ]
-    for kw in skill.trigger_keywords:
-        lines.append(f"  - {kw}")
-    lines.append("---")
-    lines.append("")
-    lines.append(f"# {skill.title}")
-    lines.append("")
-    lines.append("## 工作流")
-    lines.append(render_workflow(skill.workflow) or "")
-    lines.append("")
-    lines.append("## 输出格式")
-    lines.append(skill.output_format)
-    lines.append("")
-    return "\n".join(lines)
+        "---",
+        "",
+        f"# {skill.title}",
+        "",
+        "## 工作流",
+        render_workflow(skill.workflow) or "",
+        "",
+        "## 输出格式",
+        skill.output_format,
+        "",
+    ])
 
 
 def render_workflow(workflow: list[dict[str, Any]]) -> str:

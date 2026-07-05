@@ -256,7 +256,6 @@ class TestBuildGraph:
             name="test-skill",
             title="测试技能",
             description="测试用技能",
-            trigger_keywords=["测试"],
             workflow=[
                 {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
             ],

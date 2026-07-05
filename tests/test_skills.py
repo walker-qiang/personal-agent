@@ -11,25 +11,26 @@ from matrix.tools.finance import register_all
 
 
 class TestSkillDefinition:
-    def test_matches_trigger_keywords(self):
+    def test_matches_description(self):
         skill = SkillDefinition(
             name="test",
-            title="测试",
-            trigger_keywords=["异动", "波动", "异常"],
+            title="异动诊断",
+            description="对持仓数据进行异动诊断，识别异常变化并进行归因分析。",
         )
-        assert skill.matches("最近有异动吗")
-        assert skill.matches("波动很大")
+        assert skill.matches("最近有异动吗")  # "异动诊断" in "最近有异动吗" → True
+        assert skill.matches("异动诊断")  # exact match
         assert not skill.matches("今天天气")
 
-    def test_matches_case_insensitive(self):
+    def test_matches_title(self):
         skill = SkillDefinition(
             name="test",
-            title="测试",
-            trigger_keywords=["异动"],
+            title="配置偏离检查",
+            description="检查配置偏离度。",
         )
-        assert skill.matches("异动")
+        assert skill.matches("配置偏离检查")  # exact title
+        assert skill.matches("偏离度")  # "偏离度" in "配置偏离检查 检查配置偏离度。" → True
 
-    def test_empty_trigger_keywords(self):
+    def test_empty_no_match(self):
         skill = SkillDefinition(name="test", title="测试")
         assert not skill.matches("anything")
 

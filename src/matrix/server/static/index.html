@@ -138,16 +138,6 @@
   }
   .modal input:focus, .modal textarea:focus { border-color: #007aff; }
   .modal textarea { resize: vertical; min-height: 60px; }
-  .modal .kw-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .modal .kw-tag {
-    font-size: 11px; background: #f0f0f0; padding: 2px 8px; border-radius: 10px;
-    display: flex; align-items: center; gap: 4px;
-  }
-  .modal .kw-tag .rm { cursor: pointer; color: #aeaeb2; }
-  .modal .kw-tag .rm:hover { color: #ff3b30; }
-  .modal .kw-input { display: flex; gap: 6px; margin-top: 4px; }
-  .modal .kw-input input { flex: 1; }
-  .modal .kw-input button { padding: 6px 12px; border-radius: 6px; border: none; background: #e5e5ea; cursor: pointer; font-size: 12px; }
   .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
   .modal .btn-row button { padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
   .modal .btn-row .btn-primary { background: #007aff; color: #fff; }
@@ -542,7 +532,7 @@ function renderSkills() {
     '<div class="section-body" id="skillsBody">' +
       (skills.length === 0 ? '<div class="no-sessions">暂无技能</div>' :
         skills.map(s =>
-          '<div class="quick-entry" onclick="runSkill(\'' + s.name + '\', \'' + escapeHtml(s.trigger_keywords[0] || s.title) + '\')" style="padding-left:36px">' +
+          '<div class="quick-entry" onclick="runSkill(\'' + s.name + '\')" style="padding-left:36px">' +
             '<span>' + escapeHtml(s.title) + '</span>' +
             '<span class="actions">' +
               editIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')"') +
@@ -567,20 +557,13 @@ function showSkillModal(skillName) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'skillModal';
-  let kwHtml = '';
-  const keywords = existing ? existing.trigger_keywords : [];
-  kwHtml = '<div class="kw-tags" id="kwTags">' +
-    keywords.map((kw, i) => '<span class="kw-tag">' + escapeHtml(kw) + '<span class="rm" onclick="removeKw(' + i + ')">x</span></span>').join('') +
-    '</div>' +
-    '<div class="kw-input"><input id="kwInput" placeholder="输入触发词后回车" onkeydown="addKw(event)"><button onclick="addKwBtn()">添加</button></div>';
 
   overlay.innerHTML =
     '<div class="modal" onclick="event.stopPropagation()">' +
       '<h3>' + (isEdit ? '编辑技能' : '新建技能') + '</h3>' +
       (isEdit ? '' : '<label>标识 (英文)</label><input id="skillName" value="" placeholder="my-skill">') +
       '<label>名称</label><input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '">' +
-      '<label>简介</label><textarea id="skillDesc" rows="2">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
-      '<label>触发关键词</label>' + kwHtml +
+      '<label>简介 <span style="font-weight:400;color:#aeaeb2">(同时也是匹配触发词)</span></label><textarea id="skillDesc" rows="2">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
       '<label>工作流 <span style="font-weight:400;color:#aeaeb2">(每行一步，格式: 1. tool_name())</span></label>' +
       '<textarea id="skillWorkflow" rows="4" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
       '<label>输出格式</label><textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
@@ -592,40 +575,10 @@ function showSkillModal(skillName) {
   overlay.onclick = closeModal;
   document.body.appendChild(overlay);
 
-  window._kwList = [...keywords];
   setTimeout(() => {
     const el = document.getElementById(isEdit ? 'skillTitle' : 'skillName');
     if (el) el.focus();
   }, 100);
-}
-
-function addKw(event) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    addKwBtn();
-  }
-}
-
-function addKwBtn() {
-  const input = document.getElementById('kwInput');
-  const val = input.value.trim();
-  if (!val) return;
-  window._kwList.push(val);
-  input.value = '';
-  renderKwTags();
-}
-
-function removeKw(i) {
-  window._kwList.splice(i, 1);
-  renderKwTags();
-}
-
-function renderKwTags() {
-  const tags = document.getElementById('kwTags');
-  if (!tags) return;
-  tags.innerHTML = window._kwList.map((kw, i) =>
-    '<span class="kw-tag">' + escapeHtml(kw) + '<span class="rm" onclick="removeKw(' + i + ')">x</span></span>'
-  ).join('');
 }
 
 function closeModal() {
@@ -638,7 +591,6 @@ function saveSkill(skillName) {
   const name = isEdit ? skillName : document.getElementById('skillName').value.trim();
   const title = document.getElementById('skillTitle').value.trim();
   const description = document.getElementById('skillDesc').value.trim();
-  const keywords = window._kwList || [];
   const workflow = document.getElementById('skillWorkflow').value.trim();
   const output_format = document.getElementById('skillOutput').value.trim();
 
@@ -649,7 +601,7 @@ function saveSkill(skillName) {
   fetch(url, {
     method: method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name, title: title, description: description, trigger_keywords: keywords, workflow: workflow, output_format: output_format }),
+    body: JSON.stringify({ name: name, title: title, description: description, workflow: workflow, output_format: output_format }),
   }).then(r => r.json()).then(d => {
     closeModal();
     if (d.error) { alert(d.error); return; }
@@ -662,8 +614,10 @@ function deleteSkill(name) {
   fetch('/skills/' + name, { method: 'DELETE' }).then(() => loadSkills());
 }
 
-function runSkill(name, keyword) {
-  document.getElementById('input').value = keyword;
+function runSkill(name) {
+  const skill = _skillsData.find(s => s.name === name);
+  // Use title as the trigger query
+  document.getElementById('input').value = skill ? skill.title : name;
   send();
 }
 

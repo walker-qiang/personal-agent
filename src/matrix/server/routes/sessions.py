@@ -63,7 +63,6 @@ async def list_skills(request: Request):
             "name": s.name,
             "title": s.title,
             "description": s.description,
-            "trigger_keywords": s.trigger_keywords,
             "workflow": s.workflow,
             "workflow_text": render_workflow(s.workflow),
             "output_format": s.output_format,
@@ -84,9 +83,6 @@ async def create_skill(request: Request):
     name = str(payload.get("name", "")).strip()
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
-    keywords = payload.get("trigger_keywords", [])
-    if not isinstance(keywords, list):
-        keywords = []
 
     if not name or not title:
         return {"error": "name and title are required"}, 400
@@ -103,7 +99,6 @@ async def create_skill(request: Request):
         name=safe_name,
         title=title,
         description=description,
-        trigger_keywords=keywords,
         output_format=str(payload.get("output_format", "")).strip(),
     )
     md_path.write_text(render_skill(skill), encoding="utf-8")
@@ -121,9 +116,6 @@ async def update_skill(request: Request, skill_name: str):
     payload = await request.json()
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
-    keywords = payload.get("trigger_keywords", [])
-    if not isinstance(keywords, list):
-        keywords = []
 
     md_path = chat.skills_dir / f"{skill_name}.md"
     if not md_path.exists():
@@ -133,7 +125,6 @@ async def update_skill(request: Request, skill_name: str):
         name=skill_name,
         title=title or skill_name,
         description=description,
-        trigger_keywords=keywords,
         output_format=str(payload.get("output_format", "")).strip(),
     )
     md_path.write_text(render_skill(skill), encoding="utf-8")
