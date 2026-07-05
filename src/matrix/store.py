@@ -78,7 +78,7 @@ class SessionStore:
                 "title": r[1] or _default_title(r[0]),
                 "created_at": r[2],
                 "updated_at": r[3],
-                "msg_count": r[4],
+                "turn_count": r[4] // 2,  # messages / 2 = conversation turns
             }
             for r in rows
         ]
@@ -96,7 +96,7 @@ class SessionStore:
             "title": row[1] or _default_title(row[0]),
             "created_at": row[2],
             "updated_at": row[3],
-            "msg_count": row[4],
+            "turn_count": row[4] // 2,
         }
 
     def delete_session(self, session_id: str) -> bool:

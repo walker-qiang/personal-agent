@@ -350,19 +350,8 @@
     </button>
 
     <!-- Quick entries -->
-    <div class="quick-entries">
-      <button class="quick-entry" onclick="document.getElementById('input').value='组合复盘';send()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
-        技能
-      </button>
-      <button class="quick-entry" onclick="document.getElementById('input').value='持仓异动诊断';send()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-        </svg>
-        自动化
-      </button>
+    <div class="quick-entries" id="quickEntries">
+      <div class="no-sessions">加载中...</div>
     </div>
 
     <!-- Session list -->
@@ -421,7 +410,7 @@ function loadSessions() {
       list.innerHTML = sessions.map(s => {
         const active = s.id === SESSION ? ' active' : '';
         const title = escapeHtml(s.title || s.id.slice(0, 8) + '...');
-        const count = s.msg_count ? s.msg_count + '条' : '';
+        const count = s.turn_count ? s.turn_count + '轮' : '';
         return '<div class="session-item' + active + '" data-sid="' + s.id + '" onclick="selectSession(\'' + s.id + '\')">' +
           msgIcon +
           '<span class="title">' + title + '</span>' +
@@ -453,6 +442,39 @@ function deleteSession(id) {
 
 loadSessions();
 loadHistory();
+loadSkills();
+
+// ---- Load skills for quick entries ----
+function loadSkills() {
+  fetch('/skills')
+    .then(r => r.json())
+    .then(data => {
+      const container = document.getElementById('quickEntries');
+      const skills = data.skills || [];
+      if (skills.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+      const skillIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+      const zapIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+      const triggerMsg = skills[0].trigger_keywords[0] ? '触发词: ' + skills[0].trigger_keywords.slice(0,2).join(', ') : '';
+      container.innerHTML =
+        '<div class="quick-entry" style="cursor:default;opacity:0.8">' +
+          skillIcon +
+          '<span>技能</span>' +
+        '</div>' +
+        skills.map(s =>
+          '<button class="quick-entry" onclick="runSkill(\'' + s.name + '\', \'' + escapeHtml(s.trigger_keywords[0] || s.title) + '\')" style="padding-left:36px">' +
+            '<span>' + escapeHtml(s.title) + '</span>' +
+          '</button>'
+        ).join('');
+    });
+}
+
+function runSkill(name, keyword) {
+  document.getElementById('input').value = keyword;
+  send();
+}
 
 // ---- Keyboard shortcuts ----
 document.addEventListener('keydown', (e) => {

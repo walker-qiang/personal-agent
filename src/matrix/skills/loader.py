@@ -25,7 +25,7 @@ class SkillDefinition:
         content = path.read_text(encoding="utf-8")
         name = path.stem
 
-        title = _extract_section(content, r"#\s+(.+)", "")
+        title = _extract_section(content, r"#\s+(.+)", "", re.MULTILINE)
         description = _extract_section(content, r"##\s+简介\s*\n(.+?)(?=\n##|\Z)", "")
         trigger_text = _extract_section(content, r"##\s+触发条件\s*\n(.+?)(?=\n##|\Z)", "")
         trigger_keywords = [
@@ -64,8 +64,8 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
     return skills
 
 
-def _extract_section(text: str, pattern: str, default: str) -> str:
-    match = re.search(pattern, text, re.DOTALL)
+def _extract_section(text: str, pattern: str, default: str, flags: int = re.DOTALL) -> str:
+    match = re.search(pattern, text, flags)
     if match:
         return match.group(1).strip()
     return default

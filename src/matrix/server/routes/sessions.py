@@ -49,3 +49,21 @@ async def get_messages(request: Request, session_id: str):
     store: SessionStore = request.app.state.chat.store
     messages = store.get_history(session_id, max_turns=999)
     return {"messages": messages}
+
+
+@router.get("/skills")
+async def list_skills(request: Request):
+    """List available skills."""
+    from ...chat import ChatService
+
+    chat: ChatService = request.app.state.chat
+    skills = [
+        {
+            "name": s.name,
+            "title": s.title,
+            "description": s.description,
+            "trigger_keywords": s.trigger_keywords[:3],
+        }
+        for s in chat.skills
+    ]
+    return {"skills": skills}
