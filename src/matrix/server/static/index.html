@@ -85,6 +85,71 @@
   }
   .quick-entry:hover { background: rgba(0,0,0,0.04); }
   .quick-entry svg { width: 18px; height: 18px; color: #6e6e73; flex-shrink: 0; }
+  /* Collapsible section */
+  .section { display: flex; flex-direction: column; gap: 1px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px 8px;
+    cursor: pointer;
+  }
+  .section-header span {
+    font-size: 12px;
+    font-weight: 600;
+    color: #aeaeb2;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .section-header .actions { display: flex; gap: 8px; }
+  .section-header .actions svg { width: 15px; height: 15px; color: #aeaeb2; cursor: pointer; }
+  .section-header .actions svg:hover { color: #6e6e73; }
+  .section-header .chevron { transition: transform 0.15s; }
+  .section-header .chevron.collapsed { transform: rotate(-90deg); }
+  .section-body { display: flex; flex-direction: column; gap: 1px; }
+  .section-body.collapsed { display: none; }
+  /* Quick entry edit */
+  .quick-entry .actions { display: none; gap: 4px; margin-left: 4px; }
+  .quick-entry:hover .actions { display: flex; }
+  .quick-entry .actions svg { width: 13px; height: 13px; color: #aeaeb2; cursor: pointer; }
+  .quick-entry .actions svg:hover { color: #6e6e73; }
+  /* Modal */
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.25);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    width: 400px;
+    max-width: 90vw;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+  }
+  .modal h3 { font-size: 16px; font-weight: 600; margin: 0 0 16px; color: #1d1d1f; }
+  .modal label { font-size: 12px; font-weight: 600; color: #aeaeb2; display: block; margin: 12px 0 4px; }
+  .modal input, .modal textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #d2d2d7; border-radius: 6px;
+    font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box;
+  }
+  .modal input:focus, .modal textarea:focus { border-color: #007aff; }
+  .modal textarea { resize: vertical; min-height: 60px; }
+  .modal .kw-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .modal .kw-tag {
+    font-size: 11px; background: #f0f0f0; padding: 2px 8px; border-radius: 10px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .modal .kw-tag .rm { cursor: pointer; color: #aeaeb2; }
+  .modal .kw-tag .rm:hover { color: #ff3b30; }
+  .modal .kw-input { display: flex; gap: 6px; margin-top: 4px; }
+  .modal .kw-input input { flex: 1; }
+  .modal .kw-input button { padding: 6px 12px; border-radius: 6px; border: none; background: #e5e5ea; cursor: pointer; font-size: 12px; }
+  .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+  .modal .btn-row button { padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
+  .modal .btn-row .btn-primary { background: #007aff; color: #fff; }
+  .modal .btn-row .btn-cancel { background: #e5e5ea; color: #3a3a3c; }
   /* Session list section */
   .session-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   .session-section-header {
@@ -350,7 +415,7 @@
     </button>
 
     <!-- Quick entries -->
-    <div class="quick-entries" id="quickEntries">
+    <div class="quick-entries section" id="quickEntries">
       <div class="no-sessions">加载中...</div>
     </div>
 
@@ -445,30 +510,149 @@ loadHistory();
 loadSkills();
 
 // ---- Load skills for quick entries ----
+let _skillsData = [];
 function loadSkills() {
   fetch('/skills')
     .then(r => r.json())
     .then(data => {
-      const container = document.getElementById('quickEntries');
-      const skills = data.skills || [];
-      if (skills.length === 0) {
-        container.innerHTML = '';
-        return;
-      }
-      const skillIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
-      const zapIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
-      const triggerMsg = skills[0].trigger_keywords[0] ? '触发词: ' + skills[0].trigger_keywords.slice(0,2).join(', ') : '';
-      container.innerHTML =
-        '<div class="quick-entry" style="cursor:default;opacity:0.8">' +
-          skillIcon +
-          '<span>技能</span>' +
-        '</div>' +
-        skills.map(s =>
-          '<button class="quick-entry" onclick="runSkill(\'' + s.name + '\', \'' + escapeHtml(s.trigger_keywords[0] || s.title) + '\')" style="padding-left:36px">' +
-            '<span>' + escapeHtml(s.title) + '</span>' +
-          '</button>'
-        ).join('');
+      _skillsData = data.skills || [];
+      renderSkills();
     });
+}
+
+function renderSkills() {
+  const container = document.getElementById('quickEntries');
+  const skills = _skillsData;
+  const skillIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+  const chevron = '<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+  container.innerHTML =
+    '<div class="section-header" onclick="toggleSection(\'skillsBody\', this)">' +
+      '<span>' + skillIcon + ' 技能</span>' +
+      '<span class="actions">' +
+        plusIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal()"') +
+        '<span class="chevron" id="skillsChevron">' + chevron + '</span>' +
+      '</span>' +
+    '</div>' +
+    '<div class="section-body" id="skillsBody">' +
+      (skills.length === 0 ? '<div class="no-sessions">暂无技能</div>' :
+        skills.map(s =>
+          '<div class="quick-entry" onclick="runSkill(\'' + s.name + '\', \'' + escapeHtml(s.trigger_keywords[0] || s.title) + '\')" style="padding-left:36px">' +
+            '<span>' + escapeHtml(s.title) + '</span>' +
+            '<span class="actions">' +
+              editIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')"') +
+              trashIcon.replace('<svg', '<svg onclick="event.stopPropagation();deleteSkill(\'' + s.name + '\')"') +
+            '</span>' +
+          '</div>'
+        ).join('')) +
+    '</div>';
+}
+
+function toggleSection(bodyId, header) {
+  const body = document.getElementById(bodyId);
+  const chevron = header.querySelector('.chevron');
+  body.classList.toggle('collapsed');
+  if (chevron) chevron.classList.toggle('collapsed');
+}
+
+// ---- Skill CRUD ----
+function showSkillModal(skillName) {
+  const existing = skillName ? _skillsData.find(s => s.name === skillName) : null;
+  const isEdit = !!existing;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'skillModal';
+  let kwHtml = '';
+  const keywords = existing ? existing.trigger_keywords : [];
+  kwHtml = '<div class="kw-tags" id="kwTags">' +
+    keywords.map((kw, i) => '<span class="kw-tag">' + escapeHtml(kw) + '<span class="rm" onclick="removeKw(' + i + ')">x</span></span>').join('') +
+    '</div>' +
+    '<div class="kw-input"><input id="kwInput" placeholder="输入触发词后回车" onkeydown="addKw(event)"><button onclick="addKwBtn()">添加</button></div>';
+
+  overlay.innerHTML =
+    '<div class="modal" onclick="event.stopPropagation()">' +
+      '<h3>' + (isEdit ? '编辑技能' : '新建技能') + '</h3>' +
+      (isEdit ? '' : '<label>标识 (英文)</label><input id="skillName" value="" placeholder="my-skill">') +
+      '<label>名称</label><input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '">' +
+      '<label>简介</label><textarea id="skillDesc">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
+      '<label>触发关键词</label>' + kwHtml +
+      '<div class="btn-row">' +
+        '<button class="btn-cancel" onclick="closeModal()">取消</button>' +
+        '<button class="btn-primary" onclick="saveSkill(\'' + (skillName || '') + '\')">' + (isEdit ? '保存' : '创建') + '</button>' +
+      '</div>' +
+    '</div>';
+  overlay.onclick = closeModal;
+  document.body.appendChild(overlay);
+
+  window._kwList = [...keywords];
+  setTimeout(() => {
+    const el = document.getElementById(isEdit ? 'skillTitle' : 'skillName');
+    if (el) el.focus();
+  }, 100);
+}
+
+function addKw(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addKwBtn();
+  }
+}
+
+function addKwBtn() {
+  const input = document.getElementById('kwInput');
+  const val = input.value.trim();
+  if (!val) return;
+  window._kwList.push(val);
+  input.value = '';
+  renderKwTags();
+}
+
+function removeKw(i) {
+  window._kwList.splice(i, 1);
+  renderKwTags();
+}
+
+function renderKwTags() {
+  const tags = document.getElementById('kwTags');
+  if (!tags) return;
+  tags.innerHTML = window._kwList.map((kw, i) =>
+    '<span class="kw-tag">' + escapeHtml(kw) + '<span class="rm" onclick="removeKw(' + i + ')">x</span></span>'
+  ).join('');
+}
+
+function closeModal() {
+  const m = document.getElementById('skillModal');
+  if (m) m.remove();
+}
+
+function saveSkill(skillName) {
+  const isEdit = !!skillName;
+  const name = isEdit ? skillName : document.getElementById('skillName').value.trim();
+  const title = document.getElementById('skillTitle').value.trim();
+  const description = document.getElementById('skillDesc').value.trim();
+  const keywords = window._kwList || [];
+
+  if (!name || !title) { alert('请填写标识和名称'); return; }
+
+  const url = isEdit ? '/skills/' + skillName : '/skills';
+  const method = isEdit ? 'PUT' : 'POST';
+  fetch(url, {
+    method: method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, title: title, description: description, trigger_keywords: keywords }),
+  }).then(r => r.json()).then(d => {
+    closeModal();
+    if (d.error) { alert(d.error); return; }
+    loadSkills();
+  });
+}
+
+function deleteSkill(name) {
+  if (!confirm('删除技能 "' + name + '"？')) return;
+  fetch('/skills/' + name, { method: 'DELETE' }).then(() => loadSkills());
 }
 
 function runSkill(name, keyword) {

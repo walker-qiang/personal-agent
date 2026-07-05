@@ -54,7 +54,8 @@ class ChatService:
             timeout_sec=config.agent_model_timeout_sec,
         )
         self.role = role or INVESTMENT_ANALYST
-        self.skills = skills if skills is not None else _load_default_skills(skills_dir)
+        self.skills_dir = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
+        self.skills = skills if skills is not None else _load_default_skills(self.skills_dir)
         self.store = SessionStore(config.store_path)
         self.store.backfill_titles()  # migrate existing sessions
 
@@ -170,6 +171,11 @@ class ChatService:
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
     # ---- Internal ----
+
+    def reload_skills(self) -> list[SkillDefinition]:
+        """Reload skills from disk (after CRUD)."""
+        self.skills = _load_default_skills(self.skills_dir)
+        return self.skills
 
     def _get_history(self, session_id: str) -> list[dict[str, str]]:
         return self.store.get_history(session_id, self.config.memory_max_turns)
