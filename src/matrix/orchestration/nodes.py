@@ -9,7 +9,7 @@ from typing import Any
 
 from langgraph.types import RunnableConfig
 
-from ..llm import LLMError
+from ..llm import LLMError, FunctionCallResult
 from ..tools import FinanceToolError, ToolRegistry
 from .state import AgentState
 
@@ -30,30 +30,11 @@ Available skills:
 IMPORTANT: Only use "skill" intent when the user's request CLEARLY matches a skill's purpose. Default to "react" for simple questions and "plan_execute" for complex analysis.
 """
 
-REACT_SYSTEM = """You are an investment analyst agent operating in ReAct mode.
+REACT_SYSTEM = """You are an investment analyst agent. Use the available tools to answer the user's question.
 
-Available tools: {tools}
-
-You MUST follow this EXACT format in every response. Do NOT add any other text outside this format.
-
-When you need to call a tool:
-Thought: [reason about what to do next in one sentence]
-Action: [tool_name exactly as listed]
-Action Input: [valid JSON arguments for the tool]
-
-When you have enough information to answer the user:
-Thought: I have enough information to answer
-Final Answer: [your answer to the user, using Markdown for formatting — use **bold** for key numbers, tables for comparisons, and bullet lists for breakdowns]
-
-Strict rules:
-- ONE action per turn, never return multiple actions
-- Action MUST be exactly the tool name from the list above
-- Use only the listed tool names with valid JSON arguments
-- Never fabricate data; if tool data is missing, say so
-- Keep answers concise; money is CNY unless stated otherwise
-- Reply in the same language as the user
-- Use Markdown formatting: **bold** for key figures, `code` for asset codes, tables for data, bullet lists for breakdowns
-"""
+When you have enough information to answer, respond directly in the same language as the user.
+Use Markdown formatting: **bold** for key figures, `code` for asset codes, tables for data, bullet lists for breakdowns.
+Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so."""
 
 PLAN_SYSTEM = """You are an investment analyst agent operating in Plan-Execute mode.
 
@@ -65,19 +46,21 @@ Each step: {{"step": 1, "tool": "tool_name", "arguments": {{}}, "purpose": "why 
 Return ONLY the JSON array, no other text.
 """
 
-SUMMARIZE_SYSTEM = """You are an investment analyst. Answer the user's question using only the provided data.
+REFLECTION_PROMPT = """You are a quality reviewer. Check if the answer below is accurate and complete.
 
-Context:
-- User question: {question}
-- Tool results: {tool_results}
+User question: {question}
+Answer to review: {answer}
 
-Rules:
-- Use only the provided data, never fabricate
-- Money is CNY unless stated otherwise, format large numbers with commas
-- Keep answers concise and well-structured
-- Reply in the same language as the user
-- Use Markdown formatting: **bold** for key figures and conclusions, tables for numerical comparisons, bullet lists for breakdowns, `code` for asset codes
-"""
+Check:
+1. Does the answer directly address the question?
+2. Are all claims supported by the data (no fabrication)?
+3. Is the answer complete (no missing key info)?
+
+Return ONLY a JSON object:
+{{"ok": true}} — if the answer is good
+{{"ok": false, "issues": ["issue 1", "issue 2"]}} — if there are problems
+
+Do NOT rewrite the answer. Just evaluate."""
 
 # ---- Limits ----
 
@@ -90,14 +73,12 @@ MAX_PLAN_STEPS = 5
 def _extract_json(text: str) -> Any:
     """Extract a JSON object or array from text, handling markdown fences."""
     cleaned = text.strip()
-    # Try markdown fence first
     fence = re.search(
         r"```(?:json)?\s*([\[{].*?[\]}])\s*```", cleaned, flags=re.DOTALL
     )
     if fence:
         cleaned = fence.group(1)
     elif not (cleaned.startswith("{") or cleaned.startswith("[")):
-        # Find first JSON boundary
         brace = cleaned.find("{")
         bracket = cleaned.find("[")
         candidates = [i for i in (brace, bracket) if i >= 0]
@@ -109,12 +90,10 @@ def _extract_json(text: str) -> Any:
 
 
 def _get_configurable(config: RunnableConfig) -> dict[str, Any]:
-    """Extract configurable parameters from LangGraph config."""
     return config.get("configurable", {})
 
 
 def _build_system_prompt(base: str, cfg: dict[str, Any]) -> str:
-    """Prepend role persona to the system prompt if available."""
     role = cfg.get("role")
     if role is not None:
         return role.to_system_prompt() + "\n" + base
@@ -122,7 +101,6 @@ def _build_system_prompt(base: str, cfg: dict[str, Any]) -> str:
 
 
 def _trace(cfg: dict[str, Any], event: dict[str, Any]) -> None:
-    """Record a trace event if a trace sink is configured."""
     sink = cfg.get("trace")
     if sink is not None:
         sink.record(event)
@@ -132,19 +110,41 @@ def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
+    """Build tool definitions list for LLM function calling."""
+    return tools.list_tools()
+
+
+def _fallback_plan(tools: ToolRegistry) -> list[dict[str, Any]]:
+    """Build a minimal fallback plan using available tools."""
+    names = tools.tool_names()
+    plan = []
+    step = 1
+    for name in ("finance.holdings_summary", "finance.bucket_allocation"):
+        if name in names:
+            plan.append({"step": step, "tool": name, "arguments": {}, "purpose": "分析"})
+            step += 1
+    if not plan and names:
+        plan.append({"step": 1, "tool": names[0], "arguments": {}, "purpose": "分析"})
+    return plan
+
+
 # ---- Nodes ----
 
 
 def classify_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Classify the user's intent: skill, react, or plan_execute."""
+    # Respect pre-set intent (e.g. from tests or re-entry)
+    if state.get("intent"):
+        return {}
     cfg = _get_configurable(config)
-    llm = cfg["llm"]
+    llm = cfg.get("pipeline_llm", cfg["llm"])
     skills = cfg.get("skills", [])
     user_msg = state["user_message"]
     if not user_msg.strip():
         return {"intent": "react"}
 
-    # Dynamic skill matching (keyword-based, fast path)
+    # Dynamic skill matching (keyword-based, fast path — zero LLM cost)
     for skill in skills:
         if hasattr(skill, "matches") and skill.matches(user_msg):
             return {"intent": "skill", "skill_name": skill.name}
@@ -182,7 +182,7 @@ def react_node(
     *,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """ReAct loop: Thought → Action → Observation → Thought..."""
+    """ReAct loop using native function calling with regex fallback."""
     cfg = _get_configurable(config)
     llm = cfg["llm"]
     tools: ToolRegistry = cfg["tools"]
@@ -197,11 +197,9 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    tools_list = json.dumps(tools.list_tools(), ensure_ascii=False)
-    system_prompt = _build_system_prompt(
-        REACT_SYSTEM.format(tools=tools_list), cfg
-    )
+    system_prompt = _build_system_prompt(REACT_SYSTEM, cfg)
 
+    # Build context with previous results
     context = f"User question: {user_msg}\n\n"
     if tool_results:
         context += (
@@ -223,6 +221,157 @@ def react_node(
                 + ", ".join(dupes)
                 + ". Do NOT call them again. Use the existing results to answer the question.\n\n"
             )
+    context += "What should be the next action? Answer directly if you have enough data."
+
+    # === Primary path: native function calling ===
+    try:
+        llm_tools = _build_tools_for_llm(tools)
+        result: FunctionCallResult = llm.function_call(
+            system_prompt, [{"role": "user", "content": context}], llm_tools
+        )
+
+        # LLM returned tool calls
+        if result.tool_calls:
+            return _execute_tool_calls(result.tool_calls, tool_results, state, tools, cfg, "react")
+
+        # LLM returned direct answer (no tool calls)
+        if result.content:
+            return {
+                "final_answer": result.content.strip(),
+                "react_iteration": iteration + 1,
+            }
+
+        # Empty response — fall through to regex fallback
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as io_err:
+        import logging
+        logging.getLogger("matrix").warning(
+            "Function calling failed, falling back to regex: %s", io_err
+        )
+    except Exception:
+        pass  # Unexpected error — fall through to regex fallback
+
+    # === Fallback: regex-based ReAct parsing ===
+    return _react_fallback(state, config)
+
+
+def _execute_tool_calls(
+    tool_calls: list,
+    tool_results: list[dict],
+    state: AgentState,
+    tools: ToolRegistry,
+    cfg: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    """Execute a batch of tool calls from LLM response.
+
+    Returns updated state with only actually-executed calls counted.
+    Deduplicated and unknown tool calls are skipped and not counted.
+    """
+    executed = 0
+    for tc in tool_calls:
+        name = getattr(tc, "name", "")
+        args = getattr(tc, "arguments", {})
+
+        if name not in tools.tool_names():
+            continue
+
+        # Deduplication
+        args_key = json.dumps(args, sort_keys=True)
+        dup = any(
+            prev.get("name") == name
+            and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key
+            for prev in tool_results
+        )
+        if dup:
+            continue
+
+        executed += 1
+        started = time.perf_counter()
+        try:
+            result = tools.call(name, args)
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "ok": True,
+                "node": source,
+                "tool": name,
+                "arguments": args,
+                "elapsed_ms": elapsed_ms,
+                "ts": _now_ts(),
+            })
+            tool_results.append({
+                "name": name,
+                "arguments": args,
+                "result": result,
+                "elapsed_ms": elapsed_ms,
+            })
+        except FinanceToolError as err:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "ok": False,
+                "node": source,
+                "tool": name,
+                "arguments": args,
+                "error": str(err),
+                "elapsed_ms": elapsed_ms,
+                "ts": _now_ts(),
+            })
+            tool_results.append({
+                "name": name,
+                "arguments": args,
+                "error": str(err),
+                "elapsed_ms": elapsed_ms,
+            })
+
+    return {
+        "tool_results": tool_results,
+        "react_iteration": state.get("react_iteration", 0) + 1,
+        "tool_call_count": state.get("tool_call_count", 0) + executed,
+    }
+
+
+def _react_fallback(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    """Regex-based ReAct fallback for when function calling fails."""
+    cfg = _get_configurable(config)
+    llm = cfg["llm"]
+    tools: ToolRegistry = cfg["tools"]
+
+    iteration = state.get("react_iteration", 0)
+    user_msg = state["user_message"]
+    tool_results = list(state.get("tool_results", []))
+
+    tools_list = json.dumps(tools.list_tools(), ensure_ascii=False)
+    system_prompt = _build_system_prompt(
+        """You are an investment analyst agent operating in ReAct mode.
+
+Available tools: {tools}
+
+You MUST follow this EXACT format in every response:
+
+When you need to call a tool:
+Thought: [reason about what to do next in one sentence]
+Action: [tool_name exactly as listed]
+Action Input: [valid JSON arguments for the tool]
+
+When you have enough information to answer the user:
+Thought: I have enough information to answer
+Final Answer: [your answer to the user, using Markdown for formatting]
+
+Strict rules:
+- ONE action per turn, never return multiple actions
+- Use only the listed tool names with valid JSON arguments
+- Never fabricate data; if tool data is missing, say so
+- Keep answers concise; money is CNY unless stated otherwise
+- Reply in the same language as the user""".format(tools=tools_list),
+        cfg,
+    )
+
+    context = f"User question: {user_msg}\n\n"
+    if tool_results:
+        context += (
+            "Previous tool results:\n"
+            + json.dumps(tool_results, ensure_ascii=False, indent=2)
+            + "\n\n"
+        )
     context += "What should be the next action?"
 
     try:
@@ -234,7 +383,7 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    # Check for Final Answer — strict format first
+    # Check for Final Answer
     final_match = re.search(r"Final Answer:\s*(.+)", response, re.DOTALL | re.IGNORECASE)
     if final_match:
         return {
@@ -242,28 +391,18 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    # Parse Action — try strict ReAct format first, then fallback
+    # Parse Action
     action_match = re.search(r"Action:\s*(.+?)(?:\n|$)", response)
     tool_name = ""
     if action_match:
         tool_name = action_match.group(1).strip()
     else:
-        # Fallback: try to find a tool name mentioned anywhere in the response
         for tname in tools.tool_names():
             if tname in response:
                 tool_name = tname
                 break
 
     if not tool_name:
-        # No tool call found — LLM probably answered directly
-        # If we have tool results from a previous iteration, use them as context
-        if iteration > 0 and tool_results:
-            return {
-                "final_answer": response.strip(),
-                "react_iteration": iteration + 1,
-            }
-        # First iteration: trust the LLM response as a direct answer
-        # (e.g., simple greetings or questions that don't need tools)
         return {
             "final_answer": response.strip(),
             "react_iteration": iteration + 1,
@@ -276,9 +415,7 @@ def react_node(
             "react_iteration": iteration + 1,
         }
 
-    args_match = re.search(
-        r"Action Input:\s*(.+?)(?:\n\S|\Z)", response, re.DOTALL
-    )
+    args_match = re.search(r"Action Input:\s*(.+?)(?:\n\S|\Z)", response, re.DOTALL)
     arguments: dict[str, Any] = {}
     if args_match:
         try:
@@ -290,49 +427,36 @@ def react_node(
 
     started = time.perf_counter()
 
-    # Deduplication: if same tool + same args was already called, skip silently
+    # Deduplication — increment tool_call_count to prevent stall
     args_key = json.dumps(arguments, sort_keys=True)
     for prev in tool_results:
         if prev.get("name") == tool_name and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key:
-            # Return empty update — no new tool_result, no SSE event
             return {
-                "tool_call_count": state.get("tool_call_count", 0),
+                "tool_call_count": state.get("tool_call_count", 0) + 1,
                 "react_iteration": iteration + 1,
+                "error": f"Duplicate tool call skipped: {tool_name}",
             }
 
     try:
         result = tools.call(tool_name, arguments)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         _trace(cfg, {
-            "ok": True,
-            "node": "react",
-            "tool": tool_name,
-            "arguments": arguments,
-            "elapsed_ms": elapsed_ms,
-            "ts": _now_ts(),
+            "ok": True, "node": "react_fallback", "tool": tool_name,
+            "arguments": arguments, "elapsed_ms": elapsed_ms, "ts": _now_ts(),
         })
         tool_results.append({
-            "name": tool_name,
-            "arguments": arguments,
-            "result": result,
-            "elapsed_ms": elapsed_ms,
+            "name": tool_name, "arguments": arguments,
+            "result": result, "elapsed_ms": elapsed_ms,
         })
     except FinanceToolError as err:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         _trace(cfg, {
-            "ok": False,
-            "node": "react",
-            "tool": tool_name,
-            "arguments": arguments,
-            "error": str(err),
-            "elapsed_ms": elapsed_ms,
-            "ts": _now_ts(),
+            "ok": False, "node": "react_fallback", "tool": tool_name,
+            "arguments": arguments, "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
         })
         tool_results.append({
-            "name": tool_name,
-            "arguments": arguments,
-            "error": str(err),
-            "elapsed_ms": elapsed_ms,
+            "name": tool_name, "arguments": arguments,
+            "error": str(err), "elapsed_ms": elapsed_ms,
         })
 
     return {
@@ -345,7 +469,7 @@ def react_node(
 def plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Generate an execution plan for complex multi-step analysis."""
     cfg = _get_configurable(config)
-    llm = cfg["llm"]
+    llm = cfg.get("pipeline_llm", cfg["llm"])
     tools: ToolRegistry = cfg["tools"]
 
     user_msg = state["user_message"]
@@ -361,10 +485,7 @@ def plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     except LLMError as err:
         return {
             "error": f"LLM error: {err}",
-            "current_plan": [
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}, "purpose": "获取当前持仓概况"},
-                {"step": 2, "tool": "finance.bucket_allocation", "arguments": {}, "purpose": "检查配置偏离度"},
-            ],
+            "current_plan": _fallback_plan(tools),
         }
 
     try:
@@ -376,10 +497,7 @@ def plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
         plan = []
 
     if not plan:
-        plan = [
-            {"step": 1, "tool": "finance.holdings_summary", "arguments": {}, "purpose": "获取当前持仓概况"},
-            {"step": 2, "tool": "finance.bucket_allocation", "arguments": {}, "purpose": "检查配置偏离度"},
-        ]
+        plan = _fallback_plan(tools)
 
     return {"current_plan": plan[:MAX_PLAN_STEPS]}
 
@@ -406,35 +524,23 @@ def execute_node(
         result = tools.call(step["tool"], step.get("arguments", {}))
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         _trace(cfg, {
-            "ok": True,
-            "node": "execute",
-            "tool": step["tool"],
-            "arguments": step.get("arguments", {}),
-            "elapsed_ms": elapsed_ms,
-            "ts": _now_ts(),
+            "ok": True, "node": "execute", "tool": step["tool"],
+            "arguments": step.get("arguments", {}), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
         })
         tool_results.append({
-            "name": step["tool"],
-            "arguments": step.get("arguments", {}),
-            "result": result,
-            "elapsed_ms": elapsed_ms,
+            "name": step["tool"], "arguments": step.get("arguments", {}),
+            "result": result, "elapsed_ms": elapsed_ms,
         })
     except FinanceToolError as err:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         _trace(cfg, {
-            "ok": False,
-            "node": "execute",
-            "tool": step["tool"],
-            "arguments": step.get("arguments", {}),
-            "error": str(err),
-            "elapsed_ms": elapsed_ms,
-            "ts": _now_ts(),
+            "ok": False, "node": "execute", "tool": step["tool"],
+            "arguments": step.get("arguments", {}), "error": str(err),
+            "elapsed_ms": elapsed_ms, "ts": _now_ts(),
         })
         tool_results.append({
-            "name": step["tool"],
-            "arguments": step.get("arguments", {}),
-            "error": str(err),
-            "elapsed_ms": elapsed_ms,
+            "name": step["tool"], "arguments": step.get("arguments", {}),
+            "error": str(err), "elapsed_ms": elapsed_ms,
         })
 
     return {
@@ -444,14 +550,10 @@ def execute_node(
 
 
 def summarize_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Generate the final answer from tool results."""
-    cfg = _get_configurable(config)
-    llm = cfg["llm"]
-
+    """Prepare summarization context. LLM call is deferred to chat.py for streaming."""
     user_msg = state["user_message"]
     tool_results = state.get("tool_results", [])
 
-    # Only use existing final_answer if it's a real answer (not a skill placeholder)
     existing = state.get("final_answer", "")
     if existing and not existing.startswith("技能「"):
         return {"final_answer": existing}
@@ -459,27 +561,13 @@ def summarize_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     if not tool_results:
         return {"final_answer": "未获取到任何数据，请检查工具调用。"}
 
-    system_prompt = _build_system_prompt(
-        SUMMARIZE_SYSTEM.format(
-            question=user_msg,
-            tool_results=json.dumps(tool_results, ensure_ascii=False, indent=2),
-        ),
-        cfg,
-    )
-
-    try:
-        answer = llm.complete(system_prompt, [{"role": "user", "content": "请回答。"}])
-        return {"final_answer": answer.strip()}
-    except LLMError as err:
-        return {"final_answer": "无法生成回答，请查看原始数据。", "error": str(err)}
-    except Exception:
-        return {"final_answer": "无法生成回答，请查看原始数据。"}
+    return {"needs_summary": True}
 
 
 def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Execute a predefined skill workflow and return results.
 
-    Does NOT set final_answer — let summarize_node generate the real answer.
+    Injects knowledge files into the context for the summarization step.
     """
     cfg = _get_configurable(config)
     tools: ToolRegistry = cfg["tools"]
@@ -498,6 +586,25 @@ def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             "error": f"Skill not found: {skill_name}",
             "final_answer": f"技能 {skill_name} 未找到。",
         }
+
+    # Build knowledge context from skill's knowledge files
+    # read_knowledge expects <skills_dir>/<skill_name>/knowledge/
+    knowledge_context = ""
+    if hasattr(skill, "knowledge_files") and skill.knowledge_files:
+        skills_dir = cfg.get("skills_dir")
+        if skills_dir:
+            try:
+                entries = skill.read_knowledge(skills_dir / skill_name)
+                if entries:
+                    parts = ["\n\n## 领域知识\n"]
+                    for entry in entries:
+                        parts.append(f"### {entry['name']}\n{entry['content']}\n")
+                    knowledge_context = "".join(parts)
+            except (OSError, FileNotFoundError) as err:
+                import logging
+                logging.getLogger("matrix").warning(
+                    "Failed to read knowledge for skill %s: %s", skill_name, err
+                )
 
     # Execute skill workflow
     from ..skills.executor import execute_skill
@@ -519,9 +626,52 @@ def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             ),
         }
 
-    # Let summarize_node generate the real answer from tool results
+    # Attach knowledge context to tool_results for summarization
+    enriched_results = list(result.get("results", []))
+    if knowledge_context:
+        enriched_results.append({
+            "name": "_knowledge",
+            "result": knowledge_context,
+        })
+
     return {
-        "tool_results": result.get("results", []),
+        "tool_results": enriched_results,
         "tool_call_count": result.get("steps_executed", 0),
         "findings": findings,
     }
+
+
+def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Lightweight self-check: verify the answer addresses the question."""
+    cfg = _get_configurable(config)
+    llm = cfg.get("pipeline_llm", cfg["llm"])
+
+    answer = state.get("final_answer", "")
+    user_msg = state.get("user_message", "")
+
+    if not answer or not user_msg:
+        return {}
+
+    # Skip reflection for very short answers (< ~5 Chinese chars)
+    if len(answer) < 15:
+        return {}
+
+    try:
+        response = llm.complete(
+            REFLECTION_PROMPT.format(question=user_msg, answer=answer),
+            [{"role": "user", "content": "Evaluate the answer."}],
+        )
+        data = _extract_json(response)
+        if isinstance(data, dict) and data.get("ok") is False:
+            issues = data.get("issues", [])
+            if issues:
+                corrected = (
+                    answer
+                    + "\n\n---\n> ⚠️ 自检发现问题："
+                    + "；".join(issues)
+                )
+                return {"final_answer": corrected}
+    except (LLMError, json.JSONDecodeError, ValueError):
+        pass
+
+    return {}

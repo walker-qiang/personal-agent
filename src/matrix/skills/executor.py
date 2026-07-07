@@ -31,7 +31,8 @@ def execute_skill(
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             results.append({
                 "step": step["step"],
-                "tool": tool_name,
+                "name": tool_name,
+                "arguments": step.get("arguments", {}),
                 "result": result,
                 "elapsed_ms": elapsed_ms,
             })

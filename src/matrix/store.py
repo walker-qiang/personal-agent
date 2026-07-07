@@ -18,6 +18,8 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL DEFAULT '',
+    provider    TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
     msg_count   INTEGER NOT NULL DEFAULT 0
@@ -53,8 +55,19 @@ class SessionStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
+            # Auto-migration: add provider column if missing (for existing DBs)
+            self._migrate()
             self._conn.commit()
         return self._conn
+
+    def _migrate(self) -> None:
+        """Add any missing columns to existing tables."""
+        assert self._conn is not None
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "provider" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
+        if "model" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         with self._lock:
@@ -114,6 +127,43 @@ class SessionStore:
             )
             self._get_conn().commit()
 
+    # ---- Provider ----
+
+    def get_provider(self, session_id: str) -> str:
+        """Get the LLM provider assigned to a session."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT provider FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        return row[0] if row and row[0] else ""
+
+    def get_model(self, session_id: str) -> str:
+        """Get the LLM model assigned to a session."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT model FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        return row[0] if row and row[0] else ""
+
+    def set_provider(self, session_id: str, provider: str, model: str = "") -> None:
+        """Set the LLM provider and optionally model for a session."""
+        with self._lock:
+            conn = self._get_conn()
+            cols = ["provider"]
+            vals = [provider]
+            if model:
+                cols.append("model")
+                vals.append(model)
+            conn.execute(
+                "INSERT INTO sessions (id, provider, model, created_at, updated_at, msg_count) "
+                "VALUES (?, ?, ?, ?, ?, 0) "
+                "ON CONFLICT(id) DO UPDATE SET provider=excluded.provider"
+                + (", model=excluded.model" if model else "")
+                + ", updated_at=excluded.updated_at",
+                (session_id, provider, model, time.time(), time.time()),
+            )
+            conn.commit()
+
     # ---- Message CRUD ----
 
     def save_message(self, session_id: str, role: str, content: str) -> None:
@@ -171,11 +221,11 @@ class SessionStore:
         """Set titles for sessions that have messages but no title."""
         with self._lock:
             cur = self._get_conn().execute(
-                "UPDATE sessions SET title = ("
+                "UPDATE sessions SET title = COALESCE(("
                 "  SELECT substr(content, 1, 30) FROM messages "
                 "  WHERE messages.session_id = sessions.id AND messages.role = 'user' "
                 "  ORDER BY messages.created_at ASC LIMIT 1"
-                ") WHERE title = '' OR title IS NULL"
+                "), '') WHERE title = '' OR title IS NULL"
             )
             self._get_conn().commit()
             return cur.rowcount

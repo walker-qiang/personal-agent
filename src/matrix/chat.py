@@ -1,19 +1,22 @@
-"""Chat orchestration: LangGraph-based classify → react/plan/skill → summarize."""
+"""Chat orchestration: LangGraph-based classify → react/plan/skill → summarize → reflection."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .config import AgentConfig
-from .llm import LLMClient, build_llm_client
+from .config import AgentConfig, KNOWN_MODELS, default_model
+from .llm import LLMClient, LLMError, build_llm_client
+from .llm.http import set_rate_limiter
 from .orchestration import build_graph
 from .orchestration.state import AgentState
+from .rate_limiter import TokenBucketRateLimiter
 from .role import INVESTMENT_ANALYST, RoleDefinition
 from .skills import SkillDefinition, load_skills
 from .store import SessionStore
@@ -22,6 +25,14 @@ from .tools import FinanceToolError, ToolRegistry
 # Default skills directory relative to the project root
 _DEFAULT_SKILLS_DIR = Path("skills/investment")
 
+SUMMARIZE_SYSTEM = """You are an investment analyst. Answer the user's question using only the provided data.
+Rules:
+- Use only the provided data, never fabricate
+- Money is CNY unless stated otherwise, format large numbers with commas
+- Keep answers concise and well-structured
+- Reply in the same language as the user
+- Use Markdown formatting: **bold** for key figures, tables for comparisons, bullet lists for breakdowns"""
+
 
 class TraceSink(Protocol):
     def record(self, event: dict[str, Any]) -> None:
@@ -29,7 +40,7 @@ class TraceSink(Protocol):
 
 
 class ChatService:
-    """LangGraph-based chat orchestration: classify → react/plan/skill → summarize."""
+    """LangGraph-based chat orchestration: classify → react/plan/skill → summarize → reflection."""
 
     def __init__(
         self,
@@ -44,34 +55,143 @@ class ChatService:
         self.config = config
         self.tools = tools
         self.trace = trace
-        self.llm = llm or build_llm_client(
+        self._default_llm = llm or build_llm_client(
             provider=config.agent_provider,
             deepseek_api_key=config.deepseek_api_key,
             anthropic_api_key=config.anthropic_api_key,
+            agnes_api_key=config.agnes_api_key,
             model=config.agent_model,
             deepseek_base_url=config.deepseek_base_url,
+            agnes_base_url=config.agnes_base_url,
             max_tokens=config.agent_max_tokens,
             timeout_sec=config.agent_model_timeout_sec,
+            max_message_chars=config.max_message_chars,
         )
+        self._default_provider = config.agent_provider
+        self._llm_cache: dict[str, LLMClient] = {}  # per-provider+model cache
+
+        # Pipeline LLM: fixed model for internal tasks (classify, plan, reflection)
+        # When an explicit LLM is injected (e.g. tests), reuse it as pipeline_llm
+        if llm is not None:
+            self._pipeline_llm = llm
+        else:
+            self._pipeline_llm = build_llm_client(
+                provider=config.pipeline_provider,
+                deepseek_api_key=config.deepseek_api_key,
+                anthropic_api_key=config.anthropic_api_key,
+                agnes_api_key=config.agnes_api_key,
+                model=config.pipeline_model,
+                deepseek_base_url=config.deepseek_base_url,
+                agnes_base_url=config.agnes_base_url,
+                max_tokens=config.agent_max_tokens,
+                timeout_sec=config.agent_model_timeout_sec,
+                max_message_chars=config.max_message_chars,
+            )
         self.role = role or INVESTMENT_ANALYST
         self.skills_dir = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
         self.skills = skills if skills is not None else _load_default_skills(self.skills_dir)
         self.store = SessionStore(config.store_path)
-        self.store.backfill_titles()  # migrate existing sessions
+        self.store.backfill_titles()
+
+        # Configure rate limiter for LLM API calls
+        if config.rate_limit_per_sec > 0:
+            set_rate_limiter(TokenBucketRateLimiter(config.rate_limit_per_sec))
 
         # Pre-build and compile the LangGraph graph once
         self._graph = build_graph()
-        self._checkpointer = MemorySaver()
+        self._checkpoint_conn = sqlite3.connect(
+            config.checkpoint_path,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._checkpointer = SqliteSaver(self._checkpoint_conn)
         self._compiled_graph = self._graph.compile(checkpointer=self._checkpointer)
 
+    def __enter__(self) -> "ChatService":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close resources: checkpoint database connection and session store."""
+        if hasattr(self, "_checkpoint_conn") and self._checkpoint_conn:
+            self._checkpoint_conn.close()
+        if hasattr(self, "store") and self.store:
+            self.store.close()
+
     # ---- Public API ----
+
+    @property
+    def available_providers(self) -> list[dict[str, Any]]:
+        """List available providers with their models."""
+        providers = []
+        if self.config.deepseek_api_key:
+            providers.append({"id": "deepseek", "name": "DeepSeek", "models": KNOWN_MODELS.get("deepseek", [])})
+        if self.config.anthropic_api_key:
+            providers.append({"id": "anthropic", "name": "Anthropic", "models": KNOWN_MODELS.get("anthropic", [])})
+        if self.config.agnes_api_key:
+            providers.append({"id": "agnes", "name": "Agnes AI", "models": KNOWN_MODELS.get("agnes", [])})
+        return providers
+
+    def get_provider(self, session_id: str | None = None) -> dict[str, str]:
+        """Get the LLM provider and model for a session, falling back to default."""
+        if session_id:
+            provider = self.store.get_provider(session_id)
+            model = self.store.get_model(session_id)
+            if provider:
+                return {"provider": provider, "model": model or default_model(provider)}
+        return {"provider": self._default_provider, "model": default_model(self._default_provider)}
+
+    def switch_provider(self, session_id: str, provider: str, model: str = "") -> dict[str, Any]:
+        """Set the LLM provider and model for a specific session.
+
+        Args:
+            session_id: Session to configure.
+            provider: One of 'deepseek', 'anthropic', 'agnes'.
+            model: Specific model ID (optional, falls back to provider default).
+
+        Returns:
+            dict with 'ok', 'provider', and 'model' fields.
+        """
+        if provider not in {"deepseek", "anthropic", "agnes"}:
+            return {"ok": False, "error": f"unsupported provider: {provider}"}
+        self.store.set_provider(session_id, provider, model)
+        return {"ok": True, "provider": provider, "model": model or default_model(provider)}
+
+    def _build_llm(self, provider: str, model: str | None = None) -> LLMClient:
+        """Build (or return cached) LLM client for a provider+model."""
+        cache_key = f"{provider}:{model or ''}"
+        if cache_key not in self._llm_cache:
+            self._llm_cache[cache_key] = build_llm_client(
+                provider=provider,
+                deepseek_api_key=self.config.deepseek_api_key,
+                anthropic_api_key=self.config.anthropic_api_key,
+                agnes_api_key=self.config.agnes_api_key,
+                model=model or default_model(provider),
+                deepseek_base_url=self.config.deepseek_base_url,
+                agnes_base_url=self.config.agnes_base_url,
+                max_tokens=self.config.agent_max_tokens,
+                timeout_sec=self.config.agent_model_timeout_sec,
+                max_message_chars=self.config.max_message_chars,
+            )
+        return self._llm_cache[cache_key]
+
+    def _get_llm(self, session_id: str | None) -> LLMClient:
+        """Get the LLM client for a session, using stored provider/model."""
+        if session_id:
+            provider = self.store.get_provider(session_id)
+            if provider:
+                model = self.store.get_model(session_id)
+                return self._build_llm(provider, model or None)
+        return self._default_llm
 
     def reset(self, session_id: str) -> None:
         if session_id:
             self.store.reset(session_id)
 
     def stream_chat(self, message: str, session_id: str | None = None) -> Iterator[dict[str, Any]]:
-        """LangGraph-based streaming chat with classify → react/plan/skill → summarize."""
+        """LangGraph-based streaming chat with classify → react/plan/skill → summarize → reflection."""
         started = time.perf_counter()
         sid = session_id or uuid.uuid4().hex
         text = message.strip()
@@ -88,18 +208,11 @@ class ChatService:
             yield {"type": "done", "session_id": sid, "duration_ms": 0}
             return
 
-        # Inject conversation history into user message for context
-        history = self._get_history(sid)
-        full_message = text
-        if history:
-            history_text = "\n".join(
-                f"[{h['role']}]: {h['content']}" for h in history[-4:]
-            )
-            full_message = f"对话历史:\n{history_text}\n\n当前问题: {text}"
-
+        # Use raw user message (no history injection — LangGraph checkpointer manages
+        # conversation state via add_messages and thread_id)
         initial_state: AgentState = {
             "messages": [],
-            "user_message": full_message,
+            "user_message": text,
             "session_id": sid,
             "intent": "",
             "skill_name": "",
@@ -109,20 +222,25 @@ class ChatService:
             "react_iteration": 0,
             "findings": [],
             "final_answer": "",
+            "needs_summary": False,
             "error": "",
         }
 
         try:
             emitted_tool_count = 0
+            final_state: dict[str, Any] = {}
+            session_llm = self._get_llm(sid)
             for event in self._compiled_graph.stream(
                 initial_state,
                 stream_mode="values",
                 config={
                     "configurable": {
-                        "llm": self.llm,
+                        "llm": session_llm,
+                        "pipeline_llm": self._pipeline_llm,
                         "tools": self.tools,
                         "role": self.role,
                         "skills": self.skills,
+                        "skills_dir": self.skills_dir,
                         "trace": self.trace,
                     },
                     "thread_id": sid,
@@ -130,6 +248,7 @@ class ChatService:
             ):
                 if not isinstance(event, dict):
                     continue
+                final_state = event
 
                 # Yield only NEW tool calls (skip duplicates)
                 tool_results = event.get("tool_results", [])
@@ -137,7 +256,7 @@ class ChatService:
                 if new_count > emitted_tool_count:
                     for i in range(emitted_tool_count, new_count):
                         tr = tool_results[i]
-                        if tr.get("duplicate"):
+                        if tr.get("duplicate") or tr.get("name") == "_knowledge":
                             continue
                         yield {
                             "type": "tool_call",
@@ -159,11 +278,29 @@ class ChatService:
                 if error:
                     yield {"type": "error", "message": error}
 
-                # Yield final answer
+                # Yield final answer (non-streaming path) — do NOT save yet;
+                # reflection_node may modify it after summarization
                 answer = event.get("final_answer", "")
-                if answer:
+                needs_summary = event.get("needs_summary", False)
+                if answer and not needs_summary:
                     yield {"type": "token", "content": answer}
+
+            # Streaming summarization
+            if final_state.get("needs_summary"):
+                answer_parts: list[str] = []
+                for event in self._stream_summarize(final_state, sid, text, session_llm):
+                    yield event
+                    if event["type"] == "token":
+                        answer_parts.append(event["content"])
+                answer = "".join(answer_parts)
+                if answer:
                     self._remember(sid, text, answer)
+            else:
+                # Non-streaming path: save the reflection-modified answer
+                final_answer = final_state.get("final_answer", "")
+                if final_answer and not final_answer.startswith("技能「"):
+                    self._remember(sid, text, final_answer)
+
         except Exception as err:
             yield {"type": "error", "message": f"agent error: {err}"}
         finally:
@@ -183,8 +320,40 @@ class ChatService:
     def _remember(self, session_id: str, question: str, answer: str) -> None:
         self.store.save_message(session_id, "user", question)
         self.store.save_message(session_id, "assistant", answer)
-        # Auto-title: use first 30 chars of first user message
         self.store.update_title(session_id, question[:30].strip())
+
+    def _stream_summarize(
+        self, state: dict[str, Any], session_id: str, original_text: str, llm: LLMClient
+    ) -> Iterator[dict[str, Any]]:
+        """Stream the LLM summarization token by token via SSE."""
+        user_msg = state.get("user_message", original_text)
+        tool_results = state.get("tool_results", [])
+
+        system_prompt = self.role.to_system_prompt() + "\n" + SUMMARIZE_SYSTEM
+
+        user_message = f"""User question: {user_msg}
+
+Tool results:
+{json.dumps(tool_results, ensure_ascii=False, indent=2)}
+
+Please answer the user's question using only the provided data."""
+
+        full_answer: list[str] = []
+        try:
+            for token in llm.stream_complete(
+                system_prompt, [{"role": "user", "content": user_message}]
+            ):
+                full_answer.append(token)
+                yield {"type": "token", "content": token}
+        except LLMError as err:
+            yield {"type": "error", "message": f"LLM error: {err}"}
+            full_answer = ["无法生成回答，请查看原始数据。"]
+            yield {"type": "token", "content": full_answer[0]}
+        except Exception:
+            full_answer = ["无法生成回答，请查看原始数据。"]
+            yield {"type": "token", "content": full_answer[0]}
+
+        return "".join(full_answer).strip()
 
 
 # ---- Module-level helpers ----

@@ -13,3 +13,7 @@ class LLMTransientError(LLMError):
 
 class LLMAuthError(LLMError):
     """Raised when the configured model provider credentials are rejected."""
+
+
+class LLMRateLimitError(LLMError):
+    """Raised when the client-side rate limiter blocks a request."""

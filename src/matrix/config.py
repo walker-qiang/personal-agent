@@ -30,18 +30,48 @@ ENV_AGENT_PORT = "AGENT_PORT"
 ENV_AGENT_PROVIDER = "AGENT_PROVIDER"
 ENV_DEEPSEEK_API_KEY = "DEEPSEEK_API_KEY"
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+ENV_AGNES_API_KEY = "AGNES_API_KEY"
 ENV_AGENT_MODEL = "AGENT_MODEL"
 ENV_AGENT_MAX_TOKENS = "AGENT_MAX_TOKENS"
 ENV_AGENT_MODEL_TIMEOUT_SEC = "AGENT_MODEL_TIMEOUT_SEC"
 ENV_DEEPSEEK_BASE_URL = "DEEPSEEK_BASE_URL"
+ENV_AGNES_BASE_URL = "AGNES_BASE_URL"
 ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
 ENV_STORE_PATH = "MATRIX_STORE_PATH"
+ENV_CHECKPOINT_PATH = "MATRIX_CHECKPOINT_PATH"
+ENV_SKILLS_DIR = "MATRIX_SKILLS_DIR"
+ENV_RATE_LIMIT_PER_SEC = "RATE_LIMIT_PER_SEC"
+ENV_MAX_MESSAGE_CHARS = "MAX_MESSAGE_CHARS"
 
 # ---- Defaults ----
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
+DEFAULT_AGNES_MODEL = "agnes-2.0-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
+
+# Known models per provider (text/chat models only)
+KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
+    "deepseek": [
+        {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "快速 · 1M上下文"},
+        {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
+    ],
+    "agnes": [
+        {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash", "desc": "推荐 · 最新"},
+    ],
+    "anthropic": [
+        {"id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet", "desc": "推荐"},
+        {"id": "claude-3-5-haiku-latest", "name": "Claude 3.5 Haiku", "desc": "快速"},
+    ],
+}
+
+# Pipeline model: used for internal tasks (classify, plan, reflection)
+# Defaults to Agnes 2.0 Flash for speed and cost efficiency
+ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
+ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
+DEFAULT_PIPELINE_PROVIDER = "agnes"
+DEFAULT_PIPELINE_MODEL = "agnes-2.0-flash"
 
 
 @dataclass(frozen=True)
@@ -52,6 +82,8 @@ class AgentConfig:
     cache_path: Path
     trace_path: Path
     store_path: Path
+    checkpoint_path: str
+    skills_dir: Path
     host: str
     port: int
     agent_provider: str = "deepseek"
@@ -60,8 +92,14 @@ class AgentConfig:
     agent_model_timeout_sec: float = 45.0
     deepseek_api_key: str = ""
     anthropic_api_key: str = ""
+    agnes_api_key: str = ""
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    agnes_base_url: str = DEFAULT_AGNES_BASE_URL
     memory_max_turns: int = 8
+    rate_limit_per_sec: float = 5.0
+    max_message_chars: int = 8000
+    pipeline_provider: str = DEFAULT_PIPELINE_PROVIDER
+    pipeline_model: str = DEFAULT_PIPELINE_MODEL
 
     @property
     def active_api_key(self) -> str:
@@ -69,6 +107,8 @@ class AgentConfig:
             return self.deepseek_api_key
         if self.agent_provider == "anthropic":
             return self.anthropic_api_key
+        if self.agent_provider == "agnes":
+            return self.agnes_api_key
         return ""
 
     @property
@@ -77,14 +117,15 @@ class AgentConfig:
 
     @property
     def llm_unavailable_reason(self) -> str:
-        if self.agent_provider not in {"deepseek", "anthropic"}:
+        if self.agent_provider not in {"deepseek", "anthropic", "agnes"}:
             return f"unsupported AGENT_PROVIDER: {self.agent_provider}"
         if not self.active_api_key:
-            key_name = (
-                ENV_DEEPSEEK_API_KEY
-                if self.agent_provider == "deepseek"
-                else ENV_ANTHROPIC_API_KEY
-            )
+            key_map = {
+                "deepseek": ENV_DEEPSEEK_API_KEY,
+                "anthropic": ENV_ANTHROPIC_API_KEY,
+                "agnes": ENV_AGNES_API_KEY,
+            }
+            key_name = key_map.get(self.agent_provider, "API key")
             return f"missing {key_name}"
         return ""
 
@@ -111,6 +152,19 @@ def load_config() -> AgentConfig:
         root / "var" / "agent" / "sessions.db",
     )
 
+    # Checkpoint path: MATRIX_CHECKPOINT_PATH > default
+    checkpoint_path = os.environ.get(
+        ENV_CHECKPOINT_PATH,
+        str(root / "var" / "agent" / "checkpoints.db"),
+    ).strip() or str(root / "var" / "agent" / "checkpoints.db")
+
+    # Skills dir: MATRIX_SKILLS_DIR > default
+    skills_raw = os.environ.get(ENV_SKILLS_DIR, "").strip()
+    if skills_raw:
+        skills_dir = Path(skills_raw).expanduser().resolve()
+    else:
+        skills_dir = root / "skills" / "investment"
+
     host, port = load_bind_addr()
     provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
@@ -120,6 +174,8 @@ def load_config() -> AgentConfig:
         cache_path=cache_path,
         trace_path=trace_path,
         store_path=store_path,
+        checkpoint_path=checkpoint_path,
+        skills_dir=skills_dir,
         host=host,
         port=port,
         agent_provider=provider,
@@ -128,9 +184,18 @@ def load_config() -> AgentConfig:
         agent_model_timeout_sec=clamp_float_env(ENV_AGENT_MODEL_TIMEOUT_SEC, 45.0, 5.0, 180.0),
         deepseek_api_key=os.environ.get(ENV_DEEPSEEK_API_KEY, "").strip(),
         anthropic_api_key=os.environ.get(ENV_ANTHROPIC_API_KEY, "").strip(),
+        agnes_api_key=os.environ.get(ENV_AGNES_API_KEY, "").strip(),
         deepseek_base_url=os.environ.get(ENV_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL).strip()
         or DEFAULT_DEEPSEEK_BASE_URL,
+        agnes_base_url=os.environ.get(ENV_AGNES_BASE_URL, DEFAULT_AGNES_BASE_URL).strip()
+        or DEFAULT_AGNES_BASE_URL,
         memory_max_turns=clamp_int_env(ENV_MEMORY_MAX_TURNS, 8, 1, 30),
+        rate_limit_per_sec=clamp_float_env(ENV_RATE_LIMIT_PER_SEC, 5.0, 0.5, 60.0),
+        max_message_chars=clamp_int_env(ENV_MAX_MESSAGE_CHARS, 8000, 500, 50000),
+        pipeline_provider=os.environ.get(ENV_PIPELINE_PROVIDER, DEFAULT_PIPELINE_PROVIDER).strip().lower()
+        or DEFAULT_PIPELINE_PROVIDER,
+        pipeline_model=os.environ.get(ENV_PIPELINE_MODEL, DEFAULT_PIPELINE_MODEL).strip()
+        or DEFAULT_PIPELINE_MODEL,
     )
 
 
@@ -156,6 +221,8 @@ def load_bind_addr() -> tuple[str, int]:
 def default_model(provider: str) -> str:
     if provider == "anthropic":
         return DEFAULT_ANTHROPIC_MODEL
+    if provider == "agnes":
+        return DEFAULT_AGNES_MODEL
     return DEFAULT_DEEPSEEK_MODEL
 
 

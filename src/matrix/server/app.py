@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -15,7 +16,9 @@ from ..config import AgentConfig, load_config
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
-from .routes import chat, health, sessions, tools
+from .routes import chat, health, provider, sessions, tools
+
+logger = logging.getLogger("matrix")
 
 # Pre-load the Web UI HTML content at module level
 _INDEX_HTML = ""
@@ -33,9 +36,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     trace = TraceLogger(config.trace_path)
     app.state.tools = tools_registry
     app.state.trace = trace
-    app.state.chat = ChatService(config, tools_registry, trace)
-    print(f"matrix agent listening on http://{config.host}:{config.port}")
-    print(f"mode=read-only cache={config.cache_path} trace={config.trace_path}")
+    app.state.chat = ChatService(config, tools_registry, trace, skills_dir=config.skills_dir)
+    logger.info("matrix agent listening on http://%s:%s", config.host, config.port)
+    logger.info("mode=read-only cache=%s trace=%s", config.cache_path, config.trace_path)
     yield
 
 
@@ -64,6 +67,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(health.router)
     app.include_router(sessions.router)
+    app.include_router(provider.router)
 
     # Serve Web UI at root (LAST, so API routes take priority)
     @app.get("/", include_in_schema=False)

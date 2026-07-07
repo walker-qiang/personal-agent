@@ -56,20 +56,61 @@ class SkillDefinition:
             script_files=script_files,
         )
 
+    # Chinese negation words that indicate the user does NOT want this skill
+    _NEGATION_WORDS = {"没有", "不是", "不用", "不需要", "别", "不要", "没", "无", "不", "否", "非"}
+
+    def _has_negation(self, query: str, matched_word: str) -> bool:
+        """Check if the matched word is negated in the query.
+
+        Uses clause-based detection: splits the query by Chinese punctuation
+        and only checks the prefix within the same clause as the match.
+        This avoids false positives when negation applies to a different clause
+        (e.g. "没有异动，但帮我做组合复盘" — "没有" negates "异动", not "组合复盘").
+        """
+        q = query.lower()
+        w = matched_word.lower()
+        idx = q.find(w)
+        if idx < 0:
+            return False
+        # Find the clause containing the match by looking for the nearest separator before idx
+        clause_start = 0
+        for sep in ("，", "。", "！", "？", "；", "：", "、", "\n", ",", "."):
+            sep_pos = q.rfind(sep, 0, idx)
+            if sep_pos >= clause_start:
+                clause_start = sep_pos + 1
+        # Check the prefix within this clause for negation words
+        clause_prefix = q[clause_start:idx]
+        for neg in self._NEGATION_WORDS:
+            if neg in clause_prefix:
+                return True
+        return False
+
     def matches(self, query: str) -> bool:
-        """Check if the query matches this skill's title or description."""
+        """Check if the query matches this skill's title or description.
+
+        Returns False when the matched keyword is negated (e.g. "今天没有异动"
+        will NOT match anomaly-diagnosis even though "异动" is in the description).
+        """
         q = query.lower()
         text = (self.title + " " + self.description).lower()
         words = [w for w in re.split(r"[\s,，。！？、；：""''（）\(\)]+", text) if len(w) >= 2]
-        if any(w in q for w in words):
-            return True
+
+        # Exact word match
+        for w in words:
+            if w in q:
+                if not self._has_negation(query, w):
+                    return True
+        # Substring match for short queries
         if len(q) >= 2 and q in text:
             return True
+        # 2-gram fuzzy match
         for w in words:
             if len(w) > 2:
                 for i in range(len(w) - 1):
-                    if w[i:i+2] in q:
-                        return True
+                    bigram = w[i:i + 2]
+                    if bigram in q:
+                        if not self._has_negation(query, bigram):
+                            return True
         return False
 
     def read_knowledge(self, skill_dir: Path) -> list[dict[str, str]]:
@@ -103,7 +144,9 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
             continue
         try:
             skills.append(SkillDefinition.from_dir(entry))
-        except Exception:
+        except (yaml.YAMLError, OSError, ValueError, KeyError) as err:
+            import logging
+            logging.getLogger("matrix").warning("Failed to load skill dir %s: %s", entry.name, err)
             continue
     return skills
 
@@ -255,7 +298,11 @@ def _parse_workflow(text: str) -> list[dict[str, Any]]:
             args_str = tool_match.group(2).strip()
             try:
                 args = _parse_args(args_str)
-            except Exception:
+            except (ValueError, json.JSONDecodeError) as err:
+                import logging
+                logging.getLogger("matrix").warning(
+                    "Failed to parse args for tool %s: %s", tool_name, err
+                )
                 args = {}
             steps.append({
                 "step": step_num,

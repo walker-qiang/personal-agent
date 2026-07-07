@@ -19,6 +19,8 @@ def client(tmp_cache_path: Path):
         cache_path=tmp_cache_path,
         trace_path=tmp_cache_path.parent / "trace" / "tool-calls.jsonl",
         store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
+        checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
+        skills_dir=tmp_cache_path.parent / "skills" / "investment",
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
@@ -48,6 +50,8 @@ class TestHealthz:
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
+            checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
+            skills_dir=tmp_cache_path.parent / "skills" / "investment",
             host="127.0.0.1",
             port=0,
         )
@@ -145,6 +149,8 @@ class TestChat:
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
+            checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
+            skills_dir=tmp_cache_path.parent / "skills" / "investment",
             host="127.0.0.1",
             port=0,
         )

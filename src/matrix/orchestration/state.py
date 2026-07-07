@@ -33,5 +33,8 @@ class AgentState(TypedDict):
     findings: list[str]
     final_answer: str
 
+    # Streaming summarization
+    needs_summary: bool
+
     # Error
     error: str

@@ -9,6 +9,7 @@ from .nodes import (
     execute_node,
     plan_node,
     react_node,
+    reflection_node,
     skill_node,
     summarize_node,
 )
@@ -19,7 +20,7 @@ def build_graph() -> StateGraph:
     """Build the LangGraph state graph for Agent orchestration.
 
     Flow:
-    __start__ → classify → skill / react / plan → summarize → __end__
+    __start__ → classify → skill / react / plan → summarize → reflection → __end__
     """
     graph = StateGraph(AgentState)
 
@@ -30,6 +31,7 @@ def build_graph() -> StateGraph:
     graph.add_node("plan", plan_node)
     graph.add_node("execute", execute_node)
     graph.add_node("summarize", summarize_node)
+    graph.add_node("reflection", reflection_node)
 
     # Start → classify
     graph.set_entry_point("classify")
@@ -72,8 +74,9 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # summarize → end
-    graph.add_edge("summarize", END)
+    # summarize → reflection → end
+    graph.add_edge("summarize", "reflection")
+    graph.add_edge("reflection", END)
 
     return graph
 
@@ -94,7 +97,7 @@ def _route_after_react(state: AgentState) -> str:
     """After react step: continue or summarize."""
     if state.get("error"):
         return "summarize"
-    if state.get("final_answer"):
+    if state.get("final_answer") or state.get("needs_summary"):
         return "summarize"
     return "react"
 
@@ -103,7 +106,7 @@ def _route_after_execute(state: AgentState) -> str:
     """After execute step: next step or summarize."""
     if state.get("error"):
         return "summarize"
-    if state.get("final_answer"):
+    if state.get("final_answer") or state.get("needs_summary"):
         return "summarize"
     plan = state.get("current_plan", [])
     count = state.get("tool_call_count", 0)

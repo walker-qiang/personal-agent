@@ -34,6 +34,38 @@ class TestSkillDefinition:
         skill = SkillDefinition(name="test", title="测试")
         assert not skill.matches("anything")
 
+    def test_negation_rejects_match(self):
+        """Negation words should prevent matching."""
+        skill = SkillDefinition(
+            name="anomaly-diagnosis",
+            title="异动诊断",
+            description="识别持仓异动并进行归因分析。",
+        )
+        assert not skill.matches("今天没有异动")
+        assert not skill.matches("不是异动诊断")
+        assert not skill.matches("不需要异动诊断")
+
+    def test_negation_does_not_block_positive(self):
+        """Positive queries without negation should still match."""
+        skill = SkillDefinition(
+            name="anomaly-diagnosis",
+            title="异动诊断",
+            description="识别持仓异动并进行归因分析。",
+        )
+        assert skill.matches("帮我做一下异动诊断")
+        assert skill.matches("最近有异动")
+        assert skill.matches("异动诊断")
+
+    def test_negation_with_other_keywords(self):
+        """Negation of one word should not block matching of another."""
+        skill = SkillDefinition(
+            name="portfolio-review",
+            title="组合复盘",
+            description="定期组合复盘，检查配置偏离。",
+        )
+        assert skill.matches("没有异动，但帮我做组合复盘")
+        assert not skill.matches("不需要组合复盘")
+
 
 class TestLoadSkills:
     def test_loads_from_skill_dirs(self):

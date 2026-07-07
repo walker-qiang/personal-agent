@@ -20,10 +20,24 @@ class FakeLLM:
         self.calls: list[tuple[str, list[dict]]] = []
 
     def complete(self, system: str, messages: list[dict[str, str]]) -> str:
-        self.calls.append((system, messages))
+        self.calls.append(("complete", messages))
         if not self.responses:
             raise AssertionError("no fake LLM responses left")
         return self.responses.pop(0)
+
+    def stream_complete(self, system: str, messages: list[dict[str, str]]):
+        """Fake streaming: yield the next response character by character."""
+        self.calls.append(("stream", messages))
+        text = self.responses.pop(0) if self.responses else ""
+        for ch in text:
+            yield ch
+
+    def function_call(self, system, messages, tools, tool_choice="auto"):
+        """Fake function calling: returns a FunctionCallResult with no tool calls."""
+        from matrix.llm import FunctionCallResult
+        self.calls.append(("function_call", messages))
+        text = self.responses.pop(0) if self.responses else ""
+        return FunctionCallResult(content=text, tool_calls=[])
 
 
 @pytest.fixture
@@ -33,6 +47,8 @@ def chat_service(tmp_cache_path: Path) -> ChatService:
         cache_path=tmp_cache_path,
         trace_path=tmp_cache_path.parent / "trace.jsonl",
         store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
+        checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
+        skills_dir=tmp_cache_path.parent / "skills" / "investment",
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
@@ -70,6 +86,8 @@ class TestChatService:
             cache_path=tmp_cache_path,
             trace_path=tmp_cache_path.parent / "trace.jsonl",
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
+            checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
+            skills_dir=tmp_cache_path.parent / "skills" / "investment",
             host="127.0.0.1",
             port=0,
         )
@@ -81,49 +99,35 @@ class TestChatService:
         assert "error" in types
 
     def test_returns_done_event(self, chat_service):
-        chat_service.llm = FakeLLM([
+        # Native function calling: returns content directly (no tool calls)
+        chat_service._default_llm = FakeLLM([
             '{"intent": "react", "skill_name": ""}',
-            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
+            "当前持仓健康。",
         ])
+        chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         types = [e["type"] for e in events]
         assert "done" in types
-        assert "tool_call" in types
-        assert "tool_result" in types
-
-    def test_returns_tool_calls(self, chat_service):
-        chat_service.llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
-            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
-        ])
-        events = list(chat_service.stream_chat("当前持仓怎么样？"))
-        tool_calls = [e for e in events if e["type"] == "tool_call"]
-        assert len(tool_calls) >= 1
-        # Only check name if it's populated (may be empty due to LangGraph timing)
-        if tool_calls[0].get("name"):
-            assert "finance" in tool_calls[0]["name"]
+        assert "token" in types
 
     def test_returns_token_events(self, chat_service):
-        chat_service.llm = FakeLLM([
+        chat_service._default_llm = FakeLLM([
             '{"intent": "react", "skill_name": ""}',
-            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: 已有数据\nFinal Answer: 当前持仓健康。",
+            "当前持仓健康。",
         ])
+        chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]
         assert len(tokens) >= 1
 
     def test_session_memory_persists(self, chat_service):
-        chat_service.llm = FakeLLM([
+        chat_service._default_llm = FakeLLM([
             '{"intent": "react", "skill_name": ""}',
-            "Thought: 查询\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: done\nFinal Answer: 持仓健康。",
+            "持仓健康。",
             '{"intent": "react", "skill_name": ""}',
-            "Thought: 回忆\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: done\nFinal Answer: 仍然健康。",
+            "仍然健康。",
         ])
+        chat_service.skills = []
         sid = "mem-test"
         list(chat_service.stream_chat("当前持仓怎么样？", sid))
         events = list(chat_service.stream_chat("还有变化吗？", sid))
@@ -131,19 +135,20 @@ class TestChatService:
         assert len(tokens) >= 1
 
     def test_reset_clears_session(self, chat_service):
-        chat_service.llm = FakeLLM([
+        chat_service._default_llm = FakeLLM([
             '{"intent": "react", "skill_name": ""}',
-            "Thought: q\nAction: finance.holdings_summary\nAction Input: {}",
-            "Thought: done\nFinal Answer: ok.",
+            "ok.",
         ])
+        chat_service.skills = []
         sid = "reset-test"
         list(chat_service.stream_chat("test", sid))
         chat_service.reset(sid)
         assert len(chat_service._get_history(sid)) == 0
 
     def test_skill_flow_in_graph(self, chat_service):
-        chat_service.llm = FakeLLM([
+        chat_service._default_llm = FakeLLM([
             '{"intent": "skill", "skill_name": "test-skill"}',
+            "技能执行完成，共2个持仓。",
         ])
         from matrix.skills import SkillDefinition
         chat_service.skills = [
@@ -159,3 +164,33 @@ class TestChatService:
         events = list(chat_service.stream_chat("跑测试技能"))
         tokens = [e for e in events if e["type"] == "token"]
         assert len(tokens) >= 1
+
+    def test_needs_summary_streaming_path(self, chat_service):
+        """Test streaming summarization when function_call returns tool_calls."""
+        from matrix.llm import FunctionCallResult, ToolCall
+
+        class StreamingLLM(FakeLLM):
+            def function_call(self, system, messages, tools, tool_choice="auto"):
+                self.calls.append(("function_call", messages))
+                return FunctionCallResult(
+                    content="",
+                    tool_calls=[
+                        ToolCall(name="finance.holdings_summary", arguments={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+
+        chat_service._default_llm = StreamingLLM([
+            '{"intent": "react", "skill_name": ""}',
+            "当前持仓健康，共2个持仓。",
+        ])
+        # Pipeline LLM used by classify_node; must also be a fake
+        chat_service._pipeline_llm = FakeLLM([
+            '{"intent": "react", "skill_name": ""}',
+        ])
+        chat_service.skills = []
+        events = list(chat_service.stream_chat("当前持仓怎么样？"))
+        tokens = [e for e in events if e["type"] == "token"]
+        tool_calls = [e for e in events if e["type"] == "tool_call"]
+        assert len(tool_calls) >= 1, "Should have tool_call events"
+        assert len(tokens) >= 1, "Should have streaming token events"

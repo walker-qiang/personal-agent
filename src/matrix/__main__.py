@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import uvicorn
+from dotenv import load_dotenv
 
 from .config import load_config
 
 
 def main() -> None:
     """Start the Project Matrix Agent server."""
+    load_dotenv()
     config = load_config()
     uvicorn.run(
         "matrix.server.app:create_app",
