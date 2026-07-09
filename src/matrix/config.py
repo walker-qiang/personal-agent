@@ -161,7 +161,8 @@ def load_config() -> AgentConfig:
     # Skills dir: MATRIX_SKILLS_DIR > default
     skills_raw = os.environ.get(ENV_SKILLS_DIR, "").strip()
     if skills_raw:
-        skills_dir = Path(skills_raw).expanduser().resolve()
+        skills_path = Path(skills_raw).expanduser()
+        skills_dir = skills_path if skills_path.is_absolute() else root / skills_path
     else:
         skills_dir = root / "skills" / "investment"
 

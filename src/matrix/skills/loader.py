@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 SKILL_FILE = "SKILL.md"
-KNOWLEDGE_DIR = "knowledge"
+KNOWLEDGE_DIR = "references"
 SCRIPTS_DIR = "scripts"
 
 
@@ -126,6 +126,13 @@ class SkillDefinition:
     def read_script(self, skill_dir: Path, script_name: str) -> str | None:
         """Read a script file content."""
         f = skill_dir / SCRIPTS_DIR / script_name
+        if f.exists():
+            return f.read_text(encoding="utf-8")
+        return None
+
+    def read_knowledge_file(self, skill_dir: Path, filename: str) -> str | None:
+        """Read a single knowledge file content."""
+        f = skill_dir / KNOWLEDGE_DIR / filename
         if f.exists():
             return f.read_text(encoding="utf-8")
         return None

@@ -176,6 +176,19 @@ async def write_knowledge(request: Request, skill_name: str, filename: str):
     return {"ok": True}
 
 
+@router.get("/skills/{skill_name}/knowledge/{filename:path}")
+async def get_knowledge_file(request: Request, skill_name: str, filename: str):
+    """Read a single knowledge file."""
+    from ...chat import ChatService
+
+    chat: ChatService = request.app.state.chat
+    skill = next((s for s in chat.skills if s.name == skill_name), None)
+    if not skill:
+        return {"error": "skill not found"}, 404
+    content = skill.read_knowledge_file(chat.skills_dir / skill_name, filename)
+    return {"filename": filename, "content": content}
+
+
 @router.delete("/skills/{skill_name}/knowledge/{filename:path}")
 async def remove_knowledge(request: Request, skill_name: str, filename: str):
     """Delete a knowledge file."""
@@ -186,6 +199,19 @@ async def remove_knowledge(request: Request, skill_name: str, filename: str):
     delete_knowledge(chat.skills_dir, skill_name, filename)
     chat.reload_skills()
     return {"ok": True}
+
+
+@router.get("/skills/{skill_name}/scripts/{filename:path}")
+async def get_script_file(request: Request, skill_name: str, filename: str):
+    """Read a single script file."""
+    from ...chat import ChatService
+
+    chat: ChatService = request.app.state.chat
+    skill = next((s for s in chat.skills if s.name == skill_name), None)
+    if not skill:
+        return {"error": "skill not found"}, 404
+    content = skill.read_script(chat.skills_dir / skill_name, filename)
+    return {"filename": filename, "content": content}
 
 
 @router.put("/skills/{skill_name}/scripts/{filename:path}")

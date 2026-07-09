@@ -6,114 +6,223 @@
 <title>Project Matrix - 投资分析员</title>
 <style>
   :root {
-    --bg: #0f1117;
-    --surface: #1a1d27;
-    --border: #2a2d3a;
-    --text: #e1e4ed;
-    --text-secondary: #8b8fa3;
+    --bg: #f5f5f7;
+    --bg2: #e8e8ed;
+    --surface: #ffffff;
+    --border: #e5e5ea;
+    --text: #1d1d1f;
+    --text-secondary: #86868b;
     --accent: #6366f1;
     --accent-hover: #818cf8;
-    --success: #22c55e;
-    --warning: #f59e0b;
-    --error: #ef4444;
-    --tool-call: #1e293b;
-    --tool-result: #0f172a;
+    --success: #34c759;
+    --warning: #ff9500;
+    --error: #ff3b30;
+    --tool-call: #f0f0f5;
+    --tool-result: #e8e8ed;
     --radius: 8px;
-    --code-bg: #1e293b;
-    --table-stripe: #1e2233;
+    --code-bg: #f0f0f5;
+    --table-stripe: #f5f5f7;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     background: var(--bg);
     color: var(--text);
-    height: 100vh;
     display: flex;
     flex-direction: column;
   }
-  /* ---- Sidebar (Apple Light) ---- */
-  .layout { display: flex; flex: 1; overflow: hidden; }
+  /* ---- Sidebar ---- */
+  .layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
   .sidebar {
-    width: 260px;
-    background: #f5f5f7;
+    width: 220px;
+    background: var(--surface);
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
     overflow: hidden;
-    padding: 16px 12px;
-    gap: 16px;
+    min-height: 0;
+    padding: 0;
     -webkit-user-select: none;
     user-select: none;
+    border-right: 1px solid var(--border);
   }
-  /* New session button */
+  .sb-top {
+    padding: 12px 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
   .new-session-btn {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 8px;
     width: 100%;
-    background: #e5e5ea;
+    background: rgba(99,102,241,0.08);
     border: none;
     border-radius: 8px;
-    padding: 11px 14px;
+    padding: 9px 12px;
     cursor: pointer;
-    font-size: 14px;
-    color: #1d1d1f;
+    font-size: 13px;
+    color: var(--accent);
     font-weight: 500;
     transition: background 0.12s;
   }
-  .new-session-btn:hover { background: #dcdce0; }
-  .new-session-btn .left { display: flex; align-items: center; gap: 10px; }
-  .new-session-btn .left svg { width: 18px; height: 18px; color: #6e6e73; }
-  .new-session-btn .right { display: flex; align-items: center; gap: 6px; color: #aeaeb2; font-size: 12px; font-weight: 400; }
-  .new-session-btn .right svg { width: 14px; height: 14px; }
-  /* Quick entries */
-  .quick-entries { display: flex; flex-direction: column; gap: 2px; }
-  .quick-entry {
+  .new-session-btn:hover { background: rgba(99,102,241,0.2); }
+  .new-session-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .sb-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sb-nav-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
-    border-radius: 8px;
+    gap: 8px;
+    padding: 7px 12px;
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 14px;
-    color: #1d1d1f;
-    transition: background 0.1s;
-    border: none;
-    background: none;
-    width: 100%;
-    text-align: left;
+    font-size: 13px;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
   }
-  .quick-entry:hover { background: rgba(0,0,0,0.04); }
-  .quick-entry svg { width: 18px; height: 18px; color: #6e6e73; flex-shrink: 0; }
-  /* Collapsible section */
-  .section { display: flex; flex-direction: column; gap: 1px; }
-  .section-header {
+  .sb-nav-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+  .sb-nav-item svg { width: 16px; height: 16px; opacity: 0.5; flex-shrink: 0; }
+  /* Section headers */
+  .sb-section {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+    overflow: hidden;
+    flex-grow: 0;
+    flex-shrink: 0;
+    min-height: 0;
+  }
+  .sb-section.sb-skills {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  .sb-section.sb-sessions {
+    flex: 1 1 0%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+  }
+  .sb-section.sb-sessions .sb-list {
+    flex: 1 1 0%;
+    min-height: 0;
+  }
+  .sb-section-hd {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 4px 12px 8px;
-    cursor: pointer;
+    padding: 4px 16px 6px;
   }
-  .section-header span {
-    font-size: 12px;
+  .sb-section-hd span {
+    font-size: 11px;
     font-weight: 600;
-    color: #aeaeb2;
+    color: var(--text-secondary);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.8px;
   }
-  .section-header .actions { display: flex; gap: 8px; }
-  .section-header .actions svg { width: 15px; height: 15px; color: #aeaeb2; cursor: pointer; }
-  .section-header .actions svg:hover { color: #6e6e73; }
-  .section-header .chevron { transition: transform 0.15s; }
-  .section-header .chevron.collapsed { transform: rotate(-90deg); }
-  .section-body { display: flex; flex-direction: column; gap: 1px; }
-  .section-body.collapsed { display: none; }
-  /* Quick entry edit */
-  .quick-entry .actions { display: none; gap: 4px; margin-left: 4px; }
-  .quick-entry:hover .actions { display: flex; }
-  .quick-entry .actions svg { width: 13px; height: 13px; color: #aeaeb2; cursor: pointer; }
-  .quick-entry .actions svg:hover { color: #6e6e73; }
-  /* Modal */
+  .sb-actions { display: flex; gap: 8px; }
+  .sb-actions svg {
+    width: 13px; height: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0.4;
+  }
+  .sb-actions svg:hover { opacity: 1; }
+  .sb-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 8px;
+  }
+  .sb-list .no-sessions {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 16px 8px;
+    opacity: 0.6;
+  }
+  /* Skill items */
+  .sb-skill-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
+  }
+  .sb-skill-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+  .sb-skill-item svg { width: 14px; height: 14px; opacity: 0.4; flex-shrink: 0; }
+  .sb-skill-item .actions { display: none; gap: 4px; margin-left: auto; }
+  .sb-skill-item:hover .actions { display: flex; }
+  .sb-skill-item .actions svg { width: 12px; height: 12px; cursor: pointer; }
+  .sb-skill-item .actions svg:hover { opacity: 1; }
+  /* Session items */
+  .sb-session-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
+  }
+  .sb-session-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+  .sb-session-item.active { background: rgba(99,102,241,0.08); color: var(--text); }
+  .sb-session-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sb-session-item .meta { font-size: 11px; color: var(--text-secondary); flex-shrink: 0; opacity: 0.6; }
+  .sb-session-item .del { display: none; font-size: 11px; padding: 2px; cursor: pointer; opacity: 0.4; flex-shrink: 0; }
+  .sb-session-item:hover .del { display: block; }
+  .sb-session-item .del:hover { opacity: 1; color: var(--error); }
+  /* ---- Right Panel ---- */
+  .rpanel {
+    width: 0;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 0;
+    gap: 16px;
+    border-left: 1px solid transparent;
+    transition: width 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
+  }
+  .rpanel.open {
+    width: 240px;
+    padding: 16px 12px;
+    border-left-color: var(--border);
+    overflow-y: auto;
+  }
+  .rpanel-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .rpanel-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .rpanel-content {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.6;
+    opacity: 0.7;
+  }
+  /* ---- Modal ---- */
   .modal-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0,0,0,0.25);
@@ -121,80 +230,41 @@
     z-index: 100;
   }
   .modal {
-    background: #fff;
+    background: var(--surface);
     border-radius: 12px;
     padding: 24px;
     width: 520px;
     max-width: 90vw;
     max-height: 90vh;
     overflow-y: auto;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
   }
-  .modal h3 { font-size: 16px; font-weight: 600; margin: 0 0 16px; color: #1d1d1f; }
-  .modal label { font-size: 12px; font-weight: 600; color: #aeaeb2; display: block; margin: 12px 0 4px; }
+  .modal h3 { font-size: 16px; font-weight: 600; margin: 0 0 16px; color: var(--text); }
+  .modal label { font-size: 12px; font-weight: 600; color: var(--text-secondary); display: block; margin: 12px 0 4px; }
   .modal input, .modal textarea {
-    width: 100%; padding: 8px 10px; border: 1px solid #d2d2d7; border-radius: 6px;
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
     font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box;
+    background: var(--bg); color: var(--text);
   }
-  .modal input:focus, .modal textarea:focus { border-color: #007aff; }
+  .modal input:focus, .modal textarea:focus { border-color: var(--accent); }
   .modal textarea { resize: vertical; min-height: 60px; }
   .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
   .modal .btn-row button { padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
-  .modal .btn-row .btn-primary { background: #007aff; color: #fff; }
-  .modal .btn-row .btn-cancel { background: #e5e5ea; color: #3a3a3c; }
-  /* Session list section */
-  .session-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .session-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 12px 8px;
-  }
-  .session-section-header span {
-    font-size: 12px;
-    font-weight: 600;
-    color: #aeaeb2;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .session-section-header .actions { display: flex; gap: 8px; }
-  .session-section-header .actions svg { width: 15px; height: 15px; color: #aeaeb2; cursor: pointer; }
-  .session-section-header .actions svg:hover { color: #6e6e73; }
-  .session-list {
-    flex: 1;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .session-item {
-    padding: 9px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 14px;
-    color: #1d1d1f;
-    transition: background 0.1s;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .session-item:hover { background: rgba(0,0,0,0.04); }
-  .session-item.active { background: rgba(0,122,255,0.1); color: #007aff; }
-  .session-item .icon { width: 18px; height: 18px; color: #6e6e73; flex-shrink: 0; }
-  .session-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  .session-item .meta { font-size: 11px; color: #aeaeb2; flex-shrink: 0; }
-  .session-item .del {
-    display: none;
-    font-size: 11px;
-    color: #aeaeb2;
-    padding: 2px 4px;
-    border-radius: 3px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .session-item:hover .del { display: block; }
-  .session-item .del:hover { background: rgba(255,59,48,0.1); color: #ff3b30; }
-  .no-sessions { font-size: 13px; color: #aeaeb2; text-align: center; padding: 20px; }
+  .modal .btn-row .btn-primary { background: var(--accent); color: #fff; }
+  .modal .btn-row .btn-cancel { background: var(--border); color: var(--text-secondary); }
+  /* Skill detail modal */
+  .sd-field { margin-bottom: 20px; }
+  .sd-field label { font-size: 12px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
+  .sd-field input:focus, .sd-field textarea:focus { border-color: var(--accent); }
+  /* Skill detail file section */
+  .sd-file-row { display: flex; align-items: center; gap: 4px; font-size: 13px; padding: 4px 0; }
+  .sd-file-row svg { width: 14px; height: 14px; color: var(--text-secondary); }
+  .sd-file-row .del-btn { margin-left: auto; cursor: pointer; color: var(--text-secondary); }
+  .sd-file-row .del-btn:hover { color: var(--error); }
+  .sd-file-add { display: flex; gap: 6px; margin-bottom: 20px; }
+  .sd-file-add input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: var(--bg); color: var(--text); }
+  .sd-file-add input:focus { border-color: var(--accent); }
+  .sd-file-add button { background: var(--border); border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; display: flex; align-items: center; }
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -259,54 +329,64 @@
     transition: background 0.1s;
   }
   .footer-model-dropdown .item:hover { background: rgba(99,102,241,0.08); color: var(--text); }
-  .footer-model-dropdown .item.active { background: rgba(99,102,241,0.12); color: var(--accent); }
+  .footer-model-dropdown .item.active { background: rgba(99,102,241,0.08); color: var(--accent); }
   .footer-model-dropdown .item .check { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
   .footer-model-dropdown .item .desc { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
   main {
     flex: 1;
     overflow-y: auto;
-    padding: 20px;
+    padding: 24px 0;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 20px;
+    min-height: 0;
   }
-  .welcome { text-align: center; margin-top: 80px; }
-  .welcome h2 { font-size: 24px; margin-bottom: 8px; background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-  .welcome p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
-  .welcome .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
-  .hint { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 14px; font-size: 13px; cursor: pointer; color: var(--text-secondary); transition: all 0.15s; }
-  .hint:hover { border-color: var(--accent); color: var(--text); }
-  .message { max-width: 860px; width: 100%; margin: 0 auto; }
-  .message.user { align-self: flex-end; text-align: right; }
-  .message.user .bubble { background: var(--accent); padding: 10px 16px; border-radius: var(--radius); display: inline-block; max-width: 85%; text-align: left; font-size: 14px; }
-  .message.assistant { align-self: flex-start; }
+  .main-inner {
+    max-width: 860px;
+    margin: 0 auto;
+    width: 100%;
+    padding: 0 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .welcome { text-align: center; margin-top: 60px; padding: 0 20px; }
+  .welcome h2 { font-size: 26px; font-weight: 700; margin-bottom: 12px; background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .welcome p { color: var(--text-secondary); font-size: 14px; line-height: 1.7; max-width: 480px; margin: 0 auto; }
+  .welcome .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 24px; }
+  .hint { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 16px; font-size: 13px; cursor: pointer; color: var(--text-secondary); transition: all 0.15s; }
+  .hint:hover { border-color: var(--accent); color: var(--text); background: rgba(99,102,241,0.06); }
+  .message { max-width: 800px; width: 100%; margin: 0 auto; }
+  .message.user { margin-right: 0; margin-left: auto; }
+  .message.user .bubble { background: var(--accent); padding: 10px 16px; border-radius: var(--radius); display: inline-block; max-width: 85%; text-align: left; font-size: 14px; line-height: 1.6; }
+  .message.assistant { margin-right: auto; margin-left: 0; }
   .message.assistant .bubble {
     background: var(--surface);
     border: 1px solid var(--border);
-    padding: 18px 20px;
+    padding: 20px 24px;
     border-radius: var(--radius);
     font-size: 14px;
-    line-height: 1.8;
+    line-height: 1.85;
     max-width: 100%;
     overflow-x: auto;
   }
   /* Markdown content styles */
-  .content h1, .content h2, .content h3 { margin: 16px 0 8px; font-weight: 600; }
-  .content h1 { font-size: 1.3em; }
-  .content h2 { font-size: 1.15em; }
-  .content h3 { font-size: 1.05em; }
-  .content p { margin: 6px 0; }
-  .content ul, .content ol { margin: 6px 0; padding-left: 20px; }
-  .content li { margin: 3px 0; }
-  .content strong { color: #fff; font-weight: 600; }
-  .content em { color: #c4b5fd; }
+  .content h1, .content h2, .content h3 { margin: 20px 0 10px; font-weight: 600; }
+  .content h1 { font-size: 1.25em; }
+  .content h2 { font-size: 1.1em; }
+  .content h3 { font-size: 1.02em; }
+  .content p { margin: 8px 0; }
+  .content ul, .content ol { margin: 8px 0; padding-left: 22px; }
+  .content li { margin: 4px 0; }
+  .content strong { color: var(--text); font-weight: 600; }
+  .content em { color: var(--accent); }
   .content code {
     background: var(--code-bg);
     padding: 2px 6px;
     border-radius: 4px;
     font-family: "SF Mono", "Fira Code", monospace;
     font-size: 0.9em;
-    color: #a78bfa;
+    color: var(--accent);
   }
   .content pre {
     background: var(--code-bg);
@@ -388,19 +468,32 @@
   .tool-body th, .tool-body td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; font-size: 12px; }
   .tool-body th { background: var(--code-bg); color: var(--text); }
   .tool-body .stat { color: var(--warning); font-weight: 600; }
-  .thinking {
-    font-size: 13px;
-    color: var(--text-secondary);
-    padding: 10px 0;
-    animation: pulse 1.5s ease-in-out infinite;
-  }
-  @keyframes pulse { 0%,100%{opacity:0.5;} 50%{opacity:1;} }
+  .thinking { display: none; }
   footer {
     background: var(--surface);
     border-top: 1px solid var(--border);
-    padding: 12px 20px;
+    padding: 0 20px 12px 20px;
     flex-shrink: 0;
   }
+  .status-bar {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 0;
+  }
+  .status-bar.active { display: flex; }
+  .status-bar .dots { display: inline-flex; gap: 4px; }
+  .status-bar .dots span {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: dotPulse 1.4s ease-in-out infinite;
+  }
+  .status-bar .dots span:nth-child(2) { animation-delay: 0.2s; }
+  .status-bar .dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes dotPulse { 0%,80%,100%{opacity:0.3;transform:scale(0.8);} 40%{opacity:1;transform:scale(1.2);} }
   .input-row { display: flex; gap: 10px; max-width: 860px; margin: 0 auto; }
   .input-row input {
     flex: 1;
@@ -439,52 +532,76 @@
 </header>
 <div class="layout">
   <aside class="sidebar">
-    <!-- New session -->
-    <button class="new-session-btn" onclick="newSession()">
-      <span class="left">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-        </svg>
+    <div class="sb-top">
+      <button class="new-session-btn" onclick="newSession()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         新建会话
-      </span>
-      <span class="right">
-        <span>⌘N</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
-      </span>
-    </button>
+      </button>
+      <nav class="sb-nav">
+        <div class="sb-nav-item" onclick="scrollToSkills()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          <span>技能</span>
+        </div>
+        <div class="sb-nav-item" onclick="newSession()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>新建任务</span>
+        </div>
+      </nav>
+    </div>
 
-    <!-- Quick entries -->
-    <div class="quick-entries section" id="quickEntries">
-      <div class="no-sessions">加载中...</div>
+    <!-- Skills section -->
+    <div class="sb-section">
+      <div class="sb-section-hd">
+        <span>技能</span>
+        <span class="sb-actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="showSkillModal()"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </span>
+      </div>
+      <div class="sb-list" id="skillList"></div>
     </div>
 
     <!-- Session list -->
-    <div class="session-section">
-      <div class="session-section-header">
-        <span>会话列表</span>
-        <span class="actions">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="newSession()"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="loadSessions()"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    <div class="sb-section sb-sessions">
+      <div class="sb-section-hd">
+        <span>会话</span>
+        <span class="sb-actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="loadSessions()"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </span>
       </div>
-      <div class="session-list" id="sessionList">
+      <div class="sb-list" id="sessionList">
         <div class="no-sessions">暂无会话</div>
       </div>
     </div>
   </aside>
   <main id="chat">
-    <div class="welcome" id="welcome">
-      <h2>Project Matrix</h2>
-      <p>个人智能协作网络 · 投资分析员</p>
-      <div class="hints">
-        <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
-        <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
-        <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
-        <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
-        <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+    <div class="main-inner" id="chatInner">
+      <div class="welcome" id="welcome">
+        <h2>Project Matrix</h2>
+        <p>个人智能协作网络 · 投资分析员</p>
+        <div class="hints">
+          <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
+          <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
+          <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
+          <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
+          <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+        </div>
       </div>
     </div>
   </main>
+  <aside class="rpanel" id="rpanel">
+    <div class="rpanel-section">
+      <div class="rpanel-header">待办</div>
+      <div class="rpanel-content" id="rpTodo" style="font-size:12px;color:var(--text-secondary)">暂无待办</div>
+    </div>
+    <div class="rpanel-section">
+      <div class="rpanel-header">任务产物</div>
+      <div class="rpanel-content" id="rpArtifacts" style="font-size:12px;color:var(--text-secondary)">暂无产物</div>
+    </div>
+    <div class="rpanel-section">
+      <div class="rpanel-header">参考信息</div>
+      <div class="rpanel-content" id="rpRef" style="font-size:12px;color:var(--text-secondary)">暂无参考</div>
+    </div>
+  </aside>
 </div>
 <footer>
   <div class="input-row">
@@ -615,16 +732,16 @@ function loadSessions() {
         list.innerHTML = '<div class="no-sessions">暂无会话</div>';
         return;
       }
-      const msgIcon = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+      const msgIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:14px;height:14px;opacity:0.4;flex-shrink:0"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
       list.innerHTML = sessions.map(s => {
         const active = s.id === SESSION ? ' active' : '';
         const title = escapeHtml(s.title || s.id.slice(0, 8) + '...');
         const count = s.turn_count ? s.turn_count + '轮' : '';
-        return '<div class="session-item' + active + '" data-sid="' + s.id + '" onclick="selectSession(\'' + s.id + '\')">' +
+        return '<div class="sb-session-item' + active + '" data-sid="' + s.id + '" onclick="selectSession(\'' + s.id + '\')">' +
           msgIcon +
           '<span class="title">' + title + '</span>' +
           '<span class="meta">' + count + '</span>' +
-          '<span class="del" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')">x</span>' +
+          '<span class="del" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')">\u00d7</span>' +
           '</div>';
       }).join('');
     });
@@ -665,69 +782,96 @@ function loadSkills() {
 }
 
 function renderSkills() {
-  const container = document.getElementById('quickEntries');
+  const container = document.getElementById('skillList');
   const skills = _skillsData;
   const skillIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
-  const chevron = '<svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>';
-  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
   const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 
-  container.innerHTML =
-    '<div class="section-header" onclick="toggleSection(\'skillsBody\', this)">' +
-      '<span>' + skillIcon + ' 技能</span>' +
+  if (skills.length === 0) {
+    container.innerHTML = '<div class="no-sessions">暂无技能</div>';
+    return;
+  }
+  container.innerHTML = skills.map(s =>
+    '<div class="sb-skill-item" onclick="showSkillModal(\'' + s.name + '\')">' +
+      skillIcon +
+      '<span>' + escapeHtml(s.title) + '</span>' +
       '<span class="actions">' +
-        plusIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal()"') +
-        '<span class="chevron" id="skillsChevron">' + chevron + '</span>' +
+        '<span onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')">' + editIcon + '</span>' +
+        '<span onclick="event.stopPropagation();deleteSkill(\'' + s.name + '\')">' + trashIcon + '</span>' +
       '</span>' +
-    '</div>' +
-    '<div class="section-body" id="skillsBody">' +
-      (skills.length === 0 ? '<div class="no-sessions">暂无技能</div>' :
-        skills.map(s =>
-          '<div class="quick-entry" onclick="runSkill(\'' + s.name + '\')" style="padding-left:36px">' +
-            '<span>' + escapeHtml(s.title) + '</span>' +
-            '<span style="font-size:10px;color:#aeaeb2;margin-left:auto;margin-right:4px">' +
-              (s.knowledge_files && s.knowledge_files.length ? '📄' + s.knowledge_files.length : '') +
-              (s.script_files && s.script_files.length ? ' ⚡' + s.script_files.length : '') +
-            '</span>' +
-            '<span class="actions">' +
-              editIcon.replace('<svg', '<svg onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')"') +
-              trashIcon.replace('<svg', '<svg onclick="event.stopPropagation();deleteSkill(\'' + s.name + '\')"') +
-            '</span>' +
-          '</div>'
-        ).join('')) +
-    '</div>';
+    '</div>'
+  ).join('');
 }
 
-function toggleSection(bodyId, header) {
-  const body = document.getElementById(bodyId);
-  const chevron = header.querySelector('.chevron');
-  body.classList.toggle('collapsed');
-  if (chevron) chevron.classList.toggle('collapsed');
+function scrollToSkills() {
+  const el = document.querySelector('.sb-section');
+  if (el) el.scrollIntoView({ behavior: 'smooth' });
 }
 
 // ---- Skill CRUD ----
 function showSkillModal(skillName) {
   const existing = skillName ? _skillsData.find(s => s.name === skillName) : null;
   const isEdit = !!existing;
+
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'skillModal';
+  overlay.style.cssText = 'align-items:flex-start;padding-top:40px;padding-bottom:40px';
 
+  const headerBg = isEdit ? 'var(--bg)' : 'var(--bg)';
   overlay.innerHTML =
-    '<div class="modal" onclick="event.stopPropagation()">' +
-      '<h3>' + (isEdit ? '编辑技能' : '新建技能') + '</h3>' +
-      (isEdit ? '' : '<label>标识 (英文)</label><input id="skillName" value="" placeholder="my-skill">') +
-      '<label>名称</label><input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '">' +
-      '<label>简介 <span style="font-weight:400;color:#aeaeb2">(同时也是匹配触发词)</span></label><textarea id="skillDesc" rows="2">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
-      '<label>工作流 <span style="font-weight:400;color:#aeaeb2">(每行一步，格式: 1. tool_name())</span></label>' +
-      '<textarea id="skillWorkflow" rows="4" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
-      '<label>输出格式</label><textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
-      (isEdit ? _renderFileSection('知识库', 'knowledge', skillName, existing ? existing.knowledge_files : []) : '') +
-      (isEdit ? _renderFileSection('脚本', 'script', skillName, existing ? existing.script_files : []) : '') +
-      '<div class="btn-row">' +
-        '<button class="btn-cancel" onclick="closeModal()">取消</button>' +
-        '<button class="btn-primary" onclick="saveSkill(\'' + (skillName || '') + '\')">' + (isEdit ? '保存' : '创建') + '</button>' +
+    '<div class="modal skill-detail" onclick="event.stopPropagation()" style="width:680px;max-width:94vw;padding:0;overflow:hidden;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.12)">' +
+      // Header
+      '<div class="sd-header" style="background:' + headerBg + ';padding:28px 32px 20px;border-bottom:1px solid var(--border)">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;color:var(--text-secondary)"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>' +
+          '<span style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px">' + (isEdit ? '编辑技能' : '新建技能') + '</span>' +
+        '</div>' +
+        '<h2 style="margin:0;font-size:22px;font-weight:700;color:var(--text)" id="sdTitleDisplay">' + escapeHtml(existing ? existing.title : '新建技能') + '</h2>' +
+        (existing ? '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">' + escapeHtml(existing.name) + '</div>' : '') +
+      '</div>' +
+      // Body
+      '<div style="padding:24px 32px;max-height:55vh;overflow-y:auto">' +
+        // Name (new only)
+        (isEdit ? '' :
+          '<div class="sd-field">' +
+            '<label>标识 <span style="font-weight:400;color:var(--text-secondary)">(英文，唯一)</span></label>' +
+            '<input id="skillName" value="" placeholder="my-skill" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;box-sizing:border-box">' +
+          '</div>') +
+        // Title
+        '<div class="sd-field">' +
+          '<label>名称</label>' +
+          '<input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;box-sizing:border-box">' +
+        '</div>' +
+        // Description
+        '<div class="sd-field">' +
+          '<label>简介 <span style="font-weight:400;color:var(--text-secondary)">(同时也是匹配触发词)</span></label>' +
+          '<textarea id="skillDesc" rows="2" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
+        '</div>' +
+        // Workflow
+        '<div class="sd-field">' +
+          '<label>工作流 <span style="font-weight:400;color:var(--text-secondary)">(每行一步，格式: 1. tool_name())</span></label>' +
+          '<textarea id="skillWorkflow" rows="5" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()&#10;3. finance.recent_snapshots()" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;outline:none;resize:vertical;box-sizing:border-box">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
+        '</div>' +
+        // Output format
+        '<div class="sd-field">' +
+          '<label>输出格式</label>' +
+          '<textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
+        '</div>' +
+        // Knowledge & Scripts (edit only)
+        (isEdit ? _renderFileSection('参考', 'knowledge', skillName, existing ? existing.knowledge_files : []) : '') +
+        (isEdit ? _renderFileSection('脚本', 'script', skillName, existing ? existing.script_files : []) : '') +
+      '</div>' +
+      // Footer
+      '<div style="padding:16px 32px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+        '<div>' +
+          (isEdit ? '<button onclick="deleteSkill(\'' + skillName + '\');closeModal()" style="background:none;border:none;color:var(--error);font-size:13px;cursor:pointer;padding:8px 12px;border-radius:6px">删除技能</button>' : '') +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button onclick="closeModal()" style="background:var(--border);border:none;color:var(--text-secondary);font-size:13px;cursor:pointer;padding:10px 20px;border-radius:8px">取消</button>' +
+          '<button onclick="saveSkill(\'' + (skillName || '') + '\')" style="background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:10px 24px;border-radius:8px">' + (isEdit ? '保存修改' : '创建技能') + '</button>' +
+        '</div>' +
       '</div>' +
     '</div>';
   overlay.onclick = closeModal;
@@ -735,23 +879,27 @@ function showSkillModal(skillName) {
 
   setTimeout(() => {
     const el = document.getElementById(isEdit ? 'skillTitle' : 'skillName');
-    if (el) el.focus();
+    if (el) { el.focus(); el.select(); }
   }, 100);
 }
 
 function _renderFileSection(label, type, skillName, files) {
-  const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
-  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:12px;height:12px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:12px;height:12px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
-  const fileList = files.map(f =>
-    '<div style="display:flex;align-items:center;gap:4px;font-size:12px;padding:2px 0">' +
-      folderIcon + ' ' + escapeHtml(f) +
-      '<span style="margin-left:auto;cursor:pointer;color:#aeaeb2" onclick="deleteFile(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + trashIcon + '</span>' +
+  const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:14px;height:14px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;margin-left:2px"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const fileList = (files || []).map(f =>
+    '<div class="sd-file-row">' +
+      folderIcon +
+      '<span style="cursor:pointer;color:var(--accent);text-decoration:none" onclick="openFileEditor(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + escapeHtml(f) + '</span>' +
+      '<span class="del-btn" onclick="event.stopPropagation();deleteFile(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + trashIcon + '</span>' +
     '</div>'
   ).join('');
-  return '<label>' + label + ' <span style="font-weight:400;color:#aeaeb2">(' + files.length + '个)</span></label>' +
-    '<div style="margin-bottom:8px">' + (fileList || '<div style="font-size:12px;color:#aeaeb2">暂无</div>') + '</div>' +
-    '<div class="kw-input" style="margin-bottom:12px"><input id="fileInput_' + type + '" placeholder="文件名" style="flex:1"><button onclick="addFile(\'' + skillName + '\',\'' + type + '\')">' + plusIcon + '</button></div>';
+  return '<div class="sd-field">' +
+    '<label>' + label + ' <span style="font-weight:400;color:var(--text-secondary);text-transform:none">(' + (files || []).length + '个)</span></label>' +
+    (fileList || '<div style="font-size:12px;color:var(--text-secondary);padding:4px 0">暂无</div>') +
+    '<div class="sd-file-add"><input id="fileInput_' + type + '" placeholder="新建文件名"><button onclick="addFile(\'' + skillName + '\',\'' + type + '\')">' + plusIcon + '</button></div>' +
+    '</div>';
 }
 
 function addFile(skillName, type) {
@@ -760,13 +908,67 @@ function addFile(skillName, type) {
   if (!filename) return;
   const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
   fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '' }) })
-    .then(r => r.json()).then(() => { closeModal(); loadSkills(); setTimeout(() => showSkillModal(skillName), 100); });
+    .then(r => r.json()).then(() => {
+      closeModal();
+      loadSkills();
+      setTimeout(() => openFileEditor(skillName, type, filename), 100);
+    });
 }
 
 function deleteFile(skillName, type, filename) {
   if (!confirm('删除 ' + filename + '？')) return;
   const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
   fetch(url, { method: 'DELETE' }).then(() => { closeModal(); loadSkills(); setTimeout(() => showSkillModal(skillName), 100); });
+}
+
+function openFileEditor(skillName, type, filename) {
+  const apiPath = type === 'knowledge' ? 'knowledge' : 'scripts';
+  const url = '/skills/' + skillName + '/' + apiPath + '/' + encodeURIComponent(filename);
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      const content = data.content || '';
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.style.cssText = 'align-items:flex-start;padding-top:60px;z-index:110';
+      overlay.innerHTML =
+        '<div class="modal" style="width:600px;max-width:94vw;padding:0;overflow:hidden;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.12)" onclick="event.stopPropagation()">' +
+          '<div style="padding:20px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;color:var(--text-secondary)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+            '<span style="font-size:14px;font-weight:600;color:var(--text)">' + escapeHtml(filename) + '</span>' +
+            '<span style="font-size:11px;color:var(--text-secondary);margin-left:auto">' + (type === 'knowledge' ? '参考' : '脚本') + '</span>' +
+          '</div>' +
+          '<div style="padding:16px 24px">' +
+            '<textarea id="fileEditorContent" style="width:100%;min-height:300px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;outline:none;resize:vertical;box-sizing:border-box">' + escapeHtml(content) + '</textarea>' +
+          '</div>' +
+          '<div style="padding:12px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">' +
+            '<button onclick="this.closest(\'.modal-overlay\').remove()" style="background:var(--border);border:none;color:var(--text-secondary);font-size:13px;cursor:pointer;padding:8px 18px;border-radius:8px">取消</button>' +
+            '<button onclick="saveFileContent(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(filename) + '\')" style="background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:8px 18px;border-radius:8px">保存</button>' +
+          '</div>' +
+        '</div>';
+      overlay.onclick = function() { overlay.remove(); };
+      overlay.id = 'fileEditorOverlay';
+      document.body.appendChild(overlay);
+      setTimeout(() => {
+        const ta = document.getElementById('fileEditorContent');
+        if (ta) ta.focus();
+      }, 100);
+    });
+}
+
+function saveFileContent(skillName, type, filename) {
+  const content = document.getElementById('fileEditorContent').value;
+  const apiPath = type === 'knowledge' ? 'knowledge' : 'scripts';
+  const url = '/skills/' + skillName + '/' + apiPath + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) })
+    .then(r => r.json())
+    .then(() => {
+      const overlay = document.getElementById('fileEditorOverlay');
+      if (overlay) overlay.remove();
+      closeModal();
+      loadSkills();
+      setTimeout(() => showSkillModal(skillName), 100);
+    });
 }
 
 function closeModal() {
@@ -831,9 +1033,10 @@ function loadHistory() {
       const welcome = document.getElementById('welcome');
       if (welcome) welcome.remove();
       const chat = document.getElementById('chat');
+      const inner = document.getElementById('chatInner');
       msgs.forEach(m => {
         if (m.role === 'user') {
-          chat.appendChild(userBubble(m.content));
+          inner.appendChild(userBubble(m.content));
         } else {
           const div = document.createElement('div');
           div.className = 'message assistant';
@@ -844,7 +1047,7 @@ function loadHistory() {
           content.innerHTML = renderMarkdown(m.content);
           bubble.appendChild(content);
           div.appendChild(bubble);
-          chat.appendChild(div);
+          inner.appendChild(div);
         }
       });
       chat.scrollTop = chat.scrollHeight;
@@ -968,7 +1171,7 @@ function formatToolResultObject(obj) {
 
     // Bucket overview
     if (obj.buckets.length > 0) {
-      html += '<h4 style="margin:8px 0 4px;color:#a78bfa;">分桶概览</h4>';
+      html += '<h4 style="margin:8px 0 4px;color:var(--accent);">分桶概览</h4>';
       html += '<table><thead><tr><th>分桶</th><th>数量</th><th>金额</th><th>币种</th></tr></thead><tbody>';
       obj.buckets.forEach(b => {
         html += '<tr><td>' + escapeHtml(b.name || '') + '</td>';
@@ -981,7 +1184,7 @@ function formatToolResultObject(obj) {
 
     // Holdings detail
     if (obj.holdings.length > 0) {
-      html += '<h4 style="margin:8px 0 4px;color:#a78bfa;">持仓明细</h4>';
+      html += '<h4 style="margin:8px 0 4px;color:var(--accent);">持仓明细</h4>';
       const cols = ['code', 'name', 'bucket', 'type', 'balance', 'currency'];
       html += '<table><thead><tr>';
       cols.forEach(c => { html += '<th>' + c + '</th>'; });
@@ -1032,14 +1235,27 @@ function send() {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
 
+  // Reset right panel
+  resetRPanel();
+  // Track tool names for reference panel
+  let rpTools = [];
+
   const chat = document.getElementById('chat');
-  chat.appendChild(userBubble(msg));
+  const inner = document.getElementById('chatInner');
+  inner.appendChild(userBubble(msg));
   const asst = assistantBubble();
-  chat.appendChild(asst);
+  inner.appendChild(asst);
   chat.scrollTop = chat.scrollHeight;
 
   const toolCache = new Map();
-  let thinking = addThinking(asst);
+  // Status bar: appears below assistant bubble in chat
+  const statusBar = document.createElement('div');
+  statusBar.className = 'status-bar';
+  inner.appendChild(statusBar);
+  setStatus(statusBar, '思考中...');
+  // Right panel tracking
+  let rpSteps = [];
+  let rpTodos = [];
 
   const params = new URLSearchParams({
     message: encodeURIComponent(msg),
@@ -1047,15 +1263,28 @@ function send() {
   });
   const es = new EventSource('/chat/stream?' + params.toString());
 
+  es.addEventListener('classify', (e) => {
+    document.getElementById('rpanel').classList.add('open');
+    const data = JSON.parse(e.data);
+    let title = data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name :
+                data.intent === 'react' ? '\u5bf9\u8bdd\u5206\u6790' :
+                data.intent === 'plan_execute' ? '\u8ba1\u5212\u6267\u884c' : data.intent;
+    setRPTodo(title);
+    setRPRef('skill', data.skill_name || data.intent);
+    rpTools = [];
+  });
+
   es.addEventListener('tool_call', (e) => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    setStatus(statusBar, '\u6267\u884c\u4e2d...');
     const data = JSON.parse(e.data);
     const name = data.name || '';
     toolCache.set(name, { name, args: data.args, preview: '' });
+    rpTools.push(name);
+    setRPRef('tools', rpTools.join(', '));
   });
 
   es.addEventListener('tool_result', (e) => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    setStatus(statusBar, '执行中...');
     const data = JSON.parse(e.data);
     const name = data.name || '';
     const cached = toolCache.get(name);
@@ -1064,10 +1293,11 @@ function send() {
       asst.appendChild(toolSection(cached));
       toolCache.delete(name);
     }
+    addRPArtifact(name, data.preview || '');
   });
 
   es.addEventListener('token', (e) => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    setStatus(statusBar, '生成中...');
     let content = asst.querySelector('.content');
     if (!content) {
       content = document.createElement('div');
@@ -1083,7 +1313,8 @@ function send() {
   });
 
   es.addEventListener('error', (e) => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    hideStatus(statusBar);
+    document.getElementById('rpanel').classList.remove('open');
     try {
       const data = JSON.parse(e.data);
       asst.appendChild(errorBlock(data.message || ''));
@@ -1091,7 +1322,7 @@ function send() {
   });
 
   es.addEventListener('done', (e) => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    hideStatus(statusBar);
     try {
       const data = JSON.parse(e.data);
       const dur = data.duration_ms ? (data.duration_ms / 1000).toFixed(1) + 's' : '';
@@ -1109,20 +1340,24 @@ function send() {
   });
 
   es.onerror = () => {
-    if (thinking) { thinking.remove(); thinking = null; }
+    hideStatus(statusBar);
     es.close();
     sending = false;
     document.getElementById('input').focus();
   };
 }
 
-function addThinking(asst) {
-  const el = document.createElement('div');
-  el.className = 'thinking';
-  el.textContent = '思考中...';
-  asst.appendChild(el);
-  return el;
+function setStatus(el, text) {
+  el.className = 'status-bar active';
+  el.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> ' + text;
 }
+
+function hideStatus(el) {
+  el.className = 'status-bar';
+  el.innerHTML = '';
+}
+
+function addThinking(asst) { return null; }  // deprecated, kept for compatibility
 
 function userBubble(msg) {
   const div = document.createElement('div');
@@ -1150,6 +1385,37 @@ function errorBlock(msg) {
   div.className = 'error-block';
   div.textContent = msg;
   return div;
+}
+
+// ---- Right Panel Helpers ----
+
+function resetRPanel() {
+  document.getElementById('rpTodo').innerHTML = '<span style="color:var(--text-secondary)">暂无待办</span>';
+  document.getElementById('rpArtifacts').innerHTML = '<span style="color:var(--text-secondary)">暂无产物</span>';
+  document.getElementById('rpRef').innerHTML = '<span style="color:var(--text-secondary)">暂无参考</span>';
+}
+
+function setRPTodo(text) {
+  document.getElementById('rpTodo').innerHTML = text;
+}
+
+function setRPRef(key, val) {
+  var el = document.getElementById('rpRef');
+  if (el.innerHTML.indexOf('暂无参考') === 0) el.innerHTML = '';
+  var div = document.createElement('div');
+  div.style.cssText = 'font-size:11px;margin-bottom:4px;display:flex;gap:6px';
+  div.innerHTML = '<span style="color:var(--text-secondary);flex-shrink:0">' + escapeHtml(key) + '</span><span style="color:var(--text);word-break:break-all">' + escapeHtml(val) + '</span>';
+  if (el.children.length > 5) el.removeChild(el.lastElementChild);
+  el.insertBefore(div, el.firstChild);
+}
+
+function addRPArtifact(name, preview) {
+  var el = document.getElementById('rpArtifacts');
+  if (el.innerHTML.indexOf('暂无产物') === 0) el.innerHTML = '';
+  var div = document.createElement('div');
+  div.style.cssText = 'font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);';
+  div.innerHTML = '<span style="font-weight:600">' + escapeHtml(name) + '</span><br><span style="color:var(--text-secondary)">' + escapeHtml(preview).substring(0, 80) + '</span>';
+  el.appendChild(div);
 }
 
 </script>

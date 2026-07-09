@@ -228,6 +228,7 @@ class ChatService:
 
         try:
             emitted_tool_count = 0
+            emitted_classify = False
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
             for event in self._compiled_graph.stream(
@@ -249,6 +250,17 @@ class ChatService:
                 if not isinstance(event, dict):
                     continue
                 final_state = event
+
+                # Emit classify result for right-panel display (once)
+                intent = event.get("intent", "")
+                skill_name = event.get("skill_name", "")
+                if intent and not emitted_classify:
+                    emitted_classify = True
+                    yield {
+                        "type": "classify",
+                        "intent": intent,
+                        "skill_name": skill_name,
+                    }
 
                 # Yield only NEW tool calls (skip duplicates)
                 tool_results = event.get("tool_results", [])
@@ -305,9 +317,46 @@ class ChatService:
             yield {"type": "error", "message": f"agent error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
+            self._prune_checkpoints(sid)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
     # ---- Internal ----
+
+    def _prune_checkpoints(self, thread_id: str) -> None:
+        """Keep only the latest checkpoint per thread to prevent unbounded growth.
+
+        LangGraph's SqliteSaver writes a checkpoint after every node execution.
+        Each user question generates 5-6 checkpoints. Over time this accumulates
+        useless history — only the latest checkpoint is needed to resume a
+        conversation. This method deletes all but the most recent checkpoint for
+        the given thread and cleans up the corresponding writes table.
+        """
+        try:
+            conn = self._checkpoint_conn
+            if conn is None:
+                return
+            # Delete all but the latest checkpoint for this thread
+            conn.execute(
+                """DELETE FROM checkpoints
+                   WHERE (thread_id, checkpoint_ns, checkpoint_id) IN (
+                     SELECT thread_id, checkpoint_ns, checkpoint_id
+                     FROM checkpoints
+                     WHERE thread_id = ?
+                     ORDER BY checkpoint_id DESC
+                     LIMIT -1 OFFSET 1
+                   )""",
+                (thread_id,),
+            )
+            # Clean orphaned writes (no matching checkpoint)
+            conn.execute(
+                """DELETE FROM writes
+                   WHERE (thread_id, checkpoint_ns, checkpoint_id) NOT IN (
+                     SELECT thread_id, checkpoint_ns, checkpoint_id FROM checkpoints
+                   )""",
+            )
+            conn.execute("PRAGMA optimize")
+        except Exception:
+            pass  # Pruning is best-effort; never fail the chat for it
 
     def reload_skills(self) -> list[SkillDefinition]:
         """Reload skills from disk (after CRUD)."""

@@ -43,18 +43,28 @@ def truncate_messages(
 
     Returns:
         Truncated list of messages (removes oldest messages first).
+        At least the last message is always kept, even if it exceeds budget.
     """
+    if not messages:
+        return []
+
     budget = max_tokens - reserve_tokens - estimate_tokens(system_prompt)
     if budget <= 0:
-        return messages[-2:] if len(messages) >= 2 else messages
+        # Budget exhausted by system prompt; keep only the last message
+        return [messages[-1]]
 
     result: list[dict[str, str]] = []
     used = 0
-    for msg in reversed(messages):
+
+    # Always keep the last message (most recent user query)
+    for msg in reversed(messages[:-1]):
         tokens = estimate_tokens(msg.get("content", ""))
         if used + tokens > budget:
             break
         result.insert(0, msg)
         used += tokens
+
+    # Append the last message unconditionally
+    result.append(messages[-1])
 
     return result
