@@ -137,6 +137,34 @@ class SkillDefinition:
             return f.read_text(encoding="utf-8")
         return None
 
+    @staticmethod
+    def read_knowledge_static(skill_dir: Path) -> list[dict[str, str]]:
+        """Read all knowledge files from a skill directory (static)."""
+        result = []
+        kdir = skill_dir / KNOWLEDGE_DIR
+        if not kdir.exists():
+            return result
+        for f in sorted(kdir.iterdir()):
+            if f.is_file():
+                result.append({"name": f.name, "content": f.read_text(encoding="utf-8")})
+        return result
+
+    @staticmethod
+    def read_knowledge_file_static(skill_dir: Path, filename: str) -> str | None:
+        """Read a single knowledge file (static)."""
+        f = skill_dir / KNOWLEDGE_DIR / filename
+        if f.exists():
+            return f.read_text(encoding="utf-8")
+        return None
+
+    @staticmethod
+    def read_script_static(skill_dir: Path, filename: str) -> str | None:
+        """Read a script file (static)."""
+        f = skill_dir / SCRIPTS_DIR / filename
+        if f.exists():
+            return f.read_text(encoding="utf-8")
+        return None
+
 
 def load_skills(skills_dir: Path) -> list[SkillDefinition]:
     """Load all skills from a directory of skill directories."""

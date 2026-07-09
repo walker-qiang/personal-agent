@@ -40,6 +40,7 @@ ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
 ENV_STORE_PATH = "MATRIX_STORE_PATH"
 ENV_CHECKPOINT_PATH = "MATRIX_CHECKPOINT_PATH"
 ENV_SKILLS_DIR = "MATRIX_SKILLS_DIR"
+ENV_SKILLS_BASE_DIR = "MATRIX_SKILLS_BASE_DIR"  # root dir for skills/{common,investment,general}
 ENV_RATE_LIMIT_PER_SEC = "RATE_LIMIT_PER_SEC"
 ENV_MAX_MESSAGE_CHARS = "MAX_MESSAGE_CHARS"
 
@@ -66,6 +67,20 @@ KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+# Image generation models
+IMAGE_MODELS: dict[str, list[dict[str, str]]] = {
+    "agnes": [
+        {"id": "agnes-image-2.0-flash", "name": "Agnes Image 2.0 Flash", "desc": "免费"},
+    ],
+}
+
+# Video generation models
+VIDEO_MODELS: dict[str, list[dict[str, str]]] = {
+    "agnes": [
+        {"id": "agnes-video-v2.0", "name": "Agnes Video V2.0", "desc": "免费"},
+    ],
+}
+
 # Pipeline model: used for internal tasks (classify, plan, reflection)
 # Defaults to Agnes 2.0 Flash for speed and cost efficiency
 ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
@@ -83,7 +98,8 @@ class AgentConfig:
     trace_path: Path
     store_path: Path
     checkpoint_path: str
-    skills_dir: Path
+    skills_dir: Path  # deprecated, kept for backward compat; use skills_base_dir
+    skills_base_dir: Path  # root dir for skills/{common,investment,general}
     host: str
     port: int
     agent_provider: str = "deepseek"
@@ -166,6 +182,14 @@ def load_config() -> AgentConfig:
     else:
         skills_dir = root / "skills" / "investment"
 
+    # Skills base dir: MATRIX_SKILLS_BASE_DIR > default
+    skills_base_raw = os.environ.get(ENV_SKILLS_BASE_DIR, "").strip()
+    if skills_base_raw:
+        skills_base_path = Path(skills_base_raw).expanduser()
+        skills_base_dir = skills_base_path if skills_base_path.is_absolute() else root / skills_base_path
+    else:
+        skills_base_dir = root / ".." / "personal-assets" / "技能"
+
     host, port = load_bind_addr()
     provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
@@ -177,6 +201,7 @@ def load_config() -> AgentConfig:
         store_path=store_path,
         checkpoint_path=checkpoint_path,
         skills_dir=skills_dir,
+        skills_base_dir=skills_base_dir,
         host=host,
         port=port,
         agent_provider=provider,

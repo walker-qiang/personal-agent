@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.get("/api/provider")
 async def get_providers(request: Request):
-    """List available LLM providers and current session's selection."""
+    """List available LLM, image, and video providers."""
     import json as _json
 
     chat = request.app.state.chat
@@ -18,6 +18,8 @@ async def get_providers(request: Request):
 
     return JSONResponse({
         "providers": chat.available_providers,
+        "image_models": chat.available_image_models,
+        "video_models": chat.available_video_models,
         "current": chat.get_provider(session_id),
     })
 

@@ -1,4 +1,8 @@
-"""Tests for LangGraph orchestration graph and nodes."""
+"""Tests for multi-agent LangGraph orchestration.
+
+Commander + Domain Agents architecture:
+  classify → commander_plan → delegate → aggregate → reflection
+"""
 
 from __future__ import annotations
 
@@ -8,17 +12,18 @@ import pytest
 
 from matrix.orchestration.graph import build_graph
 from matrix.orchestration.nodes import (
+    aggregate_node,
     classify_node,
-    execute_node,
-    plan_node,
-    react_node,
+    commander_plan_node,
+    delegate_node,
     reflection_node,
-    skill_node,
-    summarize_node,
 )
 from matrix.orchestration.state import AgentState
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
+from matrix.agent import AgentRegistry
+from matrix.agent.commander import COMMANDER
+from matrix.agent.domain_agents import INVESTMENT_ANALYST
 
 
 class FakeLLM:
@@ -49,41 +54,63 @@ class FakeLLM:
 
 # ---- Fixtures ----
 
-registry = ToolRegistry()
+def _build_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+    reg.register(
+        ToolDefinition(
+            name="finance.holdings_summary",
+            description="Get holdings summary",
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=lambda **kw: {"holding_count": 2, "total_value": 100000},
+        )
+    )
+    reg.register(
+        ToolDefinition(
+            name="finance.bucket_allocation",
+            description="Get bucket allocation",
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=lambda **kw: {"buckets": [{"name": "stock", "target": 40, "current": 45}]},
+        )
+    )
+    reg.register(
+        ToolDefinition(
+            name="web_search",
+            description="Search the web",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            handler=lambda **kw: {"results": [{"title": "test", "url": "http://test.com"}]},
+        )
+    )
+    reg.register(
+        ToolDefinition(
+            name="web_fetch",
+            description="Fetch a web page",
+            input_schema={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+            handler=lambda **kw: {"text": "test content"},
+        )
+    )
+    return reg
 
-registry.register(
-    ToolDefinition(
-        name="finance.holdings_summary",
-        description="Get holdings summary",
-        input_schema={"type": "object", "properties": {}, "required": []},
-        handler=lambda **kw: {"holding_count": 2, "total_value": 100000},
-    )
-)
-registry.register(
-    ToolDefinition(
-        name="finance.bucket_allocation",
-        description="Get bucket allocation",
-        input_schema={"type": "object", "properties": {}, "required": []},
-        handler=lambda **kw: {"buckets": [{"name": "stock", "target": 40, "current": 45}]},
-    )
-)
+
+def _build_agent_registry() -> AgentRegistry:
+    reg = AgentRegistry(skills_base_dir="skills")
+    reg.register_all([COMMANDER, INVESTMENT_ANALYST])
+    return reg
 
 
 @pytest.fixture
 def base_state():
-    """Return a factory that creates AgentState with optional overrides."""
     def _make(**overrides) -> AgentState:
         return {
             "messages": [],
             "user_message": "当前持仓情况如何？",
             "session_id": "test",
             "intent": "",
-            "skill_name": "",
+            "delegation_plan": [],
+            "current_step": 0,
+            "agent_results": [],
             "tool_results": [],
             "tool_call_count": 0,
-            "current_plan": [],
             "react_iteration": 0,
-            "findings": [],
             "final_answer": "",
             "needs_summary": False,
             "error": "",
@@ -92,14 +119,24 @@ def base_state():
     return _make
 
 
-def make_config(llm, tools, skills=None, trace=None, skills_dir=None):
+@pytest.fixture
+def full_tools():
+    return _build_registry()
+
+
+@pytest.fixture
+def agent_registry():
+    return _build_agent_registry()
+
+
+def make_config(llm, full_tools, agent_registry, trace=None):
     return {
         "configurable": {
             "llm": llm,
-            "tools": tools,
-            "skills": skills or [],
+            "pipeline_llm": llm,  # use same llm for pipeline in tests
+            "full_tools": full_tools,
+            "agent_registry": agent_registry,
             "trace": trace,
-            "skills_dir": skills_dir,
         },
     }
 
@@ -107,193 +144,192 @@ def make_config(llm, tools, skills=None, trace=None, skills_dir=None):
 # ---- Classify ----
 
 class TestClassifyNode:
-    def test_classifies_react(self, base_state):
-        llm = FakeLLM(['{"intent": "react"}'])
-        result = classify_node(base_state(), config=make_config(llm, registry))
-        assert result["intent"] == "react"
+    def test_classifies_delegate(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM(['{"intent": "delegate"}'])
+        result = classify_node(base_state(), config=make_config(llm, full_tools, agent_registry))
+        assert result["intent"] == "delegate"
 
-    def test_classifies_plan_execute(self, base_state):
-        llm = FakeLLM(['{"intent": "plan_execute"}'])
-        result = classify_node(base_state(), config=make_config(llm, registry))
-        assert result["intent"] == "plan_execute"
-
-    def test_classify_skill_keyword_match(self, base_state):
-        """Keyword matching should trigger without LLM call."""
-        from matrix.skills import SkillDefinition
-        skill = SkillDefinition(
-            name="test-skill",
-            title="测试",
-            description="测试描述",
-            workflow=[],
-        )
+    def test_classifies_simple_greeting(self, base_state, full_tools, agent_registry):
+        """Simple greetings should be classified as 'simple' via keyword."""
         llm = FakeLLM([])
-        state = base_state(user_message="跑测试技能")
-        result = classify_node(state, config=make_config(llm, registry, [skill]))
-        assert result["intent"] == "skill"
+        state = base_state(user_message="你好！")
+        result = classify_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["intent"] == "simple"
 
-    def test_classify_fallback_on_error(self, base_state):
-        """No responses → LLM will fail, classify_node should catch and return react."""
-        llm = FakeLLM([])
-        result = classify_node(base_state(), config=make_config(llm, registry))
-        assert result["intent"] == "react"
+    def test_classify_fallback_on_error(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM([])  # no responses → error → fallback to delegate
+        result = classify_node(base_state(user_message="分析我的持仓"), config=make_config(llm, full_tools, agent_registry))
+        assert result["intent"] == "delegate"
 
 
-# ---- React ----
+# ---- Commander Plan ----
 
-class TestReactNode:
-    def test_react_returns_final_answer(self, base_state):
-        """Native function calling: LLM returns content directly."""
-        llm = FakeLLM(["当前持仓健康。"])
-
-        result = react_node(base_state(), config=make_config(llm, registry))
-        assert "final_answer" in result or "needs_summary" in result
-
-    def test_react_fallback_regex(self, base_state):
-        """Regex fallback: LLM returns Final Answer via text."""
-        llm = FakeLLM(["Final Answer: 当前持仓健康。"])
-
-        result = react_node(base_state(), config=make_config(llm, registry))
-        assert "final_answer" in result or "needs_summary" in result
-
-    def test_react_max_iterations(self, base_state):
-        llm = FakeLLM(["当前持仓健康。"])
-        state = base_state(react_iteration=5)
-        result = react_node(state, config=make_config(llm, registry))
-        assert "final_answer" in result
-
-    def test_react_fallback_tool_call(self, base_state):
-        """Regex fallback: LLM calls a tool. Force fallback by raising on function_call."""
-        class FallbackFakeLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
-                raise LLMError("simulated function_call failure")
-
-        llm = FallbackFakeLLM([
-            "Thought: 查询持仓\nAction: finance.holdings_summary\nAction Input: {}",
+class TestCommanderPlanNode:
+    def test_generates_plan(self, base_state, full_tools, agent_registry):
+        plan_json = json.dumps([
+            {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓", "skill_name": "", "purpose": "获取持仓数据"},
         ])
-        result = react_node(base_state(), config=make_config(llm, registry))
-        assert result["tool_call_count"] >= 1
+        llm = FakeLLM([plan_json])
+        result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
+        assert len(result["delegation_plan"]) >= 1
+        assert result["delegation_plan"][0]["agent_id"] == "investment-analyst"
 
+    def test_empty_plan_falls_back_to_simple(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM(["[]"])
+        result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
+        assert result.get("intent") == "simple" or result["delegation_plan"] == []
 
-# ---- Plan ----
-
-class TestPlanNode:
-    def test_plan_generates_steps(self, base_state):
-        llm = FakeLLM([
-            json.dumps([
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}, "purpose": "获取持仓"},
-            ]),
-        ])
-        result = plan_node(base_state(), config=make_config(llm, registry))
-        assert len(result["current_plan"]) >= 1
-
-    def test_plan_fallback_on_error(self, base_state):
+    def test_plan_fallback_on_error(self, base_state, full_tools, agent_registry):
         llm = FakeLLM(["not json at all..."])
-        result = plan_node(base_state(), config=make_config(llm, registry))
-        assert len(result["current_plan"]) >= 1  # fallback plan
+        result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
+        assert result["delegation_plan"] == []  # fallback to empty plan
 
 
-# ---- Execute ----
+# ---- Delegate ----
 
-class TestExecuteNode:
-    def test_execute_one_step(self, base_state):
+class TestDelegateNode:
+    def test_delegate_executes_agent(self, base_state, full_tools, agent_registry):
+        """Domain agent runs ReAct with function calling."""
+        llm = FakeLLM(["当前持仓健康，共2个持仓。"])
         state = base_state(
-            current_plan=[
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}, "purpose": "获取持仓"},
+            intent="delegate",
+            delegation_plan=[
+                {"step": 1, "agent_id": "investment-analyst", "task": "分析当前持仓", "skill_name": "", "purpose": "获取持仓"},
             ],
-            tool_call_count=0,
+            current_step=0,
         )
-        result = execute_node(state, config=make_config(FakeLLM([]), registry))
-        assert result["tool_call_count"] == 1
-        assert len(result["tool_results"]) == 1
+        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["current_step"] == 1
+        assert len(result["agent_results"]) == 1
+        assert "持仓" in result["agent_results"][0]["result"]
 
-
-# ---- Summarize ----
-
-class TestSummarizeNode:
-    def test_uses_existing_final_answer(self, base_state):
-        state = base_state(final_answer="已有答案")
-        result = summarize_node(state, config=make_config(FakeLLM([]), registry))
-        assert result["final_answer"] == "已有答案"
-
-    def test_sets_needs_summary_when_tool_results(self, base_state):
-        state = base_state(
-            tool_results=[
-                {"name": "finance.holdings_summary", "result": {"holding_count": 2}},
-            ],
-        )
-        result = summarize_node(state, config=make_config(FakeLLM([]), registry))
-        assert result.get("needs_summary") is True
-        assert "final_answer" not in result
-
-    def test_handles_no_tool_results(self, base_state):
-        result = summarize_node(base_state(), config=make_config(FakeLLM([]), registry))
-        assert "未获取到任何数据" in result["final_answer"]
-
-
-# ---- Skill ----
-
-class TestSkillNode:
-    def test_executes_skill_workflow(self, base_state):
-        from matrix.skills import SkillDefinition
-        skill = SkillDefinition(
-            name="test-skill",
-            title="测试技能",
-            description="测试",
-            workflow=[
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
-            ],
-        )
+    def test_delegate_agent_not_found(self, base_state, full_tools, agent_registry):
         llm = FakeLLM([])
-        state = base_state(intent="skill", skill_name="test-skill")
-        result = skill_node(state, config=make_config(llm, registry, [skill]))
-        assert result["tool_call_count"] == 1
-        assert len(result["tool_results"]) == 1
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "nonexistent-agent", "task": "测试", "skill_name": "", "purpose": "测试"},
+            ],
+            current_step=0,
+        )
+        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["current_step"] == 1
+        assert "error" in result["agent_results"][0]
+
+    def test_delegate_with_tool_call(self, base_state, full_tools, agent_registry):
+        """Domain agent calls a tool via function calling."""
+        from matrix.llm import FunctionCallResult, ToolCall
+
+        class ToolCallLLM(FakeLLM):
+            def function_call(self, system, messages, tools, tool_choice="auto"):
+                self.calls.append(("function_call", messages))
+                if not self.responses:
+                    return FunctionCallResult(content="", tool_calls=[])
+                text = self.responses.pop(0)
+                if text.startswith("TOOL:"):
+                    return FunctionCallResult(
+                        content="",
+                        tool_calls=[ToolCall(name="finance.holdings_summary", arguments={})],
+                        finish_reason="tool_calls",
+                    )
+                return FunctionCallResult(content=text, tool_calls=[])
+
+        llm = ToolCallLLM(["TOOL:", "当前持仓健康。"])
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓", "skill_name": "", "purpose": "获取"},
+            ],
+            current_step=0,
+        )
+        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["current_step"] == 1
+        assert len(result["agent_results"]) == 1
+
+
+# ---- Aggregate ----
+
+class TestAggregateNode:
+    def test_aggregate_simple_intent(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM([])
+        state = base_state(intent="simple")
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result.get("needs_summary") is True
+
+    def test_aggregate_with_results(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM(["当前持仓健康，共2个持仓，总价值100,000元。"])
+        state = base_state(
+            intent="delegate",
+            agent_results=[
+                {
+                    "agent_id": "investment-analyst",
+                    "task": "分析持仓",
+                    "result": "持仓健康，共2个持仓。",
+                    "error": "",
+                },
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result.get("needs_summary") is False
+        assert "持仓" in result.get("final_answer", "")
+
+    def test_aggregate_all_errors(self, base_state, full_tools, agent_registry):
+        llm = FakeLLM([])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "测试", "result": "", "error": "执行失败"},
+                {"agent_id": "agent2", "task": "测试", "result": "", "error": "工具不可用"},
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert "所有领域专家执行失败" in result.get("final_answer", "")
 
 
 # ---- Reflection ----
 
 class TestReflectionNode:
-    def test_reflection_passes(self, base_state):
+    def test_reflection_passes(self, base_state, full_tools, agent_registry):
         llm = FakeLLM(['{"ok": true}'])
         state = base_state(
             final_answer="当前持仓健康，共2个持仓。",
             user_message="当前持仓怎么样？",
         )
-        result = reflection_node(state, config=make_config(llm, registry))
-        assert "final_answer" not in result or result.get("final_answer") == "当前持仓健康，共2个持仓。"
+        result = reflection_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert "final_answer" not in result
 
-    def test_reflection_short_answer_skipped(self, base_state):
-        """Short answers (< 15 chars) skip reflection."""
+    def test_reflection_short_answer_skipped(self, base_state, full_tools, agent_registry):
         llm = FakeLLM([])
         state = base_state(final_answer="OK。", user_message="test")
-        result = reflection_node(state, config=make_config(llm, registry))
+        result = reflection_node(state, config=make_config(llm, full_tools, agent_registry))
         assert result == {}
 
-    def test_reflection_finds_issues(self, base_state):
+    def test_reflection_finds_issues(self, base_state, full_tools, agent_registry):
         llm = FakeLLM([
             '{"ok": false, "issues": ["回答不完整", "缺少数据支撑"]}',
+            "修正后的回答：当前持仓配置偏离度为5%，超出目标范围。",
         ])
         state = base_state(
             final_answer="当前持仓看起来不错，应该没问题。",
             user_message="当前持仓的配置偏离度是多少？",
         )
-        result = reflection_node(state, config=make_config(llm, registry))
+        result = reflection_node(state, config=make_config(llm, full_tools, agent_registry))
         assert "final_answer" in result
-        assert "自检发现问题" in result["final_answer"]
+        assert "修正" in result["final_answer"] or "偏离" in result["final_answer"]
 
 
-# ---- Graph integration ----
+# ---- Graph Integration ----
 
 class TestGraphIntegration:
-    def test_graph_compiles(self):
+    def test_graph_compiles(self, full_tools, agent_registry):
         graph = build_graph()
         assert graph is not None
 
-    def test_graph_react_path(self, base_state):
-        """Test react path through the compiled graph."""
+    def test_graph_simple_path(self, base_state, full_tools, agent_registry):
+        """Test simple intent path through the compiled graph.
+        Simple intent now routes through commander → delegate → aggregate → reflection.
+        """
         llm = FakeLLM([
-            '{"intent": "react"}',
-            "当前持仓健康。",
+            '{"intent": "simple"}',  # classify
+            "你好！有什么可以帮助你的？",  # delegate: commander ReAct
+            '{"ok": true}',  # reflection
         ])
         graph = build_graph()
         compiled = graph.compile()
@@ -301,150 +337,39 @@ class TestGraphIntegration:
             compiled.stream(
                 base_state(),
                 stream_mode="values",
-                config=make_config(llm, registry),
-                thread_id="test-graph",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-graph-simple",
             )
         )
         final = events[-1]
-        assert final.get("needs_summary") is True or final.get("final_answer") is not None
+        # Commander changes intent from simple → delegate
+        assert final.get("intent") == "delegate"
+        assert len(final.get("agent_results", [])) == 1
+        assert final["agent_results"][0]["agent_id"] == "commander"
+        assert "帮助" in final.get("final_answer", "")
 
-    def test_graph_skill_path(self, base_state):
-        """Test skill path through the compiled graph."""
-        from matrix.skills import SkillDefinition
-        skill = SkillDefinition(
-            name="test-skill",
-            title="测试",
-            description="测试",
-            workflow=[
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
-            ],
-        )
+    def test_graph_delegate_path(self, base_state, full_tools, agent_registry):
+        """Test delegate path through the compiled graph."""
         llm = FakeLLM([
-            '{"intent": "skill", "skill_name": "test-skill"}',
+            '{"intent": "delegate"}',  # classify
+            json.dumps([  # commander_plan
+                {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓", "skill_name": "", "purpose": "获取"},
+            ]),
+            "当前持仓健康。",  # delegate (domain agent)
+            "汇总：当前持仓健康。",  # aggregate
+            '{"ok": true}',  # reflection
         ])
         graph = build_graph()
         compiled = graph.compile()
-        state = base_state(intent="skill", skill_name="test-skill")
         events = list(
             compiled.stream(
-                state,
+                base_state(),
                 stream_mode="values",
-                config=make_config(llm, registry, [skill]),
-                thread_id="test-graph-skill",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-graph-delegate",
             )
         )
         final = events[-1]
-        assert final.get("tool_call_count", 0) >= 1
-        assert final.get("needs_summary") is True
-
-    def test_graph_needs_summary_path(self, base_state):
-        """Test needs_summary → streaming summarization: skill path with tool_results."""
-        from matrix.skills import SkillDefinition
-        skill = SkillDefinition(
-            name="test-skill",
-            title="测试",
-            description="测试",
-            workflow=[
-                {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
-            ],
-        )
-        llm = FakeLLM([])  # skill path doesn't call LLM in classify (intent pre-set)
-        graph = build_graph()
-        compiled = graph.compile()
-        state = base_state(intent="skill", skill_name="test-skill")
-        events = list(
-            compiled.stream(
-                state,
-                stream_mode="values",
-                config=make_config(llm, registry, [skill]),
-                thread_id="test-needs-summary",
-            )
-        )
-        final = events[-1]
-        # skill_node executes workflow → tool_results, summarize_node sets needs_summary=True
-        assert final.get("tool_call_count", 0) >= 1
-        assert final.get("needs_summary") is True
-
-
-class TestFunctionCallPath:
-    """Tests for the native function calling path in react_node."""
-
-    def test_function_call_returns_tool_calls(self, base_state):
-        """Test react_node using native function calling that returns tool_calls."""
-        from matrix.llm import FunctionCallResult, ToolCall
-
-        class ToolCallLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
-                self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="",
-                    tool_calls=[
-                        ToolCall(name="finance.holdings_summary", arguments={}),
-                    ],
-                    finish_reason="tool_calls",
-                )
-
-        llm = ToolCallLLM([])
-        result = react_node(base_state(), config=make_config(llm, registry))
-        assert result["tool_call_count"] >= 1
-        assert len(result["tool_results"]) >= 1
-
-    def test_function_call_returns_direct_answer(self, base_state):
-        """Test react_node when function_call returns content directly (no tools)."""
-        from matrix.llm import FunctionCallResult
-
-        class DirectAnswerLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
-                self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="当前持仓健康，共2个持仓。",
-                    tool_calls=[],
-                    finish_reason="stop",
-                )
-
-        llm = DirectAnswerLLM([])
-        result = react_node(base_state(), config=make_config(llm, registry))
-        assert "final_answer" in result
-        assert "持仓" in result["final_answer"]
-
-    def test_execute_tool_calls_dedup(self, base_state):
-        """Test that _execute_tool_calls skips duplicate tool calls."""
-        from matrix.llm import FunctionCallResult, ToolCall
-
-        class DupToolCallLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
-                self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="",
-                    tool_calls=[
-                        ToolCall(name="finance.holdings_summary", arguments={}),
-                        ToolCall(name="finance.holdings_summary", arguments={}),
-                    ],
-                    finish_reason="tool_calls",
-                )
-
-        llm = DupToolCallLLM([])
-        result = react_node(base_state(), config=make_config(llm, registry))
-        # Two identical calls, only one should execute
-        assert result["tool_call_count"] == 1
-
-    def test_execute_tool_calls_unknown_tool(self, base_state):
-        """Test that _execute_tool_calls skips unknown tools."""
-        from matrix.llm import FunctionCallResult, ToolCall
-
-        class UnknownToolLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
-                self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="",
-                    tool_calls=[
-                        ToolCall(name="nonexistent.tool", arguments={}),
-                        ToolCall(name="finance.holdings_summary", arguments={}),
-                    ],
-                    finish_reason="tool_calls",
-                )
-
-        llm = UnknownToolLLM([])
-        result = react_node(base_state(), config=make_config(llm, registry))
-        # Only holdings_summary should execute
-        assert result["tool_call_count"] == 1
+        assert final.get("intent") == "delegate"
+        assert len(final.get("agent_results", [])) >= 1
+        assert final.get("final_answer") is not None

@@ -306,9 +306,10 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    min-width: 180px;
+    min-width: 200px;
+    max-height: 420px;
+    overflow-y: auto;
     z-index: 50;
-    overflow: hidden;
     box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
   }
   .footer-model-dropdown.show { display: block; }
@@ -617,6 +618,8 @@ let sending = false;
 
 // ---- Provider management (per-session, in footer) ----
 let _providers = [];
+let _imageModels = [];
+let _videoModels = [];
 let currentModel = '';  // "provider:model_id"
 
 function loadProviders() {
@@ -624,6 +627,8 @@ function loadProviders() {
     .then(r => r.json())
     .then(data => {
       _providers = data.providers || [];
+      _imageModels = data.image_models || [];
+      _videoModels = data.video_models || [];
       const cur = data.current || {};
       currentModel = (cur.provider && cur.model) ? (cur.provider + ':' + cur.model) : '';
       updateFooterModel();
@@ -664,6 +669,38 @@ function updateFooterModel() {
         '</div>';
     });
   });
+  // Separator + Image models
+  if (_imageModels.length > 0) {
+    html += '<div style="margin:4px 14px;border-top:1px solid var(--border)"></div>';
+    _imageModels.forEach(function(prov) {
+      html += '<div class="prov-group" style="padding:6px 14px 2px;font-size:10px;font-weight:600;color:#f59e0b;text-transform:uppercase;letter-spacing:0.5px">' + prov.name + ' · 图像生成</div>';
+      (prov.models || []).forEach(function(m) {
+        const imgSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+        html += '<div class="item" onclick="event.stopPropagation();document.getElementById(\'input\').value=\'帮我生成一张图片：\';document.getElementById(\'input\').focus();document.getElementById(\'modelDropdown\').classList.remove(\'show\')">' +
+          '<span style="width:14px;flex-shrink:0">' + imgSvg + '</span>' +
+          '<span>' + m.name + '</span>' +
+          '<span class="desc">' + m.desc + '</span>' +
+          '</div>';
+      });
+    });
+  }
+
+  // Separator + Video models
+  if (_videoModels.length > 0) {
+    html += '<div style="margin:4px 14px;border-top:1px solid var(--border)"></div>';
+    _videoModels.forEach(function(prov) {
+      html += '<div class="prov-group" style="padding:6px 14px 2px;font-size:10px;font-weight:600;color:#ef4444;text-transform:uppercase;letter-spacing:0.5px">' + prov.name + ' · 视频生成</div>';
+      (prov.models || []).forEach(function(m) {
+        const vidSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+        html += '<div class="item" onclick="event.stopPropagation();document.getElementById(\'input\').value=\'帮我生成一个视频：\';document.getElementById(\'input\').focus();document.getElementById(\'modelDropdown\').classList.remove(\'show\')">' +
+          '<span style="width:14px;flex-shrink:0">' + vidSvg + '</span>' +
+          '<span>' + m.name + '</span>' +
+          '<span class="desc">' + m.desc + '</span>' +
+          '</div>';
+      });
+    });
+  }
+
   dropdown.innerHTML = html;
 }
 
@@ -1256,11 +1293,18 @@ function send() {
   es.addEventListener('classify', (e) => {
     document.getElementById('rpanel').classList.add('open');
     const data = JSON.parse(e.data);
-    let title = data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name :
+    let title = data.intent === 'simple' ? '\u76f4\u63a5\u56de\u7b54' :
+                data.intent === 'delegate' ? '\u591a Agent \u534f\u540c' :
+                data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name :
                 data.intent === 'react' ? '\u5bf9\u8bdd\u5206\u6790' :
                 data.intent === 'plan_execute' ? '\u8ba1\u5212\u6267\u884c' : data.intent;
     setRPTodo(title);
-    setRPRef('skill', data.skill_name || data.intent);
+    setRPRef('skill', data.intent === 'delegate' ? '\u591a Agent \u534f\u540c' : (data.skill_name || data.intent));
+    // Show delegation plan if present
+    if (data.delegation_plan && data.delegation_plan.length > 0) {
+      const steps = data.delegation_plan.map(p => p.agent_id + ': ' + p.task).join(' | ');
+      setRPRef('plan', steps);
+    }
     rpTools = [];
   });
 
@@ -1300,6 +1344,19 @@ function send() {
     content._accumulated += raw;
     content.innerHTML = renderMarkdown(content._accumulated);
     chat.scrollTop = chat.scrollHeight;
+  });
+
+  es.addEventListener('agent_result', (e) => {
+    setStatus(statusBar, '\u6267\u884c\u4e2d...');
+    const data = JSON.parse(e.data);
+    const aid = data.agent_id || '';
+    const task = data.task || '';
+    if (aid) {
+      setRPRef('agent', aid + ': ' + task);
+    }
+    if (data.error) {
+      addRPArtifact(aid + '-error', data.error);
+    }
   });
 
   es.addEventListener('error', (e) => {

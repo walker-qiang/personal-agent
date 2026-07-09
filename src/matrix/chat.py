@@ -1,4 +1,4 @@
-"""Chat orchestration: LangGraph-based classify → react/plan/skill → summarize → reflection."""
+"""Chat orchestration: Commander + Domain Agents multi-agent flow."""
 
 from __future__ import annotations
 
@@ -11,27 +11,17 @@ from typing import Any, Iterator, Protocol
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .config import AgentConfig, KNOWN_MODELS, default_model
+from .agent import AgentRegistry
+from .agent.commander import COMMANDER
+from .agent.domain_agents import INVESTMENT_ANALYST
+from .config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from .llm import LLMClient, LLMError, build_llm_client
 from .llm.http import set_rate_limiter
 from .orchestration import build_graph
 from .orchestration.state import AgentState
 from .rate_limiter import TokenBucketRateLimiter
-from .role import GENERAL_ASSISTANT, RoleDefinition
-from .skills import SkillDefinition, load_skills
 from .store import SessionStore
 from .tools import FinanceToolError, ToolRegistry
-
-# Default skills directory relative to the project root
-_DEFAULT_SKILLS_DIR = Path("skills/investment")
-
-SUMMARIZE_SYSTEM = """You are an investment analyst. Answer the user's question using only the provided data.
-Rules:
-- Use only the provided data, never fabricate
-- Money is CNY unless stated otherwise, format large numbers with commas
-- Keep answers concise and well-structured
-- Reply in the same language as the user
-- Use Markdown formatting: **bold** for key figures, tables for comparisons, bullet lists for breakdowns"""
 
 
 class TraceSink(Protocol):
@@ -48,9 +38,7 @@ class ChatService:
         tools: ToolRegistry,
         trace: TraceSink | None = None,
         llm: LLMClient | None = None,
-        role: RoleDefinition | None = None,
-        skills: list[SkillDefinition] | None = None,
-        skills_dir: str | Path | None = None,
+        agent_registry: AgentRegistry | None = None,
     ):
         self.config = config
         self.tools = tools
@@ -87,9 +75,8 @@ class ChatService:
                 timeout_sec=config.agent_model_timeout_sec,
                 max_message_chars=config.max_message_chars,
             )
-        self.role = role or GENERAL_ASSISTANT
-        self.skills_dir = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
-        self.skills = skills if skills is not None else _load_default_skills(self.skills_dir)
+        # Initialize AgentRegistry
+        self.agent_registry = agent_registry or _build_default_registry(config)
         self.store = SessionStore(config.store_path)
         self.store.backfill_titles()
 
@@ -133,6 +120,22 @@ class ChatService:
         if self.config.agnes_api_key:
             providers.append({"id": "agnes", "name": "Agnes AI", "models": KNOWN_MODELS.get("agnes", [])})
         return providers
+
+    @property
+    def available_image_models(self) -> list[dict[str, Any]]:
+        """List available image generation models."""
+        models = []
+        if self.config.agnes_api_key:
+            models.append({"provider": "agnes", "name": "Agnes AI", "models": IMAGE_MODELS.get("agnes", [])})
+        return models
+
+    @property
+    def available_video_models(self) -> list[dict[str, Any]]:
+        """List available video generation models."""
+        models = []
+        if self.config.agnes_api_key:
+            models.append({"provider": "agnes", "name": "Agnes AI", "models": VIDEO_MODELS.get("agnes", [])})
+        return models
 
     def get_provider(self, session_id: str | None = None) -> dict[str, str]:
         """Get the LLM provider and model for a session, falling back to default."""
@@ -215,12 +218,12 @@ class ChatService:
             "user_message": text,
             "session_id": sid,
             "intent": "",
-            "skill_name": "",
+            "delegation_plan": [],
+            "current_step": 0,
+            "agent_results": [],
             "tool_results": [],
             "tool_call_count": 0,
-            "current_plan": [],
             "react_iteration": 0,
-            "findings": [],
             "final_answer": "",
             "needs_summary": False,
             "error": "",
@@ -228,6 +231,7 @@ class ChatService:
 
         try:
             emitted_tool_count = 0
+            emitted_agent_count = 0
             last_answer = ""
             emitted_classify = False
             final_state: dict[str, Any] = {}
@@ -239,10 +243,8 @@ class ChatService:
                     "configurable": {
                         "llm": session_llm,
                         "pipeline_llm": self._pipeline_llm,
-                        "tools": self.tools,
-                        "role": self.role,
-                        "skills": self.skills,
-                        "skills_dir": self.skills_dir,
+                        "agent_registry": self.agent_registry,
+                        "full_tools": self.tools,
                         "trace": self.trace,
                     },
                     "thread_id": sid,
@@ -252,16 +254,30 @@ class ChatService:
                     continue
                 final_state = event
 
-                # Emit classify result for right-panel display (once)
+                # Emit classify result (once)
                 intent = event.get("intent", "")
-                skill_name = event.get("skill_name", "")
                 if intent and not emitted_classify:
                     emitted_classify = True
+                    delegation_plan = event.get("delegation_plan", [])
                     yield {
                         "type": "classify",
                         "intent": intent,
-                        "skill_name": skill_name,
+                        "delegation_plan": delegation_plan,
                     }
+
+                # Emit agent delegation events
+                agent_results = event.get("agent_results", [])
+                if len(agent_results) > emitted_agent_count:
+                    for i in range(emitted_agent_count, len(agent_results)):
+                        ar = agent_results[i]
+                        yield {
+                            "type": "agent_result",
+                            "agent_id": ar.get("agent_id", ""),
+                            "task": ar.get("task", ""),
+                            "result": ar.get("result", "")[:500],
+                            "error": ar.get("error", ""),
+                        }
+                    emitted_agent_count = len(agent_results)
 
                 # Yield only NEW tool calls (skip duplicates)
                 tool_results = event.get("tool_results", [])
@@ -312,7 +328,7 @@ class ChatService:
             else:
                 # Non-streaming path: save the reflection-modified answer
                 final_answer = final_state.get("final_answer", "")
-                if final_answer and not final_answer.startswith("技能「"):
+                if final_answer and not final_answer.startswith("所有领域专家"):
                     self._remember(sid, text, final_answer)
 
         except Exception as err:
@@ -360,10 +376,9 @@ class ChatService:
         except Exception:
             pass  # Pruning is best-effort; never fail the chat for it
 
-    def reload_skills(self) -> list[SkillDefinition]:
+    def reload_skills(self) -> None:
         """Reload skills from disk (after CRUD)."""
-        self.skills = _load_default_skills(self.skills_dir)
-        return self.skills
+        self.agent_registry.reload_skills()
 
     def _get_history(self, session_id: str) -> list[dict[str, str]]:
         return self.store.get_history(session_id, self.config.memory_max_turns)
@@ -380,7 +395,13 @@ class ChatService:
         user_msg = state.get("user_message", original_text)
         tool_results = state.get("tool_results", [])
 
-        system_prompt = self.role.to_system_prompt() + "\n" + SUMMARIZE_SYSTEM
+        system_prompt = """You are a helpful AI assistant. Answer the user's question using only the provided data.
+Rules:
+- Use only the provided data, never fabricate
+- Money is CNY unless stated otherwise, format large numbers with commas
+- Keep answers concise and well-structured
+- Reply in the same language as the user
+- Use Markdown formatting: **bold** for key figures, tables for comparisons, bullet lists for breakdowns"""
 
         user_message = f"""User question: {user_msg}
 
@@ -409,11 +430,14 @@ Please answer the user's question using only the provided data."""
 
 # ---- Module-level helpers ----
 
-def _load_default_skills(skills_dir: str | Path | None) -> list[SkillDefinition]:
-    path = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
-    if not path.exists():
-        return []
-    return load_skills(path)
+def _build_default_registry(config: AgentConfig) -> AgentRegistry:
+    """Build the default AgentRegistry with commander and domain agents."""
+    registry = AgentRegistry(skills_base_dir=config.skills_base_dir)
+    registry.register_all([
+        COMMANDER,
+        INVESTMENT_ANALYST,
+    ])
+    return registry
 
 
 def preview_json(value: Any, limit: int = 1200) -> str:

@@ -1,36 +1,36 @@
-"""LangGraph orchestration builder."""
+"""Multi-agent LangGraph orchestration builder.
+
+Commander + Domain Agents architecture:
+  classify → commander_plan → delegate → aggregate → reflection
+"""
 
 from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
+    aggregate_node,
     classify_node,
-    execute_node,
-    plan_node,
-    react_node,
+    commander_plan_node,
+    delegate_node,
     reflection_node,
-    skill_node,
-    summarize_node,
 )
 from .state import AgentState
 
 
 def build_graph() -> StateGraph:
-    """Build the LangGraph state graph for Agent orchestration.
+    """Build the multi-agent LangGraph state graph.
 
     Flow:
-    __start__ → classify → skill / react / plan → summarize → reflection → __end__
+    __start__ → classify → commander_plan → delegate → aggregate → reflection → __end__
     """
     graph = StateGraph(AgentState)
 
     # Add nodes
     graph.add_node("classify", classify_node)
-    graph.add_node("skill", skill_node)
-    graph.add_node("react", react_node)
-    graph.add_node("plan", plan_node)
-    graph.add_node("execute", execute_node)
-    graph.add_node("summarize", summarize_node)
+    graph.add_node("commander_plan", commander_plan_node)
+    graph.add_node("delegate", delegate_node)
+    graph.add_node("aggregate", aggregate_node)
     graph.add_node("reflection", reflection_node)
 
     # Start → classify
@@ -39,77 +39,53 @@ def build_graph() -> StateGraph:
     # classify → route based on intent
     graph.add_conditional_edges(
         "classify",
-        _route_by_intent,
+        _route_after_classify,
         {
-            "skill": "skill",
-            "react": "react",
-            "plan_execute": "plan",
-            "summarize": "summarize",
+            "simple": "commander_plan",  # commander handles simple questions with tools
+            "delegate": "commander_plan",
+            "error": "reflection",
         },
     )
 
-    # skill → summarize
-    graph.add_edge("skill", "summarize")
+    # commander_plan → delegate (always)
+    graph.add_edge("commander_plan", "delegate")
 
-    # react → conditional: keep reacting or summarize
+    # delegate → conditional: next step or aggregate
     graph.add_conditional_edges(
-        "react",
-        _route_after_react,
+        "delegate",
+        _route_after_delegate,
         {
-            "react": "react",
-            "summarize": "summarize",
+            "delegate": "delegate",
+            "aggregate": "aggregate",
+            "error": "aggregate",
         },
     )
 
-    # plan → execute
-    graph.add_edge("plan", "execute")
-
-    # execute → conditional: next step or summarize
-    graph.add_conditional_edges(
-        "execute",
-        _route_after_execute,
-        {
-            "execute": "execute",
-            "summarize": "summarize",
-        },
-    )
-
-    # summarize → reflection → end
-    graph.add_edge("summarize", "reflection")
+    # aggregate → reflection → end
+    graph.add_edge("aggregate", "reflection")
     graph.add_edge("reflection", END)
 
     return graph
 
 
-def _route_by_intent(state: AgentState) -> str:
-    """Route based on classified intent."""
+def _route_after_classify(state: AgentState) -> str:
+    """Route after classification."""
     if state.get("error"):
-        return "summarize"
-    intent = state.get("intent", "react")
-    if intent == "skill":
-        return "skill"
-    if intent == "plan_execute":
-        return "plan_execute"
-    return "react"
+        return "error"
+    intent = state.get("intent", "delegate")
+    if intent == "simple":
+        return "simple"
+    return "delegate"
 
 
-def _route_after_react(state: AgentState) -> str:
-    """After react step: continue or summarize."""
+def _route_after_delegate(state: AgentState) -> str:
+    """Route after delegate step: next step or aggregate."""
     if state.get("error"):
-        return "summarize"
-    if state.get("final_answer") or state.get("needs_summary"):
-        return "summarize"
-    return "react"
+        return "error"
 
+    plan = state.get("delegation_plan", [])
+    current_step = state.get("current_step", 0)
 
-def _route_after_execute(state: AgentState) -> str:
-    """After execute step: next step or summarize."""
-    if state.get("error"):
-        return "summarize"
-    if state.get("final_answer") or state.get("needs_summary"):
-        return "summarize"
-    plan = state.get("current_plan", [])
-    count = state.get("tool_call_count", 0)
-    if count >= len(plan):
-        return "summarize"
-    return "execute"
+    if current_step >= len(plan):
+        return "aggregate"
+    return "delegate"

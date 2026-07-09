@@ -16,7 +16,8 @@ class AgentDefinition:
     Key differences from RoleDefinition:
     - domain: "commander" | "investment" | "general" | custom
     - tools: patterns like "finance.*" or "web_search" (runtime filtering)
-    - skills: skill names, can be general or domain-specific
+    - general_skills: skill names from common/ directory, available to all agents
+    - domain_skills: skill names from domain-specific directory, bound to this agent
     """
 
     id: str
@@ -26,9 +27,18 @@ class AgentDefinition:
     persona: str  # system prompt prefix
     expertise: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)  # tool name patterns
-    skills: list[str] = field(default_factory=list)  # skill names
+    general_skills: list[str] = field(default_factory=list)  # from skills/common/
+    domain_skills: list[str] = field(default_factory=list)  # from skills/{domain}/
     output_constraints: list[str] = field(default_factory=list)
     safety_rules: list[str] = field(default_factory=list)
+    # LLM override: if set, domain agent uses its own LLM config instead of commander's
+    llm_provider: str = ""  # deepseek | anthropic | agnes
+    llm_model: str = ""  # specific model override
+
+    @property
+    def all_skills(self) -> list[str]:
+        """All skill names available to this agent (general + domain)."""
+        return self.general_skills + self.domain_skills
 
     def to_system_prompt(self) -> str:
         """Generate a system prompt from the agent definition."""
@@ -63,5 +73,5 @@ class AgentDefinition:
         return False
 
     def matches_skill(self, skill_name: str) -> bool:
-        """Check if this agent can use a given skill."""
-        return skill_name in self.skills
+        """Check if this agent can use a given skill (general or domain)."""
+        return skill_name in self.all_skills

@@ -1,4 +1,4 @@
-"""Agent state for LangGraph orchestration."""
+"""Agent state for multi-agent LangGraph orchestration."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ from langgraph.graph import add_messages
 
 
 class AgentState(TypedDict):
-    """State flowing through the LangGraph orchestration graph."""
+    """State flowing through the multi-agent LangGraph orchestration graph.
+
+    Flow: classify → commander_plan → delegate → aggregate → reflection
+    """
 
     # Core conversation fields
     messages: Annotated[list, add_messages]
@@ -16,25 +19,25 @@ class AgentState(TypedDict):
     session_id: str
 
     # Classification
-    intent: str  # "skill" | "react" | "plan_execute"
-    skill_name: str  # matched skill name, if intent=skill
+    intent: str  # "simple" (direct answer) or "delegate" (multi-agent)
 
-    # Tool execution
+    # Commander planning
+    delegation_plan: list[dict[str, Any]]  # [{step, agent_id, task, skill_name, purpose}]
+    current_step: int  # index into delegation_plan
+
+    # Agent execution results
+    agent_results: list[dict[str, Any]]  # [{agent_id, task, result, findings, errors}]
+
+    # Tool results (accumulated from all domain agents)
     tool_results: list[dict[str, Any]]
     tool_call_count: int
 
-    # Plan-Execute
-    current_plan: list[dict[str, Any]]
-
-    # ReAct
+    # ReAct (for domain agent execution)
     react_iteration: int
 
-    # Findings / output
-    findings: list[str]
+    # Output
     final_answer: str
-
-    # Streaming summarization
-    needs_summary: bool
+    needs_summary: bool  # signal that chat.py should stream the final answer
 
     # Error
     error: str

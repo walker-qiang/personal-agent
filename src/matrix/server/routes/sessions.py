@@ -51,32 +51,59 @@ async def get_messages(request: Request, session_id: str):
     return {"messages": messages}
 
 
-@router.get("/skills")
-async def list_skills(request: Request):
-    """List available skills."""
+# ---- Skills CRUD (adapts to multi-agent skills structure) ----
+
+def _get_skills_dir(request: Request, domain: str = "investment") -> Path:
+    """Get the skills directory for a domain."""
+    from pathlib import Path
+    from ...chat import ChatService
+    chat: ChatService = request.app.state.chat
+    return chat.config.skills_base_dir / domain
+
+
+def _list_all_skills(request: Request):
+    """List all skills using the agent registry."""
     from ...chat import ChatService
     from ...skills import render_workflow
+    from ...agent import AgentRegistry
 
     chat: ChatService = request.app.state.chat
-    skills = [
-        {
-            "name": s.name,
-            "title": s.title,
-            "description": s.description,
-            "workflow": s.workflow,
-            "workflow_text": render_workflow(s.workflow),
-            "output_format": s.output_format,
-            "knowledge_files": s.knowledge_files,
-            "script_files": s.script_files,
-        }
-        for s in chat.skills
-    ]
-    return {"skills": skills}
+    registry: AgentRegistry = chat.agent_registry
+    registry.reload_skills()
+
+    all_skills = []
+    seen = set()
+    for skill in registry.list_all_skills():
+        if skill.name not in seen:
+            seen.add(skill.name)
+            # Find which agents use this skill
+            agents = []
+            for agent_def in registry.list_all():
+                if skill.name in agent_def.all_skills:
+                    agents.append({"id": agent_def.id, "name": agent_def.name})
+            all_skills.append({
+                "name": skill.name,
+                "title": skill.title,
+                "description": skill.description,
+                "agents": agents,
+                "workflow": skill.workflow,
+                "workflow_text": render_workflow(skill.workflow),
+                "output_format": skill.output_format,
+                "knowledge_files": skill.knowledge_files,
+                "script_files": skill.script_files,
+            })
+    return all_skills
+
+
+@router.get("/skills")
+async def list_skills(request: Request):
+    """List all available skills across all domains."""
+    return {"skills": _list_all_skills(request)}
 
 
 @router.post("/skills")
 async def create_skill(request: Request):
-    """Create a new skill directory with SKILL.md."""
+    """Create a new skill directory with SKILL.md. Defaults to investment domain."""
     from ...chat import ChatService
     from ...skills import SkillDefinition, create_skill_dir
 
@@ -85,6 +112,7 @@ async def create_skill(request: Request):
     name = str(payload.get("name", "")).strip()
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
+    domain = str(payload.get("domain", "investment")).strip() or "investment"
 
     if not name or not title:
         return {"error": "name and title are required"}, 400
@@ -93,7 +121,8 @@ async def create_skill(request: Request):
     if not safe_name:
         return {"error": "invalid name"}, 400
 
-    skill_dir = chat.skills_dir / safe_name
+    skills_dir = _get_skills_dir(request, domain)
+    skill_dir = skills_dir / safe_name
     if skill_dir.exists():
         return {"error": "skill already exists"}, 409
 
@@ -103,14 +132,14 @@ async def create_skill(request: Request):
         description=description,
         output_format=str(payload.get("output_format", "")).strip(),
     )
-    create_skill_dir(chat.skills_dir, skill)
-    chat.reload_skills()
-    return {"ok": True, "name": safe_name}
+    create_skill_dir(skills_dir, skill)
+    chat.agent_registry.reload_skills()
+    return {"ok": True, "name": safe_name, "domain": domain}
 
 
 @router.put("/skills/{skill_name}")
 async def update_skill(request: Request, skill_name: str):
-    """Update a skill's SKILL.md."""
+    """Update a skill's SKILL.md. Defaults to investment domain."""
     from ...chat import ChatService
     from ...skills import SkillDefinition, update_skill_dir
 
@@ -118,8 +147,10 @@ async def update_skill(request: Request, skill_name: str):
     payload = await request.json()
     title = str(payload.get("title", "")).strip()
     description = str(payload.get("description", "")).strip()
+    domain = str(payload.get("domain", "investment")).strip() or "investment"
 
-    if not (chat.skills_dir / skill_name).is_dir():
+    skills_dir = _get_skills_dir(request, domain)
+    if not (skills_dir / skill_name).is_dir():
         return {"error": "skill not found"}, 404
 
     skill = SkillDefinition(
@@ -128,113 +159,136 @@ async def update_skill(request: Request, skill_name: str):
         description=description,
         output_format=str(payload.get("output_format", "")).strip(),
     )
-    update_skill_dir(chat.skills_dir, skill_name, skill)
-    chat.reload_skills()
+    update_skill_dir(skills_dir, skill_name, skill)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
 
 
 @router.delete("/skills/{skill_name}")
 async def delete_skill(request: Request, skill_name: str):
-    """Delete a skill directory entirely."""
+    """Delete a skill directory entirely. Defaults to investment domain."""
     from ...chat import ChatService
     from ...skills import delete_skill_dir
 
     chat: ChatService = request.app.state.chat
-    if not (chat.skills_dir / skill_name).is_dir():
+    domain = str(request.query_params.get("domain", "investment")).strip() or "investment"
+    skills_dir = _get_skills_dir(request, domain)
+    if not (skills_dir / skill_name).is_dir():
         return {"error": "skill not found"}, 404
-    delete_skill_dir(chat.skills_dir, skill_name)
-    chat.reload_skills()
+    delete_skill_dir(skills_dir, skill_name)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
 
 
 # ---- Knowledge & Script file management ----
 
+def _find_skill_dir(request: Request, skill_name: str) -> Path | None:
+    """Find the skill directory across all domains."""
+    from ...chat import ChatService
+    chat: ChatService = request.app.state.chat
+    base = chat.config.skills_base_dir
+    for domain_dir in base.iterdir():
+        if not domain_dir.is_dir():
+            continue
+        skill_dir = domain_dir / skill_name
+        if skill_dir.is_dir():
+            return skill_dir
+    return None
+
+
 @router.get("/skills/{skill_name}/knowledge")
 async def list_knowledge(request: Request, skill_name: str):
     """List knowledge files for a skill."""
-    from ...chat import ChatService
+    from ...skills import SkillDefinition
 
-    chat: ChatService = request.app.state.chat
-    skill = next((s for s in chat.skills if s.name == skill_name), None)
-    if not skill:
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
         return {"error": "skill not found"}, 404
-    knowledge = skill.read_knowledge(chat.skills_dir / skill_name)
+    knowledge = SkillDefinition.read_knowledge_static(skill_dir)
     return {"knowledge": knowledge}
 
 
 @router.put("/skills/{skill_name}/knowledge/{filename:path}")
 async def write_knowledge(request: Request, skill_name: str, filename: str):
     """Write a knowledge file."""
-    from ...chat import ChatService
     from ...skills import write_knowledge
 
-    chat: ChatService = request.app.state.chat
+    chat = request.app.state.chat
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
+        return {"error": "skill not found"}, 404
+
     payload = await request.json()
     content = str(payload.get("content", ""))
-    write_knowledge(chat.skills_dir, skill_name, filename, content)
-    chat.reload_skills()
+    write_knowledge(skill_dir.parent, skill_name, filename, content)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
 
 
 @router.get("/skills/{skill_name}/knowledge/{filename:path}")
 async def get_knowledge_file(request: Request, skill_name: str, filename: str):
     """Read a single knowledge file."""
-    from ...chat import ChatService
+    from ...skills import SkillDefinition
 
-    chat: ChatService = request.app.state.chat
-    skill = next((s for s in chat.skills if s.name == skill_name), None)
-    if not skill:
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
         return {"error": "skill not found"}, 404
-    content = skill.read_knowledge_file(chat.skills_dir / skill_name, filename)
+    content = SkillDefinition.read_knowledge_file_static(skill_dir, filename)
     return {"filename": filename, "content": content}
 
 
 @router.delete("/skills/{skill_name}/knowledge/{filename:path}")
 async def remove_knowledge(request: Request, skill_name: str, filename: str):
     """Delete a knowledge file."""
-    from ...chat import ChatService
     from ...skills import delete_knowledge
 
-    chat: ChatService = request.app.state.chat
-    delete_knowledge(chat.skills_dir, skill_name, filename)
-    chat.reload_skills()
+    chat = request.app.state.chat
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
+        return {"error": "skill not found"}, 404
+    delete_knowledge(skill_dir.parent, skill_name, filename)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
 
 
 @router.get("/skills/{skill_name}/scripts/{filename:path}")
 async def get_script_file(request: Request, skill_name: str, filename: str):
     """Read a single script file."""
-    from ...chat import ChatService
+    from ...skills import SkillDefinition
 
-    chat: ChatService = request.app.state.chat
-    skill = next((s for s in chat.skills if s.name == skill_name), None)
-    if not skill:
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
         return {"error": "skill not found"}, 404
-    content = skill.read_script(chat.skills_dir / skill_name, filename)
+    content = SkillDefinition.read_script_static(skill_dir, filename)
     return {"filename": filename, "content": content}
 
 
 @router.put("/skills/{skill_name}/scripts/{filename:path}")
 async def write_script(request: Request, skill_name: str, filename: str):
     """Write a script file."""
-    from ...chat import ChatService
     from ...skills import write_script
 
-    chat: ChatService = request.app.state.chat
+    chat = request.app.state.chat
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
+        return {"error": "skill not found"}, 404
+
     payload = await request.json()
     content = str(payload.get("content", ""))
-    write_script(chat.skills_dir, skill_name, filename, content)
-    chat.reload_skills()
+    write_script(skill_dir.parent, skill_name, filename, content)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
 
 
 @router.delete("/skills/{skill_name}/scripts/{filename:path}")
 async def remove_script(request: Request, skill_name: str, filename: str):
     """Delete a script file."""
-    from ...chat import ChatService
     from ...skills import delete_script
 
-    chat: ChatService = request.app.state.chat
-    delete_script(chat.skills_dir, skill_name, filename)
-    chat.reload_skills()
+    chat = request.app.state.chat
+    skill_dir = _find_skill_dir(request, skill_name)
+    if not skill_dir:
+        return {"error": "skill not found"}, 404
+    delete_script(skill_dir.parent, skill_name, filename)
+    chat.agent_registry.reload_skills()
     return {"ok": True}
