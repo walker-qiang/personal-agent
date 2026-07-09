@@ -17,7 +17,7 @@ from .llm.http import set_rate_limiter
 from .orchestration import build_graph
 from .orchestration.state import AgentState
 from .rate_limiter import TokenBucketRateLimiter
-from .role import INVESTMENT_ANALYST, RoleDefinition
+from .role import GENERAL_ASSISTANT, RoleDefinition
 from .skills import SkillDefinition, load_skills
 from .store import SessionStore
 from .tools import FinanceToolError, ToolRegistry
@@ -87,7 +87,7 @@ class ChatService:
                 timeout_sec=config.agent_model_timeout_sec,
                 max_message_chars=config.max_message_chars,
             )
-        self.role = role or INVESTMENT_ANALYST
+        self.role = role or GENERAL_ASSISTANT
         self.skills_dir = Path(skills_dir) if skills_dir else _DEFAULT_SKILLS_DIR
         self.skills = skills if skills is not None else _load_default_skills(self.skills_dir)
         self.store = SessionStore(config.store_path)
@@ -228,6 +228,7 @@ class ChatService:
 
         try:
             emitted_tool_count = 0
+            last_answer = ""
             emitted_classify = False
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
@@ -294,7 +295,8 @@ class ChatService:
                 # reflection_node may modify it after summarization
                 answer = event.get("final_answer", "")
                 needs_summary = event.get("needs_summary", False)
-                if answer and not needs_summary:
+                if answer and not needs_summary and answer != last_answer:
+                    last_answer = answer
                     yield {"type": "token", "content": answer}
 
             # Streaming summarization

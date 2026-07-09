@@ -16,6 +16,7 @@ from ..config import AgentConfig, load_config
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
+from ..tools.web import register_all as register_web_tools
 from .routes import chat, health, provider, sessions, tools
 
 logger = logging.getLogger("matrix")
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config: AgentConfig = app.state.config
     tools_registry = ToolRegistry()
     register_finance_tools(tools_registry, config.cache_path)
+    register_web_tools(tools_registry)
     trace = TraceLogger(config.trace_path)
     app.state.tools = tools_registry
     app.state.trace = trace

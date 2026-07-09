@@ -21,7 +21,7 @@ Return only a JSON object with one of these intents:
 - {{"intent": "skill", "skill_name": "anomaly-diagnosis"}} — ONLY when the user explicitly asks for anomaly diagnosis, change detection, or root cause analysis of portfolio changes
 - {{"intent": "skill", "skill_name": "portfolio-review"}} — ONLY when the user asks for a portfolio review, performance summary, or monthly/quarterly recap
 - {{"intent": "skill", "skill_name": "allocation-check"}} — ONLY when the user asks about allocation deviation, rebalancing, or target vs actual comparison
-- {{"intent": "react"}} — for simple questions that can be answered with one or two tool calls (e.g., holdings count, balance check, asset lookup)
+- {{"intent": "react"}} — for simple questions that can be answered with one or two tool calls
 - {{"intent": "plan_execute"}} — for complex multi-step analysis that requires planning multiple tool calls
 
 Available skills:
@@ -30,13 +30,13 @@ Available skills:
 IMPORTANT: Only use "skill" intent when the user's request CLEARLY matches a skill's purpose. Default to "react" for simple questions and "plan_execute" for complex analysis.
 """
 
-REACT_SYSTEM = """You are an investment analyst agent. Use the available tools to answer the user's question.
+REACT_SYSTEM = """You are a helpful AI assistant. Use the available tools to answer the user's question.
 
 When you have enough information to answer, respond directly in the same language as the user.
-Use Markdown formatting: **bold** for key figures, `code` for asset codes, tables for data, bullet lists for breakdowns.
+Use Markdown formatting: **bold** for key figures, `code` for code, tables for data, bullet lists for breakdowns.
 Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so."""
 
-PLAN_SYSTEM = """You are an investment analyst agent operating in Plan-Execute mode.
+PLAN_SYSTEM = """You are a helpful AI assistant operating in Plan-Execute mode.
 
 Available tools: {tools}
 
@@ -55,12 +55,23 @@ Check:
 1. Does the answer directly address the question?
 2. Are all claims supported by the data (no fabrication)?
 3. Is the answer complete (no missing key info)?
+4. Is the answer concise and free of hallucination?
 
 Return ONLY a JSON object:
 {{"ok": true}} — if the answer is good
 {{"ok": false, "issues": ["issue 1", "issue 2"]}} — if there are problems
 
 Do NOT rewrite the answer. Just evaluate."""
+
+REVISE_PROMPT = """You are a helpful AI assistant. Your previous answer had the following issues:
+
+{issues}
+
+Original question: {question}
+Original answer: {answer}
+
+Please rewrite the answer to fix these issues. Keep the same language and formatting style.
+Return ONLY the corrected answer, no explanations."""
 
 # ---- Limits ----
 
@@ -171,10 +182,10 @@ def classify_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
             "intent": data.get("intent", "react"),
             "skill_name": data.get("skill_name", ""),
         }
-    except LLMError:
-        return {"intent": "react", "skill_name": "", "error": "LLM classification failed"}
-    except Exception:
-        return {"intent": "react", "skill_name": "", "error": "Classification error"}
+    except (LLMError, Exception):
+        # Classification failed — silently fall back to react mode.
+        # Do NOT set error here; that would skip react and go straight to summarize.
+        return {"intent": "react", "skill_name": ""}
 
 
 def react_node(
@@ -642,7 +653,10 @@ def skill_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
 
 
 def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Lightweight self-check: verify the answer addresses the question."""
+    """Internal quality check: verify → revise if needed → output clean answer.
+
+    The user never sees the QA process — only the final, verified answer.
+    """
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])
 
@@ -652,25 +666,36 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
     if not answer or not user_msg:
         return {}
 
-    # Skip reflection for very short answers (< ~5 Chinese chars)
+    # Skip reflection for very short answers
     if len(answer) < 15:
         return {}
 
+    # Step 1: Evaluate
     try:
         response = llm.complete(
             REFLECTION_PROMPT.format(question=user_msg, answer=answer),
             [{"role": "user", "content": "Evaluate the answer."}],
         )
         data = _extract_json(response)
-        if isinstance(data, dict) and data.get("ok") is False:
-            issues = data.get("issues", [])
-            if issues:
-                corrected = (
-                    answer
-                    + "\n\n---\n> ⚠️ 自检发现问题："
-                    + "；".join(issues)
-                )
-                return {"final_answer": corrected}
+        if not isinstance(data, dict) or data.get("ok") is not False:
+            return {}  # passes, no change needed
+
+        issues = data.get("issues", [])
+        if not issues:
+            return {}
+
+        # Step 2: Revise — fix the issues internally
+        revise_response = llm.complete(
+            REVISE_PROMPT.format(
+                question=user_msg,
+                answer=answer,
+                issues="\n".join(f"- {i}" for i in issues),
+            ),
+            [{"role": "user", "content": "Rewrite the answer."}],
+        )
+        revised = revise_response.strip()
+        if revised and len(revised) > 10:
+            return {"final_answer": revised}
     except (LLMError, json.JSONDecodeError, ValueError):
         pass
 

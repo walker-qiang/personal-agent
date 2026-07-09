@@ -1,0 +1,120 @@
+"""web_fetch tool — fetch and extract text from a web page."""
+
+from __future__ import annotations
+
+import gzip
+import io
+import re
+import urllib.request
+import zlib
+from typing import Any
+
+from ..base import ToolDefinition
+
+tool_definition = ToolDefinition(
+    name="web_fetch",
+    description="获取指定网页的文本内容。用于阅读文章、获取详细信息、或验证搜索结果的准确性。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "要获取的网页 URL",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "最大返回字符数，默认 5000，最大 20000",
+                "default": 5000,
+            },
+        },
+        "required": ["url"],
+    },
+    handler=None,  # replaced at registration time
+)
+
+_SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
+_STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
+_HEAD_RE = re.compile(r"<head[^>]*>.*?</head>", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_ENTITY_RE = re.compile(r"&[a-z]+;")
+_SPACE_RE = re.compile(r"\s+")
+_META_RE = re.compile(r'<meta[^>]*name="description"[^>]*content="([^"]*)"', re.IGNORECASE)
+
+
+def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
+    """Fetch a web page and extract its text content."""
+    max_chars = min(max(max_chars, 500), 20000)
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                return {"error": f"不支持的内容类型: {content_type}", "text": ""}
+            raw = resp.read()
+
+            # Handle gzip/deflate compression
+            content_encoding = resp.headers.get("Content-Encoding", "").lower()
+            if content_encoding == "gzip":
+                raw = gzip.decompress(raw)
+            elif content_encoding == "deflate":
+                try:
+                    raw = zlib.decompress(raw)
+                except zlib.error:
+                    raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+
+            # Try UTF-8 first, fallback to other encodings
+            html = ""
+            for enc in ["utf-8", "gbk", "gb2312", "latin-1"]:
+                try:
+                    html = raw.decode(enc)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            if not html:
+                html = raw.decode("utf-8", errors="replace")
+    except Exception as err:
+        return {"error": f"获取网页失败: {err}", "text": ""}
+
+    text = _extract_text(html)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n... (内容已截断)"
+
+    return {
+        "url": url,
+        "text": text,
+        "length": len(text),
+    }
+
+
+def _extract_text(html: str) -> str:
+    """Extract readable text from HTML."""
+    # Try to get meta description
+    meta_desc = _META_RE.search(html)
+    meta = f"[页面描述] {meta_desc.group(1)}\n\n" if meta_desc else ""
+
+    # Remove scripts, styles, head
+    html = _SCRIPT_RE.sub("", html)
+    html = _STYLE_RE.sub("", html)
+    html = _HEAD_RE.sub("", html)
+
+    # Remove remaining tags
+    text = _TAG_RE.sub(" ", html)
+    text = _ENTITY_RE.sub(" ", text)
+    text = _SPACE_RE.sub(" ", text)
+
+    # Clean up
+    lines = [line.strip() for line in text.split("\n")]
+    lines = [line for line in lines if line]
+    text = "\n".join(lines)
+
+    return meta + text
