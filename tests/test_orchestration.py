@@ -1,7 +1,7 @@
 """Tests for multi-agent LangGraph orchestration.
 
 Commander + Domain Agents architecture:
-  classify → commander_plan → delegate → aggregate → reflection
+  commander_plan → delegate → aggregate → reflection
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import pytest
 from matrix.orchestration.graph import build_graph
 from matrix.orchestration.nodes import (
     aggregate_node,
-    classify_node,
     commander_plan_node,
     delegate_node,
     reflection_node,
@@ -104,7 +103,6 @@ def base_state():
             "messages": [],
             "user_message": "当前持仓情况如何？",
             "session_id": "test",
-            "intent": "",
             "delegation_plan": [],
             "current_step": 0,
             "agent_results": [],
@@ -141,27 +139,6 @@ def make_config(llm, full_tools, agent_registry, trace=None):
     }
 
 
-# ---- Classify ----
-
-class TestClassifyNode:
-    def test_classifies_delegate(self, base_state, full_tools, agent_registry):
-        llm = FakeLLM(['{"intent": "delegate"}'])
-        result = classify_node(base_state(), config=make_config(llm, full_tools, agent_registry))
-        assert result["intent"] == "delegate"
-
-    def test_classifies_simple_greeting(self, base_state, full_tools, agent_registry):
-        """Simple greetings should be classified as 'simple' via keyword."""
-        llm = FakeLLM([])
-        state = base_state(user_message="你好！")
-        result = classify_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert result["intent"] == "simple"
-
-    def test_classify_fallback_on_error(self, base_state, full_tools, agent_registry):
-        llm = FakeLLM([])  # no responses → error → fallback to delegate
-        result = classify_node(base_state(user_message="分析我的持仓"), config=make_config(llm, full_tools, agent_registry))
-        assert result["intent"] == "delegate"
-
-
 # ---- Commander Plan ----
 
 class TestCommanderPlanNode:
@@ -174,15 +151,17 @@ class TestCommanderPlanNode:
         assert len(result["delegation_plan"]) >= 1
         assert result["delegation_plan"][0]["agent_id"] == "investment-analyst"
 
-    def test_empty_plan_falls_back_to_simple(self, base_state, full_tools, agent_registry):
+    def test_empty_plan_creates_commander_self_plan(self, base_state, full_tools, agent_registry):
         llm = FakeLLM(["[]"])
         result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
-        assert result.get("intent") == "simple" or result["delegation_plan"] == []
+        assert len(result["delegation_plan"]) == 1
+        assert result["delegation_plan"][0]["agent_id"] == "commander"
 
     def test_plan_fallback_on_error(self, base_state, full_tools, agent_registry):
         llm = FakeLLM(["not json at all..."])
         result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
-        assert result["delegation_plan"] == []  # fallback to empty plan
+        assert len(result["delegation_plan"]) == 1
+        assert result["delegation_plan"][0]["agent_id"] == "commander"
 
 
 # ---- Delegate ----
@@ -192,7 +171,6 @@ class TestDelegateNode:
         """Domain agent runs ReAct with function calling."""
         llm = FakeLLM(["当前持仓健康，共2个持仓。"])
         state = base_state(
-            intent="delegate",
             delegation_plan=[
                 {"step": 1, "agent_id": "investment-analyst", "task": "分析当前持仓", "skill_name": "", "purpose": "获取持仓"},
             ],
@@ -248,16 +226,16 @@ class TestDelegateNode:
 # ---- Aggregate ----
 
 class TestAggregateNode:
-    def test_aggregate_simple_intent(self, base_state, full_tools, agent_registry):
+    def test_aggregate_no_results(self, base_state, full_tools, agent_registry):
+        """Empty agent_results should trigger needs_summary."""
         llm = FakeLLM([])
-        state = base_state(intent="simple")
+        state = base_state(agent_results=[])
         result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
         assert result.get("needs_summary") is True
 
     def test_aggregate_with_results(self, base_state, full_tools, agent_registry):
         llm = FakeLLM(["当前持仓健康，共2个持仓，总价值100,000元。"])
         state = base_state(
-            intent="delegate",
             agent_results=[
                 {
                     "agent_id": "investment-analyst",
@@ -323,12 +301,12 @@ class TestGraphIntegration:
         assert graph is not None
 
     def test_graph_simple_path(self, base_state, full_tools, agent_registry):
-        """Test simple intent path through the compiled graph.
-        Simple intent now routes through commander → delegate → aggregate → reflection.
+        """Test simple question path through the compiled graph.
+        Empty plan → Commander self-plan → delegate → aggregate → reflection.
         """
         llm = FakeLLM([
-            '{"intent": "simple"}',  # classify
-            "你好！有什么可以帮助你的？",  # delegate: commander ReAct
+            "[]",  # commander_plan: empty → Commander handles it
+            "你好！有什么可以帮助你的？",  # delegate: Commander ReAct
             '{"ok": true}',  # reflection
         ])
         graph = build_graph()
@@ -342,8 +320,6 @@ class TestGraphIntegration:
             )
         )
         final = events[-1]
-        # Commander changes intent from simple → delegate
-        assert final.get("intent") == "delegate"
         assert len(final.get("agent_results", [])) == 1
         assert final["agent_results"][0]["agent_id"] == "commander"
         assert "帮助" in final.get("final_answer", "")
@@ -351,7 +327,6 @@ class TestGraphIntegration:
     def test_graph_delegate_path(self, base_state, full_tools, agent_registry):
         """Test delegate path through the compiled graph."""
         llm = FakeLLM([
-            '{"intent": "delegate"}',  # classify
             json.dumps([  # commander_plan
                 {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓", "skill_name": "", "purpose": "获取"},
             ]),
@@ -370,6 +345,5 @@ class TestGraphIntegration:
             )
         )
         final = events[-1]
-        assert final.get("intent") == "delegate"
         assert len(final.get("agent_results", [])) >= 1
         assert final.get("final_answer") is not None

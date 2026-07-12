@@ -1,7 +1,7 @@
 """Multi-agent LangGraph orchestration builder.
 
 Commander + Domain Agents architecture:
-  classify → commander_plan → delegate → aggregate → reflection
+  commander_plan → delegate → aggregate → reflection
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from langgraph.graph import END, StateGraph
 
 from .nodes import (
     aggregate_node,
-    classify_node,
     commander_plan_node,
     delegate_node,
     reflection_node,
@@ -22,30 +21,18 @@ def build_graph() -> StateGraph:
     """Build the multi-agent LangGraph state graph.
 
     Flow:
-    __start__ → classify → commander_plan → delegate → aggregate → reflection → __end__
+    __start__ → commander_plan → delegate → aggregate → reflection → __end__
     """
     graph = StateGraph(AgentState)
 
     # Add nodes
-    graph.add_node("classify", classify_node)
     graph.add_node("commander_plan", commander_plan_node)
     graph.add_node("delegate", delegate_node)
     graph.add_node("aggregate", aggregate_node)
     graph.add_node("reflection", reflection_node)
 
-    # Start → classify
-    graph.set_entry_point("classify")
-
-    # classify → route based on intent
-    graph.add_conditional_edges(
-        "classify",
-        _route_after_classify,
-        {
-            "simple": "commander_plan",  # commander handles simple questions with tools
-            "delegate": "commander_plan",
-            "error": "reflection",
-        },
-    )
+    # Start → commander_plan
+    graph.set_entry_point("commander_plan")
 
     # commander_plan → delegate (always)
     graph.add_edge("commander_plan", "delegate")
@@ -66,16 +53,6 @@ def build_graph() -> StateGraph:
     graph.add_edge("reflection", END)
 
     return graph
-
-
-def _route_after_classify(state: AgentState) -> str:
-    """Route after classification."""
-    if state.get("error"):
-        return "error"
-    intent = state.get("intent", "delegate")
-    if intent == "simple":
-        return "simple"
-    return "delegate"
 
 
 def _route_after_delegate(state: AgentState) -> str:

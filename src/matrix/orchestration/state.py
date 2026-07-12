@@ -10,7 +10,7 @@ from langgraph.graph import add_messages
 class AgentState(TypedDict):
     """State flowing through the multi-agent LangGraph orchestration graph.
 
-    Flow: classify → commander_plan → delegate → aggregate → reflection
+    Flow: commander_plan → delegate → aggregate → reflection
     """
 
     # Core conversation fields

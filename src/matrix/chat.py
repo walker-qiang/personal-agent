@@ -13,7 +13,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .agent import AgentRegistry
 from .agent.commander import COMMANDER
-from .agent.domain_agents import INVESTMENT_ANALYST
+from .agent.domain_agents import GENERAL_ASSISTANT, INVESTMENT_ANALYST
 from .config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from .llm import LLMClient, LLMError, build_llm_client
 from .llm.http import set_rate_limiter
@@ -211,8 +211,8 @@ class ChatService:
             yield {"type": "done", "session_id": sid, "duration_ms": 0}
             return
 
-        # Use raw user message (no history injection — LangGraph checkpointer manages
-        # conversation state via add_messages and thread_id)
+        # Load conversation history for context injection into LLM calls
+        history = self._get_history(sid)
         initial_state: AgentState = {
             "messages": [],
             "user_message": text,
@@ -233,7 +233,6 @@ class ChatService:
             emitted_tool_count = 0
             emitted_agent_count = 0
             last_answer = ""
-            emitted_classify = False
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
             for event in self._compiled_graph.stream(
@@ -246,6 +245,7 @@ class ChatService:
                         "agent_registry": self.agent_registry,
                         "full_tools": self.tools,
                         "trace": self.trace,
+                        "history": history,
                     },
                     "thread_id": sid,
                 },
@@ -254,11 +254,13 @@ class ChatService:
                     continue
                 final_state = event
 
-                # Emit classify result (once)
-                intent = event.get("intent", "")
-                if intent and not emitted_classify:
-                    emitted_classify = True
-                    delegation_plan = event.get("delegation_plan", [])
+                # Emit classify event when delegation_plan is first set by commander_plan
+                delegation_plan = event.get("delegation_plan")
+                if delegation_plan is not None and emitted_agent_count == 0:
+                    # Determine intent: commander-only plan = simple, multi-agent = delegate
+                    intent = "delegate" if len(delegation_plan) > 1 or (
+                        delegation_plan and delegation_plan[0].get("agent_id") != "commander"
+                    ) else "simple"
                     yield {
                         "type": "classify",
                         "intent": intent,
@@ -401,7 +403,10 @@ Rules:
 - Money is CNY unless stated otherwise, format large numbers with commas
 - Keep answers concise and well-structured
 - Reply in the same language as the user
-- Use Markdown formatting: **bold** for key figures, tables for comparisons, bullet lists for breakdowns"""
+- Use Markdown formatting: **bold** for key figures, bullet lists for breakdowns
+- If the result contains an image URL, display it using ![description](URL) format
+- Do NOT include execution process review, agent status tables, or step-by-step workflow
+- Your output is for the end user, not an internal log"""
 
         user_message = f"""User question: {user_msg}
 
@@ -436,6 +441,7 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
     registry.register_all([
         COMMANDER,
         INVESTMENT_ANALYST,
+        GENERAL_ASSISTANT,
     ])
     return registry
 

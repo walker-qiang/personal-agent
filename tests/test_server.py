@@ -21,6 +21,7 @@ def client(tmp_cache_path: Path):
         store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
         checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
         skills_dir=tmp_cache_path.parent / "skills" / "investment",
+        skills_base_dir=tmp_cache_path.parent / "skills",
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
@@ -52,6 +53,7 @@ class TestHealthz:
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
             skills_dir=tmp_cache_path.parent / "skills" / "investment",
+            skills_base_dir=tmp_cache_path.parent / "skills",
             host="127.0.0.1",
             port=0,
         )
@@ -70,7 +72,7 @@ class TestTools:
         data = resp.json()
         assert "tools" in data
         names = {t["name"] for t in data["tools"]}
-        assert len(names) == 5
+        assert len(names) == 9
         assert "finance.holdings_summary" in names
 
     def test_tools_call_holdings(self, client):
@@ -151,6 +153,7 @@ class TestChat:
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
             skills_dir=tmp_cache_path.parent / "skills" / "investment",
+            skills_base_dir=tmp_cache_path.parent / "skills",
             host="127.0.0.1",
             port=0,
         )

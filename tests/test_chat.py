@@ -49,12 +49,18 @@ def chat_service(tmp_cache_path: Path) -> ChatService:
         store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
         checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
         skills_dir=tmp_cache_path.parent / "skills" / "investment",
+        skills_base_dir=tmp_cache_path.parent / "skills",
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
     )
     registry = ToolRegistry()
     register_all(registry, tmp_cache_path)
+    # Also register web/agnes tools for Commander agent
+    from matrix.tools.web import register_all as register_web
+    from matrix.tools.agnes import register_all as register_agnes
+    register_web(registry)
+    register_agnes(registry)
     return ChatService(config, registry)
 
 
@@ -88,6 +94,7 @@ class TestChatService:
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
             skills_dir=tmp_cache_path.parent / "skills" / "investment",
+            skills_base_dir=tmp_cache_path.parent / "skills",
             host="127.0.0.1",
             port=0,
         )
@@ -101,9 +108,9 @@ class TestChatService:
     def test_returns_done_event(self, chat_service):
         # Native function calling: returns content directly (no tool calls)
         chat_service._default_llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
             "当前持仓健康。",
         ])
+        chat_service._pipeline_llm = FakeLLM(["[]"])
         chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         types = [e["type"] for e in events]
@@ -112,9 +119,9 @@ class TestChatService:
 
     def test_returns_token_events(self, chat_service):
         chat_service._default_llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
             "当前持仓健康。",
         ])
+        chat_service._pipeline_llm = FakeLLM(["[]"])
         chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]
@@ -122,11 +129,10 @@ class TestChatService:
 
     def test_session_memory_persists(self, chat_service):
         chat_service._default_llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
             "持仓健康。",
-            '{"intent": "react", "skill_name": ""}',
             "仍然健康。",
         ])
+        chat_service._pipeline_llm = FakeLLM(["[]", "[]"])
         chat_service.skills = []
         sid = "mem-test"
         list(chat_service.stream_chat("当前持仓怎么样？", sid))
@@ -136,9 +142,9 @@ class TestChatService:
 
     def test_reset_clears_session(self, chat_service):
         chat_service._default_llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
             "ok.",
         ])
+        chat_service._pipeline_llm = FakeLLM(["[]"])
         chat_service.skills = []
         sid = "reset-test"
         list(chat_service.stream_chat("test", sid))
@@ -147,9 +153,9 @@ class TestChatService:
 
     def test_skill_flow_in_graph(self, chat_service):
         chat_service._default_llm = FakeLLM([
-            '{"intent": "skill", "skill_name": "test-skill"}',
             "技能执行完成，共2个持仓。",
         ])
+        chat_service._pipeline_llm = FakeLLM(["[]"])
         from matrix.skills import SkillDefinition
         chat_service.skills = [
             SkillDefinition(
@@ -175,19 +181,16 @@ class TestChatService:
                 return FunctionCallResult(
                     content="",
                     tool_calls=[
-                        ToolCall(name="finance.holdings_summary", arguments={}),
+                        ToolCall(name="web_search", arguments={"query": "test"}),
                     ],
                     finish_reason="tool_calls",
                 )
 
         chat_service._default_llm = StreamingLLM([
-            '{"intent": "react", "skill_name": ""}',
             "当前持仓健康，共2个持仓。",
         ])
-        # Pipeline LLM used by classify_node; must also be a fake
-        chat_service._pipeline_llm = FakeLLM([
-            '{"intent": "react", "skill_name": ""}',
-        ])
+        # Pipeline LLM used by commander_plan_node; returns empty plan → Commander self-plan
+        chat_service._pipeline_llm = FakeLLM(["[]"])
         chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]

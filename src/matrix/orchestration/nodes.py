@@ -1,7 +1,7 @@
 """Multi-agent orchestration nodes.
 
 Commander + Domain Agents architecture:
-  classify → commander_plan → delegate → aggregate → reflection
+  commander_plan → delegate → aggregate → reflection
 """
 
 from __future__ import annotations
@@ -25,22 +25,6 @@ MAX_PLAN_STEPS = 3
 
 # ---- Prompts ----
 
-CLASSIFY_PROMPT = """You are a routing classifier. Based on the user's message, determine if it needs multi-agent delegation.
-
-Available domain experts:
-{agents}
-
-Return ONLY a JSON object with one of:
-- {{"intent": "simple"}} — for simple questions (greetings, basic facts, math, small talk) that can be answered directly
-- {{"intent": "delegate"}} — for questions that need domain expertise (investment, programming, writing, research, etc.)
-
-Rules:
-- "simple" for: greetings, "what is X", "how are you", simple arithmetic, basic facts
-- "delegate" for: investment analysis, portfolio questions, programming, writing, data analysis, research
-- When in doubt, use "delegate"
-
-Only return JSON, no other text."""
-
 COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回答用户的问题。
 
 可用的领域专家：
@@ -52,10 +36,10 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
 {{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "skill_name": "", "purpose": "为什么需要这个专家"}}
 
 规则：
-- 简单问题（闲聊、常识）返回空数组 []
-- 投资/金融相关委派给 investment-analyst
-- 通用知识/编程/写作委派给 general-assistant
-- 跨领域问题可以委派给多个专家
+- 绝大多数问题返回空数组 []，由指挥官直接处理（指挥官拥有全部工具，包括联网搜索、网页抓取、图片生成、视频生成等）
+- 只有投资/金融/持仓/配置分析类问题才委派给 investment-analyst
+- 不要委派给 general-assistant（指挥官自己就是通用助手，拥有相同甚至更多的工具）
+- 跨领域问题：投资部分委派给 investment-analyst，其余指挥官自己处理
 - 每个专家只委派一次，合并相似任务
 - 如果问题匹配某个专家的技能，填写 skill_name 字段
 
@@ -69,11 +53,14 @@ COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家
 {results}
 
 请用清晰、结构化的方式汇总回答。要求：
-1. 直接回答用户的问题
-2. 引用各专家的关键发现和数据
-3. 如果某个专家结果不完整或有错误，明确说明
+1. 直接回答用户的问题，不要展示执行过程、步骤回顾、专家状态表格
+2. 引用专家的关键发现，但不要列出"执行专家""任务目标""执行状态"等元信息
+3. 如果某个专家结果不完整或有错误，用一句话说明即可
 4. 使用与用户相同的语言
-5. 使用 Markdown 格式化：**加粗**关键数字，表格对比数据，列表展示要点"""
+5. 使用 Markdown 格式化：**加粗**关键数字，列表展示要点
+6. 如果结果中包含图片 URL，使用 ![描述](URL) 格式展示图片
+
+重要：你的输出是给最终用户看的，不是内部日志。不要包含执行过程回顾。"""
 
 DOMAIN_AGENT_REACT_SYSTEM = """You are {agent_name}, a domain expert with tool access.
 
@@ -91,10 +78,23 @@ Current task: {task}
 - After the tool returns results, summarize them for the user
 - If the tool fails, explain the failure and suggest alternatives
 
+## Image Prompt Optimization
+When calling `agnes.generate_image`, you MUST optimize the prompt — do NOT pass the user's raw Chinese text directly. Follow these rules:
+- Translate to English (English prompts produce better results)
+- Add quality keywords: "photorealistic, highly detailed, 8k, professional photography"
+- Add style description: lighting, composition, camera angle, mood, color palette
+- Specify what NOT to include: "no text, no watermark, no distortion"
+- Be specific about the subject: position, action, expression, environment
+- Keep the prompt under 200 words, focused on visual elements
+- Example: User says "一只猫" → prompt becomes "A fluffy orange tabby cat sitting on a windowsill, soft morning light streaming through lace curtains, shallow depth of field, photorealistic, highly detailed, 8k, professional photography, warm cozy atmosphere, no text, no watermark"
+
 ## Output
 - Use the same language as the user
-- If the tool generated an image/video, show the URL link
-- Use Markdown formatting: **bold** for key figures, `code` for code, tables for data, bullet lists for breakdowns
+- If the tool generated an image, show it using Markdown image syntax: ![描述](URL)
+- If the tool generated a video, show it using: ![描述](URL)
+- Never use plain text links [text](url) for images/videos — always use ![](url) format
+- Use Markdown formatting: **bold** for key figures, `code` for code, bullet lists for breakdowns
+- Do NOT include execution process review, agent status tables, or step-by-step workflow in your output
 - Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so."""
 
 REFLECTION_PROMPT = """You are a quality reviewer. Check if the answer below is accurate and complete.
@@ -162,6 +162,41 @@ def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _is_refusal(content: str) -> bool:
+    """Check if the LLM content is a refusal to use tools."""
+    lowered = content.lower()
+    refusal_patterns = [
+        r"抱歉", r"不能", r"无法", r"做不到", r"目前不",
+        r"sorry", r"cannot", r"unable", r"can't", r"don't have",
+        r"i apologize", r"i am not able",
+    ]
+    return any(re.search(pat, lowered) for pat in refusal_patterns)
+
+
+def _force_tool_call(
+    llm,
+    system_prompt: str,
+    task: str,
+    tools: list[dict[str, Any]],
+) -> FunctionCallResult:
+    """Retry with tool_choice='required' and a stronger system prompt."""
+    forced_system = (
+        system_prompt
+        + "\n\nCRITICAL: You MUST call a tool to complete this task. "
+        "Do NOT say you cannot do it — call the appropriate tool. "
+        "Do NOT return text without calling a tool first."
+    )
+    try:
+        return llm.function_call(
+            forced_system,
+            [{"role": "user", "content": f"Task: {task}\n\nCall a tool to complete this task."}],
+            tools,
+            tool_choice="required",
+        )
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
+        return FunctionCallResult(content="", tool_calls=[])
+
+
 def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
     """Build tool definitions list for LLM function calling."""
     return tools.list_tools()
@@ -170,69 +205,23 @@ def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
 # ---- Nodes ----
 
 
-def classify_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Classify the user's intent: simple (direct answer) or delegate (multi-agent)."""
-    if state.get("intent"):
-        return {}
+def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Commander plans the delegation strategy. Entry node of the graph.
 
+    This is the ONLY node that calls the LLM for intent classification.
+    Empty plan [] = simple question (Commander handles directly).
+    Non-empty plan = delegate to domain experts.
+    """
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])
     agent_registry: AgentRegistry = cfg["agent_registry"]
+
     user_msg = state["user_message"]
 
     if not user_msg.strip():
-        return {"intent": "simple", "needs_summary": True}
-
-    # Quick keyword check: common simple questions
-    simple_patterns = [
-        r"^(你好|hi|hello|hey|谢谢|再见|bye)[\s!！。.]*$",
-        r"^(what is your name|你是谁|你叫什么)[\s?？]*$",
-        r"^\d+[\+\-\*\/]\d+$",
-        r"^今天天气",
-    ]
-    for pattern in simple_patterns:
-        if re.search(pattern, user_msg, re.IGNORECASE):
-            return {"intent": "simple", "needs_summary": True}
-
-    # LLM-based classification
-    agents_desc = ""
-    domain_agents = agent_registry.agents_for_commander()
-    if domain_agents:
-        agents_desc = "\n".join(
-            f"- {a['id']}: {a['description']}" for a in domain_agents
-        )
-
-    try:
-        response = llm.complete(
-            CLASSIFY_PROMPT.format(agents=agents_desc or "No domain agents available."),
-            [{"role": "user", "content": user_msg}],
-        )
-        data = _extract_json(response)
-        if not isinstance(data, dict):
-            return {"intent": "delegate"}
-        intent = data.get("intent", "delegate")
-        if intent == "simple":
-            return {"intent": "simple", "needs_summary": True}
-        return {"intent": intent}
-    except (LLMError, Exception):
-        return {"intent": "delegate", "error": ""}
-
-
-def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Commander creates a delegation plan."""
-    cfg = _get_configurable(config)
-    llm = cfg.get("pipeline_llm", cfg["llm"])
-    agent_registry: AgentRegistry = cfg["agent_registry"]
-
-    user_msg = state["user_message"]
-    intent = state.get("intent", "")
-
-    # Simple intent: delegate to commander itself (runs ReAct with tools)
-    if intent == "simple":
         return {
-            "intent": "delegate",
             "delegation_plan": [
-                {"step": 1, "agent_id": "commander", "task": user_msg, "purpose": "直接回答"}
+                {"step": 1, "agent_id": "commander", "task": "回复空消息", "purpose": "直接回答"}
             ],
             "current_step": 0,
         }
@@ -241,10 +230,21 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
         agent_registry.agents_for_commander(), ensure_ascii=False, indent=2
     )
 
+    # Build conversation history context for multi-turn awareness
+    history = cfg.get("history", [])
+    history_context = ""
+    if history:
+        recent = history[-6:]  # last 3 turns
+        lines = []
+        for h in recent:
+            role_label = "用户" if h["role"] == "user" else "助手"
+            lines.append(f"[{role_label}]: {h['content'][:300]}")
+        history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
+
     try:
         response = llm.complete(
             COMMANDER_PLAN_PROMPT.format(agents=agents_desc, question=user_msg),
-            [{"role": "user", "content": user_msg}],
+            [{"role": "user", "content": history_context + user_msg}],
         )
         plan = _extract_json(response)
         if not isinstance(plan, list):
@@ -252,12 +252,40 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     except (LLMError, json.JSONDecodeError, ValueError):
         plan = []
 
+    # Filter out any steps that reference non-existent agents (e.g. LLM hallucination)
+    valid_ids = {a["id"] for a in agent_registry.agents_for_commander()}
+    plan = [s for s in plan if s.get("agent_id", "") in valid_ids]
+
+    # Merge steps for the same agent (e.g. two general-assistant steps → one)
+    merged: list[dict[str, Any]] = []
+    seen_agents: set[str] = set()
+    for s in plan:
+        aid = s.get("agent_id", "")
+        if aid in seen_agents:
+            # Merge task into the existing step
+            for m in merged:
+                if m.get("agent_id") == aid:
+                    m["task"] = m["task"] + "；同时：" + s.get("task", "")
+                    if s.get("skill_name"):
+                        m["skill_name"] = s["skill_name"]
+                    break
+        else:
+            seen_agents.add(aid)
+            merged.append(s)
+    plan = merged
+
     # Limit plan steps
     plan = plan[:MAX_PLAN_STEPS]
 
-    # If no plan, treat as simple question
+    # Empty plan = simple question. Always let Commander handle it via ReAct
+    # so that Tool Gate can enforce tool calls when needed.
     if not plan:
-        return {"intent": "simple", "delegation_plan": [], "current_step": 0, "needs_summary": True}
+        return {
+            "delegation_plan": [
+                {"step": 1, "agent_id": "commander", "task": user_msg, "purpose": "直接回答"}
+            ],
+            "current_step": 0,
+        }
 
     # Ensure each step has required fields
     for i, step in enumerate(plan):
@@ -354,6 +382,7 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
 
     return {
         "agent_results": agent_results,
+        "tool_results": result.get("tool_results", []),
         "current_step": current_step + 1,
         "react_iteration": 0,  # reset for next agent
     }
@@ -374,6 +403,17 @@ def _run_domain_agent_react(
     tool_results: list[dict[str, Any]] = list(skill_results)
     iteration = 0
 
+    # Build conversation history context for multi-turn awareness
+    history = cfg.get("history", [])
+    history_context = ""
+    if history:
+        recent = history[-6:]  # last 3 turns
+        lines = []
+        for h in recent:
+            role_label = "用户" if h["role"] == "user" else "助手"
+            lines.append(f"[{role_label}]: {h['content'][:300]}")
+        history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
+
     while iteration < MAX_REACT_ITERATIONS:
         iteration += 1
 
@@ -386,6 +426,7 @@ def _run_domain_agent_react(
 
         # Build context
         context = f"Task: {task}\n\n"
+        context += history_context
         if tool_results:
             context += (
                 "Previous tool results:\n"
@@ -395,16 +436,25 @@ def _run_domain_agent_react(
             # Check for duplicate calls
             seen = set()
             dupes = set()
+            failed = set()
             for tr in tool_results:
                 key = (tr.get("name"), json.dumps(tr.get("arguments", {}), sort_keys=True))
                 if key in seen:
                     dupes.add(key[0])
                 seen.add(key)
+                if tr.get("error"):
+                    failed.add(tr.get("name", ""))
             if dupes:
                 context += (
                     "WARNING: The following tools were already called: "
                     + ", ".join(dupes)
                     + ". Do NOT call them again. Use existing results.\n\n"
+                )
+            if failed:
+                context += (
+                    "NOTE: The following tools FAILED: "
+                    + ", ".join(failed)
+                    + ". Do NOT retry them. Explain the failure to the user.\n\n"
                 )
         context += "Complete the task based on available data."
 
@@ -418,11 +468,29 @@ def _run_domain_agent_react(
             if result.tool_calls:
                 executed = _run_tool_calls(result.tool_calls, tool_results, tools, cfg)
                 if executed == 0:
-                    # No new tools executed, force summarize
-                    return {"answer": "任务已完成，但工具调用重复。", "tool_results": tool_results, "findings": []}
+                    # All tool calls were duplicates — ask LLM to summarize
+                    # existing results (including errors) instead of a hardcoded message.
+                    try:
+                        summary = llm.complete(
+                            system_prompt,
+                            [{"role": "user", "content": context + "\nAll tool calls were duplicates. "
+                             "Summarize the existing results for the user. If tools failed, explain the failure."}],
+                        )
+                        return {"answer": summary.strip(), "tool_results": tool_results, "findings": []}
+                    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
+                        return {"answer": "工具调用已完成，但无法生成总结。", "tool_results": tool_results, "findings": []}
                 continue
 
             if result.content:
+                # Tool Gate: on first iteration, if the model refuses to call tools
+                # but the agent has tools available, force a retry with tool_choice="required".
+                if iteration == 1 and _is_refusal(result.content) and llm_tools:
+                    retry_result = _force_tool_call(llm, system_prompt, task, llm_tools)
+                    if retry_result.tool_calls:
+                        _run_tool_calls(retry_result.tool_calls, tool_results, tools, cfg)
+                        continue
+                    if retry_result.content:
+                        return {"answer": retry_result.content.strip(), "tool_results": tool_results, "findings": []}
                 return {"answer": result.content.strip(), "tool_results": tool_results, "findings": []}
 
         except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
@@ -604,11 +672,6 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
 
     user_msg = state["user_message"]
     agent_results = state.get("agent_results", [])
-    intent = state.get("intent", "")
-
-    # Simple question: LLM has already answered in classify
-    if intent == "simple":
-        return {"needs_summary": True}
 
     if not agent_results:
         return {"needs_summary": True}

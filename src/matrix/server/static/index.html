@@ -366,6 +366,41 @@
     overflow-x: auto;
   }
   .message.assistant .bubble:empty { display: none; }
+  /* Agent execution chain */
+  .agent-chain {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 8px;
+    padding: 0;
+  }
+  .agent-step {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    transition: all 0.2s;
+  }
+  .agent-step .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .agent-step.running { border-color: var(--accent); color: var(--accent); }
+  .agent-step.running .dot { background: var(--accent); animation: pulse 1.2s infinite; }
+  .agent-step.done { border-color: #34c759; color: #34c759; }
+  .agent-step.done .dot { background: #34c759; }
+  .agent-step.error { border-color: #ff3b30; color: #ff3b30; }
+  .agent-step.error .dot { background: #ff3b30; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .agent-step-name { font-weight: 600; }
+  .agent-step-task { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Markdown content styles */
   .content h1, .content h2, .content h3 { margin: 20px 0 10px; font-weight: 600; }
   .content h1 { font-size: 1.25em; }
@@ -1136,6 +1171,23 @@ function renderMarkdown(text) {
     tbl += '</tbody></table>';
     return tbl;
   });
+  // Images: ![alt](url)
+  html = html.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_, alt, url) => {
+    // extract optional title: url "title"
+    const parts = url.match(/^([^\s]+)\s+"([^"]*)"$/);
+    const src = parts ? parts[1] : url;
+    const title = parts ? parts[2] : '';
+    return '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(alt) + '"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + ' style="max-width:100%;border-radius:8px;margin:8px 0">';
+  });
+  // Video embeds: ![video](url) — detect .mp4/.webm/.mov in url
+  html = html.replace(/<img src="([^"]+)" alt="([^"]*)"([^>]*)>/g, (match, src, alt, rest) => {
+    if (/\.(mp4|webm|mov)(\?|$)/i.test(src)) {
+      return '<video controls style="max-width:100%;max-height:500px;border-radius:8px;margin:8px 0" src="' + src + '"' + (alt ? ' title="' + alt + '"' : '') + '></video>';
+    }
+    return match;
+  });
+  // Links: [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   // Paragraphs (double newline)
   html = html.replace(/\n\n/g, '</p><p>');
   html = '<p>' + html + '</p>';
@@ -1192,6 +1244,32 @@ function formatToolResult(data) {
 }
 
 function formatToolResultObject(obj) {
+  // Image generation results: show actual images
+  if (obj.images && Array.isArray(obj.images) && obj.images.length > 0) {
+    let html = '';
+    if (obj.prompt) html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">&#x1F3A8; ' + escapeHtml(obj.prompt) + '</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px">';
+    obj.images.forEach(img => {
+      if (img.url) {
+        html += '<a href="' + escapeHtml(img.url) + '" target="_blank"><img src="' + escapeHtml(img.url) + '" alt="' + escapeHtml(obj.prompt || '') + '" style="max-width:300px;max-height:300px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy"></a>';
+      }
+    });
+    html += '</div>';
+    if (obj.size) html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">尺寸: ' + escapeHtml(obj.size) + ' | 数量: ' + (obj.count || obj.images.length) + '</div>';
+    return html;
+  }
+  // Video generation results: show video player
+  if (obj.videos && Array.isArray(obj.videos) && obj.videos.length > 0) {
+    let html = '';
+    if (obj.prompt) html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">&#x1F3AC; ' + escapeHtml(obj.prompt) + '</div>';
+    obj.videos.forEach(v => {
+      if (v.url) {
+        html += '<video controls style="max-width:100%;max-height:400px;border-radius:8px;margin:6px 0" src="' + escapeHtml(v.url) + '"></video>';
+      }
+    });
+    if (obj.duration) html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">时长: ' + obj.duration + 's | 分辨率: ' + escapeHtml(obj.resolution || '') + '</div>';
+    return html;
+  }
   // Special handling for holdings_summary
   if (obj.buckets && obj.holdings) {
     let html = '';
@@ -1266,6 +1344,8 @@ function send() {
   resetRPanel();
   // Track tool names for reference panel
   let rpTools = [];
+  // Track execution chain in chat
+  let executionChain = [];
 
   const chat = document.getElementById('chat');
   const inner = document.getElementById('chatInner');
@@ -1278,7 +1358,7 @@ function send() {
   // Status bar: appears below assistant bubble in chat
   const statusBar = document.createElement('div');
   statusBar.className = 'status-bar';
-  inner.appendChild(statusBar);
+  asst.appendChild(statusBar);
   setStatus(statusBar, '思考中...');
   // Right panel tracking
   let rpSteps = [];
@@ -1295,15 +1375,29 @@ function send() {
     const data = JSON.parse(e.data);
     let title = data.intent === 'simple' ? '\u76f4\u63a5\u56de\u7b54' :
                 data.intent === 'delegate' ? '\u591a Agent \u534f\u540c' :
-                data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name :
-                data.intent === 'react' ? '\u5bf9\u8bdd\u5206\u6790' :
-                data.intent === 'plan_execute' ? '\u8ba1\u5212\u6267\u884c' : data.intent;
+                data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name : '\u5206\u6790\u4e2d';
     setRPTodo(title);
-    setRPRef('skill', data.intent === 'delegate' ? '\u591a Agent \u534f\u540c' : (data.skill_name || data.intent));
-    // Show delegation plan if present
-    if (data.delegation_plan && data.delegation_plan.length > 0) {
+    // Build agent execution chain in chat (skip if only commander — internal fallback)
+    const isCommanderOnly = data.delegation_plan && data.delegation_plan.length === 1 && data.delegation_plan[0].agent_id === 'commander';
+    if (data.delegation_plan && data.delegation_plan.length > 0 && !isCommanderOnly) {
+      const chain = document.createElement('div');
+      chain.className = 'agent-chain';
       const steps = data.delegation_plan.map(p => p.agent_id + ': ' + p.task).join(' | ');
+      const agents = data.delegation_plan.map(p => p.agent_id);
+      const names = data.delegation_plan.map(p => p.agent_id === 'commander' ? '\u6307\u6325\u5b98' : p.agent_id === 'investment-analyst' ? '\u6295\u8d44\u5206\u6790\u5458' : p.agent_id === 'general-assistant' ? '\u901a\u7528\u52a9\u624b' : p.agent_id);
       setRPRef('plan', steps);
+      for (let i = 0; i < data.delegation_plan.length; i++) {
+        const p = data.delegation_plan[i];
+        const chip = document.createElement('span');
+        chip.className = 'agent-step';
+        chip.id = 'agent-step-' + i;
+        chip.innerHTML = '<span class="dot"></span><span class="agent-step-name">' + escapeHtml(names[i]) + '</span>';
+        chain.appendChild(chip);
+        executionChain.push({ el: chip, agentId: p.agent_id, task: p.task, done: false });
+      }
+      // Mark first step as running
+      if (executionChain.length > 0) executionChain[0].el.classList.add('running');
+      asst.prepend(chain);
     }
     rpTools = [];
   });
@@ -1354,6 +1448,25 @@ function send() {
     if (aid) {
       setRPRef('agent', aid + ': ' + task);
     }
+    // Update execution chain
+    const step = executionChain.find(s => s.agentId === aid && !s.done);
+    if (step) {
+      step.done = true;
+      step.el.classList.remove('running');
+      step.el.classList.add(data.error ? 'error' : 'done');
+      if (data.result) {
+        step.el.title = data.result.substring(0, 200);
+      }
+    }
+    // Mark next pending step as running
+    const next = executionChain.find(s => !s.done);
+    if (next) {
+      next.el.classList.add('running');
+    } else {
+      // All steps done — hide chain immediately
+      const chain = asst.querySelector('.agent-chain');
+      if (chain) chain.style.display = 'none';
+    }
     if (data.error) {
       addRPArtifact(aid + '-error', data.error);
     }
@@ -1361,6 +1474,9 @@ function send() {
 
   es.addEventListener('error', (e) => {
     hideStatus(statusBar);
+    const chain = asst.querySelector('.agent-chain');
+    if (chain) chain.style.display = 'none';
+    executionChain.forEach(s => s.el.classList.remove('running'));
     document.getElementById('rpanel').classList.remove('open');
     try {
       const data = JSON.parse(e.data);
@@ -1370,13 +1486,18 @@ function send() {
 
   es.addEventListener('done', (e) => {
     hideStatus(statusBar);
+    // Hide agent chain — internal orchestration, not for end users
+    const chain = asst.querySelector('.agent-chain');
+    if (chain) chain.style.display = 'none';
+    // Ensure no running animation remains
+    executionChain.forEach(s => s.el.classList.remove('running'));
     try {
       const data = JSON.parse(e.data);
       const dur = data.duration_ms ? (data.duration_ms / 1000).toFixed(1) + 's' : '';
       if (dur) {
         const durEl = document.createElement('div');
         durEl.className = 'duration';
-        durEl.textContent = '耗时 ' + dur;
+        durEl.textContent = '\u8017\u65f6 ' + dur;
         asst.appendChild(durEl);
       }
     } catch (_) {}
@@ -1388,6 +1509,9 @@ function send() {
 
   es.onerror = () => {
     hideStatus(statusBar);
+    const chain = asst.querySelector('.agent-chain');
+    if (chain) chain.style.display = 'none';
+    executionChain.forEach(s => s.el.classList.remove('running'));
     es.close();
     sending = false;
     document.getElementById('input').focus();
