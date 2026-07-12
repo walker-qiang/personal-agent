@@ -13,7 +13,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .agent import AgentRegistry
 from .agent.commander import COMMANDER
-from .agent.domain_agents import GENERAL_ASSISTANT, INVESTMENT_ANALYST
+from .agent.domain_agents import INVESTMENT_ANALYST, MEDIA_GENERATOR
 from .config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from .llm import LLMClient, LLMError, build_llm_client
 from .llm.http import set_rate_limiter
@@ -441,7 +441,7 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
     registry.register_all([
         COMMANDER,
         INVESTMENT_ANALYST,
-        GENERAL_ASSISTANT,
+        MEDIA_GENERATOR,
     ])
     return registry
 

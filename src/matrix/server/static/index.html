@@ -1384,7 +1384,7 @@ function send() {
       chain.className = 'agent-chain';
       const steps = data.delegation_plan.map(p => p.agent_id + ': ' + p.task).join(' | ');
       const agents = data.delegation_plan.map(p => p.agent_id);
-      const names = data.delegation_plan.map(p => p.agent_id === 'commander' ? '\u6307\u6325\u5b98' : p.agent_id === 'investment-analyst' ? '\u6295\u8d44\u5206\u6790\u5458' : p.agent_id === 'general-assistant' ? '\u901a\u7528\u52a9\u624b' : p.agent_id);
+      const names = data.delegation_plan.map(p => p.agent_id === 'commander' ? '\u6307\u6325\u5b98' : p.agent_id === 'investment-analyst' ? '\u6295\u8d44\u5206\u6790\u5458' : p.agent_id === 'media-generator' ? '\u5a92\u4f53\u751f\u6210\u5668' : p.agent_id);
       setRPRef('plan', steps);
       for (let i = 0; i < data.delegation_plan.length; i++) {
         const p = data.delegation_plan[i];
