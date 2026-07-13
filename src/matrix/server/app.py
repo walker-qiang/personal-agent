@@ -51,7 +51,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     cfg = config or load_config()
 
     app = FastAPI(
-        title="Project Matrix Agent",
+        title="Matrix",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -78,6 +78,6 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     async def serve_ui():
         if _INDEX_HTML:
             return HTMLResponse(_INDEX_HTML)
-        return HTMLResponse("<h1>Project Matrix</h1><p>UI not found.</p>", status_code=404)
+        return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
 
     return app

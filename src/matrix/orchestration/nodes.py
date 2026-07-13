@@ -99,8 +99,12 @@ When calling `agnes.generate_image` or `agnes.generate_video`, follow these rule
 - User says "老虎捕猎北极熊" → your prompt: "A Siberian tiger in mid-pounce, muscles tensed, mouth open showing sharp teeth, targeting a polar bear on a snowy Arctic ice field, dramatic overcast sky, snow particles in the air, low camera angle, intense action shot, cold blue-white color palette"
 
 **Style selection:**
-- Default to `photorealistic` style unless the user explicitly asks for a different style (artistic, anime, oil-painting, sketch, 3d-render, watercolor)
-- For video, default to `cinematic` style unless the user asks for animation, documentary, timelapse, slow-motion, or aerial
+- For images, default to `photorealistic` style unless the user explicitly asks for a different style (artistic, anime, oil-painting, sketch, 3d-render, watercolor)
+- For videos, use the default settings (1152x768, 121 frames, 24fps ≈ 5 seconds). Only change if the user asks for specific duration or quality.
+
+**Video generation note:**
+- Video generation is asynchronous and takes 2-3 minutes. The tool will wait for completion automatically.
+- After calling the tool, show the result with: ![描述](video_url)
 
 ## Output
 - Use the same language as the user
@@ -185,6 +189,19 @@ def _is_refusal(content: str) -> bool:
         r"i apologize", r"i am not able",
     ]
     return any(re.search(pat, lowered) for pat in refusal_patterns)
+
+
+def _is_hallucination(content: str) -> bool:
+    """Check if the LLM is pretending to have completed a task without actually calling tools.
+
+    Detects patterns like '已为您生成', '生成结果如下', etc. where the LLM
+    describes a non-existent output as if it were real.
+    """
+    return bool(re.search(
+        r"已(为您|经)?(生成|创建|制作|完成)|生成结果如下|具体效果如下|"
+        r"Here is the (generated|created) |I have (generated|created) ",
+        content,
+    ))
 
 
 def _force_tool_call(
@@ -496,15 +513,27 @@ def _run_domain_agent_react(
                 continue
 
             if result.content:
-                # Tool Gate: on first iteration, if the model refuses to call tools
-                # but the agent has tools available, force a retry with tool_choice="required".
-                if iteration == 1 and _is_refusal(result.content) and llm_tools:
+                # Tool Gate: on first iteration, if the model returns text without
+                # calling tools but the agent has tools available, force a retry.
+                # Detects both explicit refusals AND hallucinations (pretending to
+                # have completed the task without actually calling tools).
+                if iteration == 1 and llm_tools and (
+                    _is_refusal(result.content) or _is_hallucination(result.content)
+                ):
                     retry_result = _force_tool_call(llm, system_prompt, task, llm_tools)
                     if retry_result.tool_calls:
                         _run_tool_calls(retry_result.tool_calls, tool_results, tools, cfg)
                         continue
                     if retry_result.content:
                         return {"answer": retry_result.content.strip(), "tool_results": tool_results, "findings": []}
+                    # _force_tool_call failed — do NOT fall through to the hallucination.
+                    # Return a clear error instead.
+                    return {
+                        "answer": "抱歉，我无法完成此任务。请检查工具是否可用，或尝试用其他方式描述您的需求。",
+                        "tool_results": tool_results,
+                        "findings": [],
+                        "error": "force_tool_call_failed",
+                    }
                 return {"answer": result.content.strip(), "tool_results": tool_results, "findings": []}
 
         except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):

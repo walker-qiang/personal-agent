@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.request
 from typing import Any
 
@@ -151,66 +152,95 @@ image_tool = ToolDefinition(
 
 def generate_video(
     prompt: str,
-    duration: int = 5,
-    resolution: str = "1080p",
-    style: str = "cinematic",
+    width: int = 1152,
+    height: int = 768,
+    num_frames: int = 121,
+    frame_rate: int = 24,
 ) -> dict[str, Any]:
-    """Generate a video using Agnes-Video-V2.0.
+    """Generate a video using Agnes-Video-V2.0 (async task-based API).
 
     Args:
         prompt: Video description (text prompt, English preferred)
-        duration: Video duration in seconds (1-30)
-        resolution: Video resolution, 480p, 720p, or 1080p (default 1080p)
-        style: Visual style — cinematic, animation, documentary, timelapse
+        width: Video width in pixels (default 1152)
+        height: Video height in pixels (default 768)
+        num_frames: Number of frames, must be 8n+1, max 441 (default 121 ≈ 5s at 24fps)
+        frame_rate: Frame rate 1-60 (default 24)
     """
     if not AGNES_API_KEY:
         return {"error": "AGNES_API_KEY not configured", "videos": []}
 
-    duration = max(1, min(duration, 30))
-    valid_resolutions = {"480p", "720p", "1080p"}
-    resolution = resolution if resolution in valid_resolutions else "1080p"
-    valid_styles = {"cinematic", "animation", "documentary", "timelapse", "slow-motion", "aerial"}
-    style = style if style in valid_styles else "cinematic"
+    width = max(256, min(width, 1920))
+    height = max(256, min(height, 1080))
+    num_frames = max(1, min(num_frames, 441))
+    frame_rate = max(1, min(frame_rate, 60))
 
     # Code-level quality enhancement: guarantees baseline quality keywords
     prompt = _enhance_video_prompt(prompt)
 
+    # Step 1: Submit video generation task
     payload = json.dumps({
         "model": "agnes-video-v2.0",
         "prompt": prompt,
-        "duration": duration,
-        "resolution": resolution,
-        "style": style,
+        "width": width,
+        "height": height,
+        "num_frames": num_frames,
+        "frame_rate": frame_rate,
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        f"{AGNES_BASE_URL}/video/generations",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {AGNES_API_KEY}",
-        },
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        req = urllib.request.Request(
+            f"{AGNES_BASE_URL}/videos",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {AGNES_API_KEY}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        videos = []
-        for item in data.get("data", []):
-            url = item.get("url", "")
-            videos.append({
-                "url": url,
-                "duration": duration,
-                "resolution": resolution,
-            })
-        return {"prompt": prompt, "duration": duration, "resolution": resolution, "count": len(videos), "videos": videos}
     except Exception as err:
-        return {"error": f"Video generation failed: {err}", "videos": []}
+        return {"error": f"Video task submission failed: {err}", "videos": []}
+
+    task_id = data.get("task_id", "")
+    if not task_id:
+        return {"error": f"No task_id in response: {data}", "videos": []}
+
+    # Step 2: Poll for completion (max 5 minutes)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            req = urllib.request.Request(
+                f"{AGNES_BASE_URL}/videos/{task_id}",
+                headers={"Authorization": f"Bearer {AGNES_API_KEY}"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except Exception as err:
+            return {"error": f"Video polling failed: {err}", "videos": []}
+
+        status = result.get("status", "")
+        if status == "completed":
+            video_url = result.get("video_url") or result.get("remixed_from_video_id", "")
+            return {
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+                "frame_rate": frame_rate,
+                "duration_sec": round(num_frames / frame_rate, 1),
+                "count": 1,
+                "videos": [{"url": video_url, "task_id": task_id}],
+            }
+        elif status == "failed":
+            return {"error": f"Video generation failed: {result.get('error', 'unknown')}", "videos": []}
+
+    return {"error": "Video generation timed out after 5 minutes", "videos": []}
 
 
 video_tool = ToolDefinition(
     name="agnes.generate_video",
-    description="使用 Agnes Video V2.0 生成高质量视频。LLM 负责描述视频内容，代码自动追加质量关键词。支持多种风格和分辨率。",
+    description="使用 Agnes Video V2.0 生成高质量视频（异步任务模式，提交后轮询等待结果，通常 2-3 分钟完成）。LLM 负责描述视频内容，代码自动追加质量关键词。",
     input_schema={
         "type": "object",
         "properties": {
@@ -218,19 +248,21 @@ video_tool = ToolDefinition(
                 "type": "string",
                 "description": "视频描述（英文），只需描述画面内容：场景、动作、运镜、氛围。不需要加 cinematic/4k 等质量词（代码自动添加）。",
             },
-            "duration": {
+            "width": {
                 "type": "integer",
-                "description": "视频时长（秒），默认 5，最大 30",
+                "description": "视频宽度（像素），默认 1152",
             },
-            "resolution": {
-                "type": "string",
-                "enum": ["480p", "720p", "1080p"],
-                "description": "视频分辨率，默认 1080p",
+            "height": {
+                "type": "integer",
+                "description": "视频高度（像素），默认 768",
             },
-            "style": {
-                "type": "string",
-                "enum": ["cinematic", "animation", "documentary", "timelapse", "slow-motion", "aerial"],
-                "description": "视觉风格，默认 cinematic（电影感）",
+            "num_frames": {
+                "type": "integer",
+                "description": "帧数，格式 8n+1，最大 441。默认 121（约 5 秒@24fps）",
+            },
+            "frame_rate": {
+                "type": "integer",
+                "description": "帧率 1-60，默认 24",
             },
         },
         "required": ["prompt"],

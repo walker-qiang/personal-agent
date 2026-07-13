@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Project Matrix - 通用助手</title>
+<title>Matrix</title>
 <style>
   :root {
     --bg: #f5f5f7;
@@ -86,6 +86,10 @@
     flex: 0 0 auto;
     min-height: 0;
   }
+  .sb-hints-body { transition: max-height 0.2s ease, opacity 0.15s; overflow: hidden; }
+  .sb-hints-body.collapsed { max-height: 0; opacity: 0; padding: 0; }
+  .sb-hint { display: block; padding: 6px 16px 6px 28px; font-size: 12px; cursor: pointer; color: var(--text-secondary); transition: color 0.15s; }
+  .sb-hint:hover { color: var(--text); }
   .sb-section.sb-sessions {
     flex: 1 1 0%;
     overflow-y: auto;
@@ -345,12 +349,7 @@
     flex-direction: column;
     gap: 20px;
   }
-  .welcome { text-align: center; margin-top: 60px; padding: 0 20px; }
-  .welcome h2 { font-size: 26px; font-weight: 700; margin-bottom: 12px; background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-  .welcome p { color: var(--text-secondary); font-size: 14px; line-height: 1.7; max-width: 480px; margin: 0 auto; }
-  .welcome .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 24px; }
-  .hint { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 16px; font-size: 13px; cursor: pointer; color: var(--text-secondary); transition: all 0.15s; }
-  .hint:hover { border-color: var(--accent); color: var(--text); background: rgba(99,102,241,0.06); }
+
   .message { max-width: 800px; width: 100%; margin: 0 auto; }
   .message.user { margin-right: 0; margin-left: auto; }
   .message.user .bubble { background: var(--accent); padding: 10px 16px; border-radius: var(--radius); display: inline-block; max-width: 85%; text-align: left; font-size: 14px; line-height: 1.6; }
@@ -558,8 +557,7 @@
 </head>
 <body>
 <header>
-  <h1>Project Matrix</h1>
-  <span class="status"><span class="dot"></span> 通用助手 V1</span>
+  <h1>Matrix</h1>
 </header>
 <div class="layout">
   <aside class="sidebar">
@@ -584,6 +582,21 @@
       </div>
     </div>
 
+    <!-- Common questions section (collapsible) -->
+    <div class="sb-section">
+      <div class="sb-section-hd" onclick="toggleSection('hintsBody')">
+        <svg class="sb-chevron" id="hintsChevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <span>常用问题</span>
+      </div>
+      <div class="sb-list sb-hints-body" id="hintsBody">
+        <span class="sb-hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
+        <span class="sb-hint" data-msg="做一次组合复盘">组合复盘</span>
+        <span class="sb-hint" data-msg="检查配置偏离度">配置偏离检查</span>
+        <span class="sb-hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
+        <span class="sb-hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+      </div>
+    </div>
+
     <!-- Session list -->
     <div class="sb-section sb-sessions">
       <div class="sb-section-hd">
@@ -599,17 +612,6 @@
   </aside>
   <main id="chat">
     <div class="main-inner" id="chatInner">
-      <div class="welcome" id="welcome">
-        <h2>Project Matrix</h2>
-        <p>个人智能协作网络 · 通用助手</p>
-        <div class="hints">
-          <span class="hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
-          <span class="hint" data-msg="做一次组合复盘">组合复盘</span>
-          <span class="hint" data-msg="检查配置偏离度">配置偏离检查</span>
-          <span class="hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
-          <span class="hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
-        </div>
-      </div>
     </div>
   </main>
   <aside class="rpanel" id="rpanel">
@@ -866,9 +868,13 @@ function renderSkills() {
 
 function toggleSection(bodyId) {
   const body = document.getElementById(bodyId);
-  const chevron = document.getElementById('skillsChevron');
   body.classList.toggle('collapsed');
-  if (chevron) chevron.classList.toggle('collapsed');
+  // Find the chevron in the same section
+  const hd = body.parentElement.querySelector('.sb-section-hd');
+  if (hd) {
+    const chevron = hd.querySelector('.sb-chevron');
+    if (chevron) chevron.classList.toggle('collapsed');
+  }
 }
 
 // ---- Skill CRUD ----
@@ -1092,8 +1098,6 @@ function loadHistory() {
     .then(data => {
       const msgs = data.messages || [];
       if (msgs.length === 0) return;
-      const welcome = document.getElementById('welcome');
-      if (welcome) welcome.remove();
       const chat = document.getElementById('chat');
       const inner = document.getElementById('chatInner');
       msgs.forEach(m => {
@@ -1116,7 +1120,7 @@ function loadHistory() {
     });
 }
 
-document.querySelectorAll('.hint').forEach(hint => {
+document.querySelectorAll('.sb-hint').forEach(hint => {
   hint.addEventListener('click', () => {
     document.getElementById('input').value = hint.dataset.msg;
     send();
@@ -1336,9 +1340,6 @@ function send() {
   if (!msg) return;
   input.value = '';
   sending = true;
-
-  const welcome = document.getElementById('welcome');
-  if (welcome) welcome.remove();
 
   // Reset right panel
   resetRPanel();
