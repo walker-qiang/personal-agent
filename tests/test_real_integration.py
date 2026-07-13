@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+# Ensure JWT_SECRET is set for config loading in tests
+os.environ.setdefault("JWT_SECRET", "test-secret-key-for-real-tests")
+
 from matrix.chat import ChatService
 from matrix.config import load_config
 from matrix.llm import build_llm_client

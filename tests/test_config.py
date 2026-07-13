@@ -159,6 +159,7 @@ class TestLoadConfig:
         """load_config should work with defaults in the personal-agent repo."""
         monkeypatch.delenv("PERSONAL_OS_CACHE_PATH", raising=False)
         monkeypatch.delenv("MATRIX_CACHE_PATH", raising=False)
+        monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests")
         # Need to run from inside the repo for find_root
         config = load_config()
         assert config.host == "127.0.0.1"
@@ -170,5 +171,6 @@ class TestLoadConfig:
         os_cache.touch()
         monkeypatch.setenv("PERSONAL_OS_CACHE_PATH", str(os_cache))
         monkeypatch.setenv("MATRIX_CACHE_PATH", str(tmp_dir / "matrix-cache.sqlite"))
+        monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests")
         config = load_config()
         assert config.cache_path == os_cache.resolve()

@@ -43,6 +43,9 @@ ENV_SKILLS_DIR = "MATRIX_SKILLS_DIR"
 ENV_SKILLS_BASE_DIR = "MATRIX_SKILLS_BASE_DIR"  # root dir for skills/{common,investment,general}
 ENV_RATE_LIMIT_PER_SEC = "RATE_LIMIT_PER_SEC"
 ENV_MAX_MESSAGE_CHARS = "MAX_MESSAGE_CHARS"
+ENV_LOG_LEVEL = "LOG_LEVEL"
+ENV_JWT_SECRET = "JWT_SECRET"
+ENV_ADMIN_PASSWORD = "ADMIN_PASSWORD"
 
 # ---- Defaults ----
 
@@ -116,6 +119,9 @@ class AgentConfig:
     max_message_chars: int = 8000
     pipeline_provider: str = DEFAULT_PIPELINE_PROVIDER
     pipeline_model: str = DEFAULT_PIPELINE_MODEL
+    log_level: int = 20  # INFO
+    jwt_secret: str = ""
+    admin_password_hash: str = ""
 
     @property
     def active_api_key(self) -> str:
@@ -194,6 +200,33 @@ def load_config() -> AgentConfig:
     provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
 
+    # Log level: map string to int
+    level_str = os.environ.get(ENV_LOG_LEVEL, "INFO").strip().upper()
+    level_map = {
+        "DEBUG": 10,
+        "INFO": 20,
+        "WARNING": 30,
+        "WARN": 30,
+        "ERROR": 40,
+        "CRITICAL": 50,
+    }
+    log_level = level_map.get(level_str, 20)
+
+    # JWT secret: required
+    jwt_secret = os.environ.get(ENV_JWT_SECRET, "").strip()
+    if not jwt_secret:
+        raise ValueError(
+            "JWT_SECRET is required. Set it in .env (e.g. run: openssl rand -hex 32)"
+        )
+
+    # Admin password: optional, only used for first-run bootstrap (auto-create admin user).
+    # If not set and no users exist, the app will log a warning.
+    admin_password_hash = ""
+    raw_admin = os.environ.get(ENV_ADMIN_PASSWORD, "").strip()
+    if raw_admin:
+        from .auth import hash_password
+        admin_password_hash = hash_password(raw_admin)
+
     return AgentConfig(
         root_path=root,
         cache_path=cache_path,
@@ -222,6 +255,9 @@ def load_config() -> AgentConfig:
         or DEFAULT_PIPELINE_PROVIDER,
         pipeline_model=os.environ.get(ENV_PIPELINE_MODEL, DEFAULT_PIPELINE_MODEL).strip()
         or DEFAULT_PIPELINE_MODEL,
+        log_level=log_level,
+        jwt_secret=jwt_secret,
+        admin_password_hash=admin_password_hash,
     )
 
 

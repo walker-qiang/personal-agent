@@ -7,13 +7,19 @@ from fastapi import APIRouter, Request
 router = APIRouter()
 
 
+def _get_user_id(request: Request) -> str:
+    """Extract user_id from request state (set by AuthMiddleware)."""
+    return getattr(request.state, "user_id", "")
+
+
 @router.get("/sessions")
 async def list_sessions(request: Request):
-    """List recent chat sessions."""
+    """List recent chat sessions for the authenticated user."""
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    sessions = store.list_sessions(limit=20)
+    user_id = _get_user_id(request)
+    sessions = store.list_sessions(user_id=user_id, limit=20)
     return {"sessions": sessions}
 
 

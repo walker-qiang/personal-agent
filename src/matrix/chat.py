@@ -137,7 +137,7 @@ class ChatService:
             models.append({"provider": "agnes", "name": "Agnes AI", "models": VIDEO_MODELS.get("agnes", [])})
         return models
 
-    def get_provider(self, session_id: str | None = None) -> dict[str, str]:
+    def get_provider(self, session_id: str | None = None, user_id: str = "default") -> dict[str, str]:
         """Get the LLM provider and model for a session, falling back to default."""
         if session_id:
             provider = self.store.get_provider(session_id)
@@ -146,20 +146,21 @@ class ChatService:
                 return {"provider": provider, "model": model or default_model(provider)}
         return {"provider": self._default_provider, "model": default_model(self._default_provider)}
 
-    def switch_provider(self, session_id: str, provider: str, model: str = "") -> dict[str, Any]:
+    def switch_provider(self, session_id: str, provider: str, model: str = "", user_id: str = "default") -> dict[str, Any]:
         """Set the LLM provider and model for a specific session.
 
         Args:
             session_id: Session to configure.
             provider: One of 'deepseek', 'anthropic', 'agnes'.
             model: Specific model ID (optional, falls back to provider default).
+            user_id: Authenticated user ID.
 
         Returns:
             dict with 'ok', 'provider', and 'model' fields.
         """
         if provider not in {"deepseek", "anthropic", "agnes"}:
             return {"ok": False, "error": f"unsupported provider: {provider}"}
-        self.store.set_provider(session_id, provider, model)
+        self.store.set_provider(session_id, provider, model, user_id=user_id)
         return {"ok": True, "provider": provider, "model": model or default_model(provider)}
 
     def _build_llm(self, provider: str, model: str | None = None) -> LLMClient:
@@ -193,7 +194,7 @@ class ChatService:
         if session_id:
             self.store.reset(session_id)
 
-    def stream_chat(self, message: str, session_id: str | None = None) -> Iterator[dict[str, Any]]:
+    def stream_chat(self, message: str, session_id: str | None = None, user_id: str = "default") -> Iterator[dict[str, Any]]:
         """LangGraph-based streaming chat with classify → react/plan/skill → summarize → reflection."""
         started = time.perf_counter()
         sid = session_id or uuid.uuid4().hex
@@ -319,13 +320,13 @@ class ChatService:
                         answer_parts.append(event["content"])
                 answer = "".join(answer_parts)
                 if answer:
-                    self._remember(sid, text, answer)
+                    self._remember(sid, text, answer, user_id=user_id)
             else:
                 # Non-streaming path: yield once after reflection, then save
                 final_answer = final_state.get("final_answer", "")
                 if final_answer and not final_answer.startswith("所有领域专家"):
                     yield {"type": "token", "content": final_answer}
-                    self._remember(sid, text, final_answer)
+                    self._remember(sid, text, final_answer, user_id=user_id)
 
         except Exception as err:
             yield {"type": "error", "message": f"agent error: {err}"}
@@ -379,9 +380,9 @@ class ChatService:
     def _get_history(self, session_id: str) -> list[dict[str, str]]:
         return self.store.get_history(session_id, self.config.memory_max_turns)
 
-    def _remember(self, session_id: str, question: str, answer: str) -> None:
-        self.store.save_message(session_id, "user", question)
-        self.store.save_message(session_id, "assistant", answer)
+    def _remember(self, session_id: str, question: str, answer: str, user_id: str = "default") -> None:
+        self.store.save_message(session_id, "user", question, user_id=user_id)
+        self.store.save_message(session_id, "assistant", answer, user_id=user_id)
         self.store.update_title(session_id, question[:30].strip())
 
     def _stream_summarize(

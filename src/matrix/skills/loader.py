@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -9,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from ..logging_config import get_logger
+
+logger = get_logger("matrix.skills")
 
 SKILL_FILE = "SKILL.md"
 KNOWLEDGE_DIR = "references"
@@ -180,8 +185,7 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
         try:
             skills.append(SkillDefinition.from_dir(entry))
         except (yaml.YAMLError, OSError, ValueError, KeyError) as err:
-            import logging
-            logging.getLogger("matrix").warning("Failed to load skill dir %s: %s", entry.name, err)
+            logger.warning("Failed to load skill dir %s: %s", entry.name, err)
             continue
     return skills
 
@@ -334,8 +338,7 @@ def _parse_workflow(text: str) -> list[dict[str, Any]]:
             try:
                 args = _parse_args(args_str)
             except (ValueError, json.JSONDecodeError) as err:
-                import logging
-                logging.getLogger("matrix").warning(
+                logger.warning(
                     "Failed to parse args for tool %s: %s", tool_name, err
                 )
                 args = {}

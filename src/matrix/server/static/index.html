@@ -553,11 +553,91 @@
   .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error-block { background: rgba(239,68,68,0.1); border: 1px solid var(--error); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; color: var(--error); margin: 8px 0; }
   .duration { font-size: 11px; color: var(--text-secondary); margin-top: 6px; opacity: 0.6; }
+
+  /* Login overlay */
+  .login-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: var(--bg); z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 40px 36px; width: 360px; max-width: 90vw;
+    text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+  .login-card h1 { font-size: 28px; font-weight: 800; margin: 0 0 16px; color: var(--accent); }
+  .login-tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 2px solid var(--border); }
+  .login-tab {
+    flex: 1; padding: 8px 0; font-size: 14px; font-weight: 600;
+    color: var(--text-secondary); background: none; border: none;
+    cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .login-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .login-tab:hover { color: var(--text); }
+  .login-form { display: none; }
+  .login-form.active { display: block; }
+  .login-card input[type="text"],
+  .login-card input[type="password"] {
+    width: 100%; padding: 12px 16px; border: 1px solid var(--border);
+    border-radius: 10px; font-size: 15px; background: var(--bg);
+    color: var(--text); outline: none; box-sizing: border-box;
+    transition: border-color 0.2s; margin-bottom: 12px;
+  }
+  .login-card input[type="text"]:focus,
+  .login-card input[type="password"]:focus { border-color: var(--accent); }
+  .login-card button {
+    width: 100%; margin-top: 16px; padding: 12px;
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 10px; font-size: 15px; font-weight: 600;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .login-card button:hover { background: var(--accent-hover); }
+  .login-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .login-error {
+    margin-top: 12px; padding: 8px; border-radius: 8px;
+    background: rgba(239,68,68,0.1); color: var(--error); font-size: 13px;
+  }
+  .logout-btn {
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    padding: 4px 8px; cursor: pointer; color: var(--text-secondary);
+    display: flex; align-items: center; transition: color 0.15s;
+  }
+  .logout-btn:hover { color: var(--error); border-color: var(--error); }
+  .logout-btn svg { width: 18px; height: 18px; }
 </style>
 </head>
 <body>
+<!-- Auth overlay -->
+<div id="loginOverlay" class="login-overlay" style="display:none">
+  <div class="login-card">
+    <h1>Matrix</h1>
+    <div class="login-tabs">
+      <button class="login-tab active" onclick="switchAuthTab('login')">登录</button>
+      <button class="login-tab" onclick="switchAuthTab('register')">注册</button>
+    </div>
+    <!-- Login form -->
+    <form id="loginForm" class="login-form active" onsubmit="return handleLogin()">
+      <input type="text" id="loginUsername" placeholder="用户名" autocomplete="username" required>
+      <input type="password" id="loginPassword" placeholder="密码" autocomplete="current-password" required>
+      <div id="loginError" class="login-error" style="display:none"></div>
+      <button type="submit" id="loginBtn">登录</button>
+    </form>
+    <!-- Register form -->
+    <form id="registerForm" class="login-form" onsubmit="return handleRegister()">
+      <input type="text" id="regUsername" placeholder="用户名" autocomplete="username" required>
+      <input type="password" id="regPassword" placeholder="密码（至少4位）" autocomplete="new-password" required>
+      <input type="password" id="regPasswordConfirm" placeholder="确认密码" autocomplete="new-password" required>
+      <div id="registerError" class="login-error" style="display:none"></div>
+      <button type="submit" id="registerBtn">注册</button>
+    </form>
+  </div>
+</div>
 <header>
   <h1>Matrix</h1>
+  <button id="logoutBtn" class="logout-btn" style="display:none" onclick="handleLogout()" title="退出登录">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+  </button>
 </header>
 <div class="layout">
   <aside class="sidebar">
@@ -648,10 +728,213 @@
   </div>
 </footer>
 
+<script src="marked.min.js"></script>
 <script>
+// ---- Auth / Token Management ----
+const AUTH_TOKEN_KEY = 'mx_token';
+
+function getToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setToken(token) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+function clearToken() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+async function checkAuthStatus() {
+  const token = getToken();
+  if (!token) {
+    showLogin();
+    return false;
+  }
+  hideLogin();
+  return true;
+}
+
+function showLogin() {
+  document.getElementById('loginOverlay').style.display = 'flex';
+  document.getElementById('logoutBtn').style.display = 'none';
+  document.getElementById('loginUsername').focus();
+}
+
+function hideLogin() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('logoutBtn').style.display = '';
+}
+
+async function handleLogin() {
+  const btn = document.getElementById('loginBtn');
+  const errEl = document.getElementById('loginError');
+  btn.disabled = true;
+  btn.textContent = '登录中...';
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password }),
+    });
+    const data = await resp.json();
+    if (resp.ok && data.token) {
+      setToken(data.token);
+      hideLogin();
+      document.getElementById('loginPassword').value = '';
+      document.getElementById('loginUsername').value = '';
+      errEl.style.display = 'none';
+      // Reload sessions after login
+      loadSessions();
+    } else {
+      errEl.textContent = data.detail || '用户名或密码错误';
+      errEl.style.display = 'block';
+      document.getElementById('loginPassword').value = '';
+      document.getElementById('loginUsername').focus();
+    }
+  } catch (e) {
+    errEl.textContent = '网络错误，请重试';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登录';
+  }
+  return false;
+}
+
+function switchAuthTab(tab) {
+  const tabs = document.querySelectorAll('.login-tab');
+  const forms = document.querySelectorAll('.login-form');
+  tabs.forEach(t => t.classList.toggle('active', t.textContent === (tab === 'login' ? '登录' : '注册')));
+  forms.forEach(f => {
+    const isLogin = f.id === 'loginForm';
+    f.classList.toggle('active', (tab === 'login' && isLogin) || (tab === 'register' && !isLogin));
+  });
+  // Clear errors and focus first input of active form
+  document.getElementById('loginError').style.display = 'none';
+  document.getElementById('registerError').style.display = 'none';
+  if (tab === 'login') {
+    document.getElementById('loginUsername').focus();
+  } else {
+    document.getElementById('regUsername').focus();
+  }
+}
+
+async function handleRegister() {
+  const btn = document.getElementById('registerBtn');
+  const errEl = document.getElementById('registerError');
+  btn.disabled = true;
+  btn.textContent = '注册中...';
+  const username = document.getElementById('regUsername').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const confirm = document.getElementById('regPasswordConfirm').value;
+
+  if (password !== confirm) {
+    errEl.textContent = '两次密码不一致';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = '注册';
+    return false;
+  }
+
+  try {
+    const resp = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password }),
+    });
+    const data = await resp.json();
+    if (resp.ok && data.token) {
+      setToken(data.token);
+      hideLogin();
+      document.getElementById('regPassword').value = '';
+      document.getElementById('regPasswordConfirm').value = '';
+      document.getElementById('regUsername').value = '';
+      errEl.style.display = 'none';
+      loadSessions();
+    } else {
+      errEl.textContent = data.detail || '注册失败';
+      errEl.style.display = 'block';
+      document.getElementById('regPassword').value = '';
+      document.getElementById('regPasswordConfirm').value = '';
+      document.getElementById('regUsername').focus();
+    }
+  } catch (e) {
+    errEl.textContent = '网络错误，请重试';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '注册';
+  }
+  return false;
+}
+
+async function handleLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) { /* ignore */ }
+  clearToken();
+  showLogin();
+  // Clear the chat UI
+  document.getElementById('chatInner').innerHTML = '';
+  document.getElementById('sbSessions').innerHTML = '<div class="no-sessions">暂无会话</div>';
+}
+
+// Override fetch to inject Authorization header
+const _origFetch = window.fetch;
+window.fetch = function(url, options) {
+  const token = getToken();
+  if (token) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (!options.headers['Authorization']) {
+      options.headers['Authorization'] = 'Bearer ' + token;
+    }
+  }
+  return _origFetch(url, options).then(function(resp) {
+    // If token expired (401), redirect to login
+    if (resp.status === 401) {
+      clearToken();
+      showLogin();
+    }
+    return resp;
+  });
+};
+
 const SESSION = localStorage.getItem('mx_session') || ('web-' + Math.random().toString(36).slice(2, 8));
 localStorage.setItem('mx_session', SESSION);
 let sending = false;
+
+// Configure marked.js
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  // Sanitize URLs for XSS protection
+  linkSanitizer: function(url) {
+    return sanitizeUrl(url);
+  },
+  imageSanitizer: function(url) {
+    return sanitizeUrl(url);
+  },
+});
+
+// ---- HTML sanitizer for XSS protection ----
+function sanitizeHtml(html) {
+  const el = document.createElement('div');
+  el.textContent = html;
+  return el.innerHTML;
+}
+
+function sanitizeUrl(url) {
+  const allowed = /^(https?:|data:image\/)/i;
+  if (!allowed.test(url)) return '#';
+  // Strip javascript: and other dangerous protocols
+  if (/^javascript:/i.test(url)) return '#';
+  return url;
+}
 
 // ---- Provider management (per-session, in footer) ----
 let _providers = [];
@@ -828,9 +1111,15 @@ function deleteSession(id) {
   });
 }
 
-loadSessions();
-loadHistory();
-loadSkills();
+// Init: check auth first, then load data
+(async function() {
+  const authed = await checkAuthStatus();
+  if (authed) {
+    loadSessions();
+    loadHistory();
+    loadSkills();
+  }
+})();
 
 // ---- Load skills for quick entries ----
 let _skillsData = [];
@@ -1131,74 +1420,11 @@ document.getElementById('input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
-// ---- Markdown renderer ----
+// ---- Markdown renderer using marked.js (better compatibility) ----
 function renderMarkdown(text) {
   if (!text) return '';
-  let html = text;
-  // Code blocks (fenced)
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>');
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Italic
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  // Headers
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Blockquote
-  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  // Horizontal rule
-  html = html.replace(/^---$/gm, '<hr>');
-  // Unordered list items
-  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
-  // Ordered list items
-  html = html.replace(/^(\d+)\. (.+)$/gm, '<li>$1. $2</li>');
-  // Wrap consecutive <li> in <ul> or <ol>
-  html = html.replace(/((?:<li>.*?<\/li>\n?)+)/g, (match) => {
-    if (match.match(/<li>\d+\./)) return '<ol>' + match + '</ol>';
-    return '<ul>' + match + '</ul>';
-  });
-  // Tables
-  html = html.replace(/^\|(.+)\|\s*\n\|[-:| ]+\|\s*\n((?:\|.+\|\s*\n?)*)/gm, (_, header, rows) => {
-    const hcells = header.split('|').map(c => c.trim()).filter(c => c);
-    let tbl = '<table><thead><tr>';
-    hcells.forEach(c => { tbl += '<th>' + c + '</th>'; });
-    tbl += '</tr></thead><tbody>';
-    rows.trim().split('\n').forEach(row => {
-      const cells = row.split('|').map(c => c.trim()).filter(c => c);
-      tbl += '<tr>';
-      cells.forEach(c => { tbl += '<td>' + c + '</td>'; });
-      tbl += '</tr>';
-    });
-    tbl += '</tbody></table>';
-    return tbl;
-  });
-  // Images: ![alt](url)
-  html = html.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_, alt, url) => {
-    // extract optional title: url "title"
-    const parts = url.match(/^([^\s]+)\s+"([^"]*)"$/);
-    const src = parts ? parts[1] : url;
-    const title = parts ? parts[2] : '';
-    return '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(alt) + '"' + (title ? ' title="' + escapeHtml(title) + '"' : '') + ' style="max-width:100%;border-radius:8px;margin:8px 0">';
-  });
-  // Video embeds: ![video](url) — detect .mp4/.webm/.mov in url
-  html = html.replace(/<img src="([^"]+)" alt="([^"]*)"([^>]*)>/g, (match, src, alt, rest) => {
-    if (/\.(mp4|webm|mov)(\?|$)/i.test(src)) {
-      return '<video controls style="max-width:100%;max-height:500px;border-radius:8px;margin:8px 0" src="' + src + '"' + (alt ? ' title="' + alt + '"' : '') + '></video>';
-    }
-    return match;
-  });
-  // Links: [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  // Paragraphs (double newline)
-  html = html.replace(/\n\n/g, '</p><p>');
-  html = '<p>' + html + '</p>';
-  // Clean up empty paragraphs
-  html = html.replace(/<p><\/p>/g, '');
-  html = html.replace(/<p>(\s*<[^>]+>.*?<\/[^>]+>\s*)<\/p>/g, '$1');
-  return html;
+  // Use marked.js to parse Markdown
+  return marked.parse(text);
 }
 
 function escapeHtml(s) {
@@ -1255,7 +1481,8 @@ function formatToolResultObject(obj) {
     html += '<div style="display:flex;flex-wrap:wrap;gap:10px">';
     obj.images.forEach(img => {
       if (img.url) {
-        html += '<a href="' + escapeHtml(img.url) + '" target="_blank"><img src="' + escapeHtml(img.url) + '" alt="' + escapeHtml(obj.prompt || '') + '" style="max-width:300px;max-height:300px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy"></a>';
+        const safeUrl = sanitizeUrl(img.url);
+        html += '<a href="' + escapeHtml(safeUrl) + '" target="_blank"><img src="' + escapeHtml(safeUrl) + '" alt="' + escapeHtml(obj.prompt || '') + '" style="max-width:300px;max-height:300px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy"></a>';
       }
     });
     html += '</div>';
@@ -1268,7 +1495,8 @@ function formatToolResultObject(obj) {
     if (obj.prompt) html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">&#x1F3AC; ' + escapeHtml(obj.prompt) + '</div>';
     obj.videos.forEach(v => {
       if (v.url) {
-        html += '<video controls style="max-width:100%;max-height:400px;border-radius:8px;margin:6px 0" src="' + escapeHtml(v.url) + '"></video>';
+        const safeUrl = sanitizeUrl(v.url);
+        html += '<video controls style="max-width:100%;max-height:400px;border-radius:8px;margin:6px 0" src="' + escapeHtml(safeUrl) + '"></video>';
       }
     });
     if (obj.duration) html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">时长: ' + obj.duration + 's | 分辨率: ' + escapeHtml(obj.resolution || '') + '</div>';
@@ -1369,7 +1597,10 @@ function send() {
     message: encodeURIComponent(msg),
     session_id: SESSION,
   });
-  const es = new EventSource('/chat/stream?' + params.toString());
+  // EventSource doesn't support custom headers, pass token as query param
+  const token = getToken();
+  const streamUrl = '/chat/stream?' + params.toString() + (token ? '&token=' + encodeURIComponent(token) : '');
+  const es = new EventSource(streamUrl);
 
   es.addEventListener('classify', (e) => {
     document.getElementById('rpanel').classList.add('open');

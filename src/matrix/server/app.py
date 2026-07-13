@@ -2,25 +2,27 @@
 
 from __future__ import annotations
 
-import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from ..chat import ChatService
 from ..config import AgentConfig, load_config
+from ..logging_config import RequestIdFilter, get_logger, setup_logging
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
-from .routes import chat, health, provider, sessions, tools
+from .routes import chat, health, provider, sessions, tools, auth
+from .middleware import AuthMiddleware
 
-logger = logging.getLogger("matrix")
+logger = get_logger("matrix")
 
 # Pre-load the Web UI HTML content at module level
 _INDEX_HTML = ""
@@ -41,6 +43,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.tools = tools_registry
     app.state.trace = trace
     app.state.chat = ChatService(config, tools_registry, trace)
+    # Bootstrap admin user on first run (no users in DB yet)
+    if config.admin_password_hash:
+        if app.state.chat.store.user_count() == 0:
+            created = app.state.chat.store.create_user("admin", config.admin_password_hash)
+            if created:
+                logger.info("Created admin user (first-run bootstrap)")
+    else:
+        if app.state.chat.store.user_count() == 0:
+            logger.warning(
+                "No users exist and ADMIN_PASSWORD is not set. "
+                "Create a user via the API or set ADMIN_PASSWORD in .env."
+            )
     logger.info("matrix agent listening on http://%s:%s", config.host, config.port)
     logger.info("mode=read-only cache=%s trace=%s", config.cache_path, config.trace_path)
     yield
@@ -49,6 +63,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(config: AgentConfig | None = None) -> FastAPI:
     """Create the FastAPI application with all routes and middleware."""
     cfg = config or load_config()
+
+    # Initialize structured logging
+    setup_logging(level=cfg.log_level)
 
     app = FastAPI(
         title="Matrix",
@@ -66,12 +83,27 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Request ID middleware — injects a unique ID per request into logs
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next):
+        rid = request.headers.get("X-Request-ID", uuid.uuid4().hex[:12])
+        RequestIdFilter.set_request_id(rid)
+        logger.info("request=%s %s", request.method, request.url.path)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = rid
+        RequestIdFilter.set_request_id(None)
+        return response
+
     # Register API routes FIRST (before any catch-all routes)
+    app.include_router(auth.router)
     app.include_router(tools.router)
     app.include_router(chat.router)
     app.include_router(health.router)
     app.include_router(sessions.router)
     app.include_router(provider.router)
+
+    # Auth middleware — verify JWT on protected routes
+    app.add_middleware(AuthMiddleware)
 
     # Serve Web UI at root (LAST, so API routes take priority)
     @app.get("/", include_in_schema=False)

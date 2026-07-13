@@ -16,6 +16,11 @@ from .sse import sse_event, sse_response
 router = APIRouter()
 
 
+def _get_user_id(request: Request) -> str:
+    """Extract user_id from request state (set by AuthMiddleware)."""
+    return getattr(request.state, "user_id", "default")
+
+
 @router.post("/chat")
 async def chat(request: Request):
     chat_service: ChatService = request.app.state.chat
@@ -33,8 +38,10 @@ async def chat(request: Request):
             {"error": f"invalid chat request: {err}"}, status_code=400
         )
 
+    user_id = _get_user_id(request)
+
     def iter_events():
-        for event in chat_service.stream_chat(message, session_id):
+        for event in chat_service.stream_chat(message, session_id, user_id=user_id):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)
@@ -55,8 +62,10 @@ async def chat_stream(
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
 
+    user_id = _get_user_id(request)
+
     def iter_events():
-        for event in chat_service.stream_chat(message, session_id):
+        for event in chat_service.stream_chat(message, session_id, user_id=user_id):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)

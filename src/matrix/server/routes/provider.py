@@ -8,6 +8,11 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
+def _get_user_id(request: Request) -> str:
+    """Extract user_id from request state (set by AuthMiddleware)."""
+    return getattr(request.state, "user_id", "")
+
+
 @router.get("/api/provider")
 async def get_providers(request: Request):
     """List available LLM, image, and video providers."""
@@ -15,12 +20,13 @@ async def get_providers(request: Request):
 
     chat = request.app.state.chat
     session_id = request.query_params.get("session_id", "").strip() or None
+    user_id = _get_user_id(request)
 
     return JSONResponse({
         "providers": chat.available_providers,
         "image_models": chat.available_image_models,
         "video_models": chat.available_video_models,
-        "current": chat.get_provider(session_id),
+        "current": chat.get_provider(session_id, user_id=user_id),
     })
 
 
@@ -42,12 +48,13 @@ async def switch_provider(request: Request):
     provider = data.get("provider", "").strip().lower()
     model = data.get("model", "").strip()
     session_id = data.get("session_id", "").strip()
+    user_id = _get_user_id(request)
     if not session_id:
         return JSONResponse({"ok": False, "error": "session_id is required"}, status_code=400)
     if not provider:
         return JSONResponse({"ok": False, "error": "provider is required"}, status_code=400)
 
-    result = chat.switch_provider(session_id, provider, model)
+    result = chat.switch_provider(session_id, provider, model, user_id=user_id)
     if result["ok"]:
         return JSONResponse(result)
     return JSONResponse(result, status_code=400)

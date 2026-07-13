@@ -152,3 +152,21 @@ def agent_config(tmp_cache_path: Path) -> AgentConfig:
         port=0,
         deepseek_api_key="test-key",
     )
+
+
+@pytest.fixture
+async def async_client(agent_config: AgentConfig):
+    """Create an async FastAPI test client with auth configured."""
+    from httpx import ASGITransport, AsyncClient
+    from matrix.server.app import create_app
+    from matrix.auth import hash_password
+
+    # Override config to enable auth
+    config = agent_config
+    object.__setattr__(config, "admin_password_hash", hash_password("test-password"))
+    object.__setattr__(config, "jwt_secret", "test-jwt-secret-for-auth-tests")
+
+    app = create_app(config)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
