@@ -56,16 +56,14 @@ def generate_image(
     size: str = "1024x1024",
     quality: str = "hd",
     n: int = 1,
-    style: str = "photorealistic",
 ) -> dict[str, Any]:
-    """Generate an image using Agnes-Image-2.0-Flash.
+    """Generate an image using Agnes-Image-2.1-Flash.
 
     Args:
         prompt: Image description (text prompt, English preferred)
         size: Image size, one of 1024x1024, 1792x1024, 1024x1792
         quality: standard or hd (default hd for best quality)
         n: Number of images to generate (1-4)
-        style: Visual style — photorealistic, artistic, anime, oil-painting, sketch
     """
     if not AGNES_API_KEY:
         return {"error": "AGNES_API_KEY not configured", "images": []}
@@ -74,19 +72,16 @@ def generate_image(
     valid_sizes = {"1024x1024", "1792x1024", "1024x1792", "512x512", "256x256"}
     size = size if size in valid_sizes else "1024x1024"
     quality = quality if quality in ("standard", "hd") else "hd"
-    valid_styles = {"photorealistic", "artistic", "anime", "oil-painting", "sketch", "3d-render", "watercolor"}
-    style = style if style in valid_styles else "photorealistic"
 
     # Code-level quality enhancement: guarantees baseline quality keywords
     prompt = _enhance_image_prompt(prompt)
 
     payload = json.dumps({
-        "model": "agnes-image-2.0-flash",
+        "model": "agnes-image-2.1-flash",
         "prompt": prompt,
         "n": n,
         "size": size,
         "quality": quality,
-        "style": style,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -113,7 +108,7 @@ def generate_image(
 
 image_tool = ToolDefinition(
     name="agnes.generate_image",
-    description="使用 Agnes Image 2.0 Flash 生成高质量图片。LLM 负责描述画面内容（场景、主体、动作、氛围），代码自动追加质量关键词。支持多种视觉风格。",
+    description="使用 Agnes Image 2.1 Flash 生成高质量图片。LLM 负责描述画面内容，代码自动追加质量关键词。",
     input_schema={
         "type": "object",
         "properties": {
@@ -130,11 +125,6 @@ image_tool = ToolDefinition(
                 "type": "string",
                 "enum": ["standard", "hd"],
                 "description": "图片质量，默认 hd（高清）",
-            },
-            "style": {
-                "type": "string",
-                "enum": ["photorealistic", "artistic", "anime", "oil-painting", "sketch", "3d-render", "watercolor"],
-                "description": "视觉风格，默认 photorealistic（逼真摄影）",
             },
             "n": {
                 "type": "integer",

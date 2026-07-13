@@ -232,7 +232,7 @@ class ChatService:
         try:
             emitted_tool_count = 0
             emitted_agent_count = 0
-            last_answer = ""
+            classify_emitted = False
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
             for event in self._compiled_graph.stream(
@@ -256,7 +256,8 @@ class ChatService:
 
                 # Emit classify event when delegation_plan is first set by commander_plan
                 delegation_plan = event.get("delegation_plan")
-                if delegation_plan is not None and emitted_agent_count == 0:
+                if delegation_plan is not None and not classify_emitted:
+                    classify_emitted = True
                     # Determine intent: commander-only plan = simple, multi-agent = delegate
                     intent = "delegate" if len(delegation_plan) > 1 or (
                         delegation_plan and delegation_plan[0].get("agent_id") != "commander"
@@ -309,14 +310,6 @@ class ChatService:
                 if error:
                     yield {"type": "error", "message": error}
 
-                # Yield final answer (non-streaming path) — do NOT save yet;
-                # reflection_node may modify it after summarization
-                answer = event.get("final_answer", "")
-                needs_summary = event.get("needs_summary", False)
-                if answer and not needs_summary and answer != last_answer:
-                    last_answer = answer
-                    yield {"type": "token", "content": answer}
-
             # Streaming summarization
             if final_state.get("needs_summary"):
                 answer_parts: list[str] = []
@@ -328,9 +321,10 @@ class ChatService:
                 if answer:
                     self._remember(sid, text, answer)
             else:
-                # Non-streaming path: save the reflection-modified answer
+                # Non-streaming path: yield once after reflection, then save
                 final_answer = final_state.get("final_answer", "")
                 if final_answer and not final_answer.startswith("所有领域专家"):
+                    yield {"type": "token", "content": final_answer}
                     self._remember(sid, text, final_answer)
 
         except Exception as err:

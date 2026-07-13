@@ -98,8 +98,9 @@ When calling `agnes.generate_image` or `agnes.generate_video`, follow these rule
 - User says "一只猫" → your prompt: "A fluffy orange tabby cat sitting on a wooden windowsill, soft morning light streaming through lace curtains, shallow depth of field focusing on the cat's green eyes, warm cozy atmosphere, dust particles dancing in the light"
 - User says "老虎捕猎北极熊" → your prompt: "A Siberian tiger in mid-pounce, muscles tensed, mouth open showing sharp teeth, targeting a polar bear on a snowy Arctic ice field, dramatic overcast sky, snow particles in the air, low camera angle, intense action shot, cold blue-white color palette"
 
-**Style selection:**
-- For images, default to `photorealistic` style unless the user explicitly asks for a different style (artistic, anime, oil-painting, sketch, 3d-render, watercolor)
+**Style guidance:**
+- If the user asks for a specific style (artistic, anime, oil-painting, sketch, 3d-render, watercolor), describe it in the prompt — e.g., "anime style illustration of..."
+- Default is photorealistic — no need to mention it explicitly
 - For videos, use the default settings (1152x768, 121 frames, 24fps ≈ 5 seconds). Only change if the user asks for specific duration or quality.
 
 **Video generation note:**
@@ -513,21 +514,19 @@ def _run_domain_agent_react(
                 continue
 
             if result.content:
-                # Tool Gate: on first iteration, if the model returns text without
-                # calling tools but the agent has tools available, force a retry.
-                # Detects both explicit refusals AND hallucinations (pretending to
-                # have completed the task without actually calling tools).
-                if iteration == 1 and llm_tools and (
-                    _is_refusal(result.content) or _is_hallucination(result.content)
-                ):
+                # Tool Gate: if the model returns text without calling tools but
+                # the agent has tools available, force a retry.
+                # Only applies to domain agents (non-commander) — the commander
+                # may legitimately answer without tools for simple questions.
+                is_domain_agent = agent_def.id != "commander"
+                if iteration == 1 and llm_tools and is_domain_agent:
                     retry_result = _force_tool_call(llm, system_prompt, task, llm_tools)
                     if retry_result.tool_calls:
                         _run_tool_calls(retry_result.tool_calls, tool_results, tools, cfg)
                         continue
                     if retry_result.content:
                         return {"answer": retry_result.content.strip(), "tool_results": tool_results, "findings": []}
-                    # _force_tool_call failed — do NOT fall through to the hallucination.
-                    # Return a clear error instead.
+                    # _force_tool_call failed — do NOT fall through to useless text.
                     return {
                         "answer": "抱歉，我无法完成此任务。请检查工具是否可用，或尝试用其他方式描述您的需求。",
                         "tool_results": tool_results,

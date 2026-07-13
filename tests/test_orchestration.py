@@ -169,7 +169,20 @@ class TestCommanderPlanNode:
 class TestDelegateNode:
     def test_delegate_executes_agent(self, base_state, full_tools, agent_registry):
         """Domain agent runs ReAct with function calling."""
-        llm = FakeLLM(["当前持仓健康，共2个持仓。"])
+        from matrix.llm import FunctionCallResult, ToolCall
+
+        class ToolLLM(FakeLLM):
+            def function_call(self, system, messages, tools, tool_choice="auto"):
+                self.calls.append(("function_call", messages))
+                return FunctionCallResult(
+                    content="",
+                    tool_calls=[ToolCall(name="finance.holdings_summary", arguments={})],
+                )
+            def complete(self, system, messages):
+                self.calls.append(("complete", messages))
+                return "当前持仓健康，共2个持仓。"
+
+        llm = ToolLLM([])
         state = base_state(
             delegation_plan=[
                 {"step": 1, "agent_id": "investment-analyst", "task": "分析当前持仓", "skill_name": "", "purpose": "获取持仓"},

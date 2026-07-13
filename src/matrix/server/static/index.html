@@ -87,7 +87,7 @@
     min-height: 0;
   }
   .sb-hints-body { transition: max-height 0.2s ease, opacity 0.15s; overflow: hidden; }
-  .sb-hints-body.collapsed { max-height: 0; opacity: 0; padding: 0; }
+  .sb-hints-body.collapsed { max-height: 0; opacity: 0; padding: 0; display: none; }
   .sb-hint { display: block; padding: 6px 16px 6px 28px; font-size: 12px; cursor: pointer; color: var(--text-secondary); transition: color 0.15s; }
   .sb-hint:hover { color: var(--text); }
   .sb-section.sb-sessions {
@@ -585,10 +585,10 @@
     <!-- Common questions section (collapsible) -->
     <div class="sb-section">
       <div class="sb-section-hd" onclick="toggleSection('hintsBody')">
-        <svg class="sb-chevron" id="hintsChevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <svg class="sb-chevron collapsed" id="hintsChevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
         <span>常用问题</span>
       </div>
-      <div class="sb-list sb-hints-body" id="hintsBody">
+      <div class="sb-list sb-hints-body collapsed" id="hintsBody">
         <span class="sb-hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
         <span class="sb-hint" data-msg="做一次组合复盘">组合复盘</span>
         <span class="sb-hint" data-msg="检查配置偏离度">配置偏离检查</span>
@@ -1381,6 +1381,10 @@ function send() {
     // Build agent execution chain in chat (skip if only commander — internal fallback)
     const isCommanderOnly = data.delegation_plan && data.delegation_plan.length === 1 && data.delegation_plan[0].agent_id === 'commander';
     if (data.delegation_plan && data.delegation_plan.length > 0 && !isCommanderOnly) {
+      // Remove any existing chain (safety: prevent duplicates from duplicate classify events)
+      const oldChain = asst.querySelector('.agent-chain');
+      if (oldChain) oldChain.remove();
+      executionChain.length = 0;
       const chain = document.createElement('div');
       chain.className = 'agent-chain';
       const steps = data.delegation_plan.map(p => p.agent_id + ': ' + p.task).join(' | ');
@@ -1464,9 +1468,8 @@ function send() {
     if (next) {
       next.el.classList.add('running');
     } else {
-      // All steps done — hide chain immediately
-      const chain = asst.querySelector('.agent-chain');
-      if (chain) chain.style.display = 'none';
+      // All steps done — hide all chains immediately
+      asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
     }
     if (data.error) {
       addRPArtifact(aid + '-error', data.error);
@@ -1475,8 +1478,7 @@ function send() {
 
   es.addEventListener('error', (e) => {
     hideStatus(statusBar);
-    const chain = asst.querySelector('.agent-chain');
-    if (chain) chain.style.display = 'none';
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
     executionChain.forEach(s => s.el.classList.remove('running'));
     document.getElementById('rpanel').classList.remove('open');
     try {
@@ -1487,9 +1489,8 @@ function send() {
 
   es.addEventListener('done', (e) => {
     hideStatus(statusBar);
-    // Hide agent chain — internal orchestration, not for end users
-    const chain = asst.querySelector('.agent-chain');
-    if (chain) chain.style.display = 'none';
+    // Hide all agent chains — internal orchestration, not for end users
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
     // Ensure no running animation remains
     executionChain.forEach(s => s.el.classList.remove('running'));
     try {
@@ -1510,8 +1511,7 @@ function send() {
 
   es.onerror = () => {
     hideStatus(statusBar);
-    const chain = asst.querySelector('.agent-chain');
-    if (chain) chain.style.display = 'none';
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
     executionChain.forEach(s => s.el.classList.remove('running'));
     es.close();
     sending = false;
