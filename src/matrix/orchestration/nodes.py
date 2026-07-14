@@ -508,9 +508,9 @@ def _run_domain_agent_react(
                             [{"role": "user", "content": context + "\nAll tool calls were duplicates. "
                              "Summarize the existing results for the user. If tools failed, explain the failure."}],
                         )
-                        return {"answer": summary.strip(), "tool_results": tool_results, "findings": []}
+                        return {"answer": _fix_media_answer(summary.strip(), tool_results), "tool_results": tool_results, "findings": []}
                     except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
-                        return {"answer": "工具调用已完成，但无法生成总结。", "tool_results": tool_results, "findings": []}
+                        return {"answer": _fix_media_answer("工具调用已完成，但无法生成总结。", tool_results), "tool_results": tool_results, "findings": []}
                 continue
 
             if result.content:
@@ -525,15 +525,15 @@ def _run_domain_agent_react(
                         _run_tool_calls(retry_result.tool_calls, tool_results, tools, cfg)
                         continue
                     if retry_result.content:
-                        return {"answer": retry_result.content.strip(), "tool_results": tool_results, "findings": []}
+                        return {"answer": _fix_media_answer(retry_result.content.strip(), tool_results), "tool_results": tool_results, "findings": []}
                     # _force_tool_call failed — do NOT fall through to useless text.
                     return {
-                        "answer": "抱歉，我无法完成此任务。请检查工具是否可用，或尝试用其他方式描述您的需求。",
+                        "answer": _fix_media_answer("抱歉，我无法完成此任务。请检查工具是否可用，或尝试用其他方式描述您的需求。", tool_results),
                         "tool_results": tool_results,
                         "findings": [],
                         "error": "force_tool_call_failed",
                     }
-                return {"answer": result.content.strip(), "tool_results": tool_results, "findings": []}
+                return {"answer": _fix_media_answer(result.content.strip(), tool_results), "tool_results": tool_results, "findings": []}
 
         except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
             pass
@@ -541,20 +541,70 @@ def _run_domain_agent_react(
         # Fallback: regex-based ReAct
         react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm)
         if react_result.get("answer"):
+            react_result["answer"] = _fix_media_answer(react_result["answer"], tool_results)
             return react_result
         if react_result.get("tool_results"):
             tool_results = react_result["tool_results"]
             continue
 
         # No progress, break
-        return {"answer": "无法完成任务，请检查工具和数据。", "tool_results": tool_results, "findings": []}
+        return {"answer": _fix_media_answer("无法完成任务，请检查工具和数据。", tool_results), "tool_results": tool_results, "findings": []}
 
     # Max iterations reached
     return {
-        "answer": "已达到最大分析步数，请基于已有数据回答。",
+        "answer": _fix_media_answer("已达到最大分析步数，请基于已有数据回答。", tool_results),
         "tool_results": tool_results,
         "findings": [],
     }
+
+
+def _extract_media_urls(tool_results: list[dict]) -> str:
+    """Extract image/video URLs from tool results as Markdown."""
+    lines = []
+    for tr in tool_results:
+        name = tr.get("name", "")
+        result = tr.get("result", {})
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(result, dict):
+            continue
+        if name == "agnes.generate_image" and result.get("images"):
+            for img in result["images"]:
+                url = img.get("url", "")
+                if url:
+                    desc = result.get("prompt", "生成的图片")[:50]
+                    lines.append(f"![{desc}]({url})")
+        elif name == "agnes.generate_video" and result.get("videos"):
+            for vid in result["videos"]:
+                url = vid.get("url", "")
+                if url:
+                    desc = result.get("prompt", "生成的视频")[:50]
+                    lines.append(f"![{desc}]({url})")
+    return "\n".join(lines)
+
+
+def _fix_media_answer(answer: str, tool_results: list[dict]) -> str:
+    """If the model hallucinates 'can't generate' but tools actually succeeded,
+    replace the answer with the actual media results."""
+    if not tool_results or not answer:
+        return answer
+    # Detect "can't do" / "unable" / "sorry" type responses
+    negative = ["无法", "不能", "can't", "cannot", "can not", "抱歉", "sorry", "unable", "无法直接"]
+    is_negative = any(phrase in answer.lower() for phrase in negative)
+    if not is_negative:
+        return answer
+    # Check if any generation tool actually succeeded
+    media_urls = _extract_media_urls(tool_results)
+    if not media_urls:
+        return answer
+    # Replace with positive answer showing the actual results
+    lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in answer) else "en"
+    if lang == "zh":
+        return f"好的，已成功生成！\n\n{media_urls}"
+    return f"Done! Generated successfully.\n\n{media_urls}"
 
 
 def _run_tool_calls(
@@ -739,10 +789,15 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     # Build results summary for Commander
     results_summary = []
     for r in agent_results:
+        # Extract media URLs from tool_results to ensure they survive truncation
+        media_urls = _extract_media_urls(r.get("tool_results", []))
+        result_text = r.get("result", "")
+        if media_urls and not any(u in result_text for u in media_urls):
+            result_text = media_urls + "\n\n" + result_text
         summary = {
             "agent": r["agent_id"],
             "task": r.get("task", ""),
-            "result": r.get("result", "")[:1000],  # truncate
+            "result": result_text[:2000],  # larger limit for media results
             "error": r.get("error", ""),
         }
         results_summary.append(summary)

@@ -98,7 +98,7 @@ class SkillDefinition:
         """
         q = query.lower()
         text = (self.title + " " + self.description).lower()
-        words = [w for w in re.split(r"[\s,，。！？、；：""''（）\(\)]+", text) if len(w) >= 2]
+        words = [w for w in re.split(r"[\s,，。！？、；：""''（）()]+", text) if len(w) >= 2]
 
         # Exact word match
         for w in words:

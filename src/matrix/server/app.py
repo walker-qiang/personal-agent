@@ -9,7 +9,8 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..chat import ChatService
 from ..config import AgentConfig, load_config
@@ -111,5 +112,10 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
         if _INDEX_HTML:
             return HTMLResponse(_INDEX_HTML)
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
+
+    # Mount static files (JS, CSS, etc.) — after all routes
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.is_dir():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=False), name="static")
 
     return app

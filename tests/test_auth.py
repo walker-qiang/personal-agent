@@ -149,16 +149,16 @@ class TestAuthRoutes:
 
     def test_protected_route_without_token(self, client):
         """Accessing a protected route without token returns 401."""
-        with pytest.raises(Exception):
-            client.get("/sessions")
+        resp = client.get("/sessions")
+        assert resp.status_code == 401
 
     def test_protected_route_with_bad_token(self, client):
         """Accessing a protected route with invalid token returns 401."""
-        with pytest.raises(Exception):
-            client.get(
-                "/sessions",
-                headers={"Authorization": "Bearer bad-token"},
-            )
+        resp = client.get(
+            "/sessions",
+            headers={"Authorization": "Bearer bad-token"},
+        )
+        assert resp.status_code == 401
 
     def test_token_query_param(self, client):
         """Token can be passed via ?token= query param (for EventSource)."""

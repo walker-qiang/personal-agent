@@ -211,7 +211,11 @@ def generate_video(
 
         status = result.get("status", "")
         if status == "completed":
-            video_url = result.get("video_url") or result.get("remixed_from_video_id", "")
+            video_url = (
+                result.get("metadata", {}).get("url", "")
+                or result.get("video_url", "")
+                or result.get("remixed_from_video_id", "")
+            )
             return {
                 "prompt": prompt,
                 "width": width,

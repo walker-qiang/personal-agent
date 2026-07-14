@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi import Request, HTTPException
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
@@ -19,6 +20,9 @@ PUBLIC_PATHS = {
     "/",
 }
 
+# Static file extensions that don't need auth
+PUBLIC_SUFFIXES = {".js", ".css", ".png", ".jpg", ".svg", ".ico", ".woff2", ".map"}
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """JWT verification middleware.
@@ -33,6 +37,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in PUBLIC_PATHS:
             return await call_next(request)
 
+        # Allow static files (JS, CSS, images, etc.) without auth
+        if any(path.endswith(suffix) for suffix in PUBLIC_SUFFIXES):
+            return await call_next(request)
+
         config = request.app.state.config
 
         # Token from header or query param (EventSource has no custom headers)
@@ -42,11 +50,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
         else:
             token = request.query_params.get("token", "")
             if not token:
-                raise HTTPException(status_code=401, detail="Missing Authorization header")
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing Authorization header"},
+                )
 
         payload = verify_token(token, config.jwt_secret)
         if payload is None:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or expired token"},
+            )
 
         request.state.user_id = payload["sub"]
         return await call_next(request)

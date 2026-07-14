@@ -301,7 +301,7 @@ class ChatService:
                             "name": tr.get("name", ""),
                             "preview": preview_json(
                                 tr.get("error", tr.get("result", {})),
-                                limit=500,
+                                limit=2000,
                             ),
                         }
                     emitted_tool_count = new_count
