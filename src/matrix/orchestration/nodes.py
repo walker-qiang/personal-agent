@@ -7,16 +7,19 @@ Commander + Domain Agents architecture:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any
 
-from langgraph.types import RunnableConfig
+from langgraph.types import RunnableConfig, interrupt
 
 from ..agent.registry import AgentRegistry
 from ..llm import LLMError, FunctionCallResult
 from ..tools import FinanceToolError, ToolRegistry
 from .state import AgentState
+
+logger = logging.getLogger("matrix.orchestration")
 
 # ---- Limits ----
 
@@ -336,10 +339,12 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     """Execute one step of the delegation plan.
 
     Runs a domain agent's ReAct loop to complete the assigned task.
+    Injects RAG context when retriever is available.
     """
     cfg = _get_configurable(config)
     agent_registry: AgentRegistry = cfg["agent_registry"]
     full_tools: ToolRegistry = cfg["full_tools"]
+    retriever = cfg.get("retriever")
 
     plan = state.get("delegation_plan", [])
     current_step = state.get("current_step", 0)
@@ -352,6 +357,34 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     agent_id = step.get("agent_id", "")
     task = step.get("task", state["user_message"])
     skill_name = step.get("skill_name", "")
+
+    # Inject RAG context into task if retriever is available
+    rag_context = ""
+    if retriever is not None:
+        try:
+            query = state.get("user_message", task)
+            docs = retriever.query(query, top_k=5)
+            if docs:
+                context_parts = []
+                for d in docs:
+                    title = d.get("title", "")
+                    content = d.get("content", "")
+                    if content:
+                        context_parts.append(f"## {title}\n{content}")
+                rag_context = (
+                    "\n\n## 相关文档（来自个人知识库）\n"
+                    + "\n\n".join(context_parts)
+                )
+                logger.debug(
+                    "rag: injected %d docs for task '%s'",
+                    len(docs), task[:50],
+                )
+        except Exception as exc:
+            logger.warning("rag: query failed: %s", exc)
+
+    # Augment task with RAG context
+    if rag_context:
+        task = task + rag_context
 
     # Look up agent
     agent_def = agent_registry.get(agent_id)
@@ -412,11 +445,25 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         "error": result.get("error", ""),
     })
 
+    # Check for high-risk tool calls
+    pending_actions = []
+    for tr in result.get("tool_results", []):
+        tool_name = tr.get("name", "")
+        if _is_high_risk(tool_name) and not tr.get("error"):
+            pending_actions.append({
+                "agent": agent_id,
+                "tool": tool_name,
+                "args": tr.get("arguments", {}),
+                "summary": f"{agent_id} 将调用 {tool_name}",
+            })
+
     return {
         "agent_results": agent_results,
         "tool_results": result.get("tool_results", []),
         "current_step": current_step + 1,
-        "react_iteration": 0,  # reset for next agent
+        "react_iteration": 0,
+        "needs_confirmation": len(pending_actions) > 0,
+        "pending_actions": pending_actions,
     }
 
 
@@ -634,6 +681,7 @@ def _run_tool_calls(
 
         executed += 1
         started = time.perf_counter()
+        logger.debug("tool_call: tool=%s args=%s", name, json.dumps(args, ensure_ascii=False)[:200])
         try:
             result = tools.call(name, args)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -868,3 +916,46 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         pass
 
     return {}
+
+# ---- High-risk tool patterns ----
+
+_HIGH_RISK_PATTERNS = [
+    "snapshot.create", "snapshot.update", "snapshot.delete",
+    "asset.create", "asset.update", "asset.delete",
+    "write", "save", "delete", "create", "update",
+    "execute", "run", "deploy",
+]
+
+
+def _is_high_risk(tool_name: str) -> bool:
+    """Check if a tool call is high-risk based on its name."""
+    return any(pattern in tool_name.lower() for pattern in _HIGH_RISK_PATTERNS)
+
+
+def confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Check if any agent result requires human confirmation.
+
+    Uses LangGraph interrupt() to pause execution until user confirms.
+    """
+    pending = state.get("pending_actions", [])
+    if not pending:
+        return {"needs_confirmation": False}
+
+    # Already confirmed — proceed
+    if state.get("confirmed"):
+        logger.debug("hitl: already confirmed, proceeding")
+        return {"needs_confirmation": False, "confirmed": True}
+
+    logger.info("hitl: pausing for confirmation, %d actions pending", len(pending))
+    # Pause and wait for human input
+    decision = interrupt({
+        "type": "confirm_required",
+        "actions": pending,
+    })
+
+    logger.info("hitl: user decision=%s", decision)
+    return {
+        "needs_confirmation": False,
+        "confirmed": True,
+        "confirm_decision": decision,
+    }

@@ -44,8 +44,13 @@ ENV_SKILLS_BASE_DIR = "MATRIX_SKILLS_BASE_DIR"  # root dir for skills/{common,in
 ENV_RATE_LIMIT_PER_SEC = "RATE_LIMIT_PER_SEC"
 ENV_MAX_MESSAGE_CHARS = "MAX_MESSAGE_CHARS"
 ENV_LOG_LEVEL = "LOG_LEVEL"
+ENV_LOG_DIR = "MATRIX_LOG_DIR"
+ENV_MEMORY_SYNC_PATH = "MATRIX_MEMORY_SYNC_PATH"
 ENV_JWT_SECRET = "JWT_SECRET"
 ENV_ADMIN_PASSWORD = "ADMIN_PASSWORD"
+ENV_RAG_DOCS_PATH = "MATRIX_RAG_DOCS_PATH"
+ENV_RAG_PERSIST_DIR = "MATRIX_RAG_PERSIST_DIR"
+ENV_RAG_EMBED_MODEL = "MATRIX_RAG_EMBED_MODEL"
 
 # ---- Defaults ----
 
@@ -120,8 +125,13 @@ class AgentConfig:
     pipeline_provider: str = DEFAULT_PIPELINE_PROVIDER
     pipeline_model: str = DEFAULT_PIPELINE_MODEL
     log_level: int = 20  # INFO
+    log_dir: str = ""
+    memory_sync_path: str = ""
     jwt_secret: str = ""
     admin_password_hash: str = ""
+    rag_docs_path: str = ""
+    rag_persist_dir: str = ""
+    rag_embed_model: str = "BAAI/bge-small-zh-v1.5"
 
     @property
     def active_api_key(self) -> str:
@@ -212,6 +222,16 @@ def load_config() -> AgentConfig:
     }
     log_level = level_map.get(level_str, 20)
 
+    # Log dir: MATRIX_LOG_DIR > default
+    log_dir = os.environ.get(ENV_LOG_DIR, "").strip()
+    if not log_dir:
+        log_dir = str(root / "var" / "log")
+
+    # Memory sync path: MATRIX_MEMORY_SYNC_PATH > default
+    memory_sync_path = os.environ.get(ENV_MEMORY_SYNC_PATH, "").strip()
+    if not memory_sync_path:
+        memory_sync_path = str(root / ".." / "personal-assets" / "system" / "memory")
+
     # JWT secret: required
     jwt_secret = os.environ.get(ENV_JWT_SECRET, "").strip()
     if not jwt_secret:
@@ -226,6 +246,15 @@ def load_config() -> AgentConfig:
     if raw_admin:
         from .auth import hash_password
         admin_password_hash = hash_password(raw_admin)
+
+    # RAG config
+    rag_docs_path = os.environ.get(ENV_RAG_DOCS_PATH, "").strip()
+    if not rag_docs_path:
+        rag_docs_path = str(root / ".." / "personal-assets")
+    rag_persist_dir = os.environ.get(ENV_RAG_PERSIST_DIR, "").strip()
+    if not rag_persist_dir:
+        rag_persist_dir = str(root / "var" / "rag")
+    rag_embed_model = os.environ.get(ENV_RAG_EMBED_MODEL, "BAAI/bge-small-zh-v1.5").strip() or "BAAI/bge-small-zh-v1.5"
 
     return AgentConfig(
         root_path=root,
@@ -256,8 +285,13 @@ def load_config() -> AgentConfig:
         pipeline_model=os.environ.get(ENV_PIPELINE_MODEL, DEFAULT_PIPELINE_MODEL).strip()
         or DEFAULT_PIPELINE_MODEL,
         log_level=log_level,
+        log_dir=log_dir,
+        memory_sync_path=memory_sync_path,
         jwt_secret=jwt_secret,
         admin_password_hash=admin_password_hash,
+        rag_docs_path=rag_docs_path,
+        rag_persist_dir=rag_persist_dir,
+        rag_embed_model=rag_embed_model,
     )
 
 

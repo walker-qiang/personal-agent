@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_profile (
+    user_id     TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
 """
 
 
@@ -293,6 +301,67 @@ class SessionStore:
             )
             self._get_conn().commit()
             return cur.rowcount
+
+    # ---- User Profile (long-term memory) ----
+
+    def get_profile(self, user_id: str) -> dict[str, str]:
+        """Return all key-value pairs for a user."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value FROM user_profile WHERE user_id=? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def upsert_profile(self, user_id: str, key: str, value: str) -> None:
+        """Insert or update a profile entry."""
+        with self._lock:
+            self._get_conn().execute(
+                "INSERT INTO user_profile (user_id, key, value, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (user_id, key, value, time.time()),
+            )
+            self._get_conn().commit()
+
+    def delete_profile_key(self, user_id: str, key: str) -> bool:
+        """Delete a profile entry. Returns True if deleted."""
+        with self._lock:
+            cur = self._get_conn().execute(
+                "DELETE FROM user_profile WHERE user_id=? AND key=?",
+                (user_id, key),
+            )
+            self._get_conn().commit()
+            return cur.rowcount > 0
+
+    def sync_profile_from_file(self, user_id: str, json_path: str) -> int:
+        """Load profile from JSON file into SQLite. Returns count of entries synced."""
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        count = 0
+        for key, value in data.items():
+            if isinstance(value, str) and key.strip() and value.strip():
+                self.upsert_profile(user_id, key.strip(), value.strip())
+                count += 1
+        return count
+
+    def sync_profile_to_file(self, user_id: str, json_path: str) -> bool:
+        """Export SQLite profile to JSON file. Returns True on success."""
+        profile = self.get_profile(user_id)
+        if not profile:
+            return False
+        try:
+            Path(json_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(profile, f, ensure_ascii=False, indent=2)
+            return True
+        except OSError:
+            return False
 
 
 def _default_title(session_id: str) -> str:

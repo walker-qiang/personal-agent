@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +21,7 @@ from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
-from .routes import chat, health, provider, sessions, tools, auth
+from .routes import auth, chat, health, provider, sessions, tools, upload
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
@@ -58,6 +59,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
     logger.info("matrix agent listening on http://%s:%s", config.host, config.port)
     logger.info("mode=read-only cache=%s trace=%s", config.cache_path, config.trace_path)
+    # Sync user profiles from personal-assets on startup
+    sync_path = config.memory_sync_path
+    if sync_path and Path(sync_path).is_dir():
+        synced = 0
+        for json_file in Path(sync_path).glob("*.json"):
+            uid = json_file.stem
+            count = app.state.chat.store.sync_profile_from_file(uid, str(json_file))
+            if count > 0:
+                logger.info("memory_sync: user=%s entries=%d", uid, count)
+                synced += 1
+        if synced:
+            logger.info("memory_sync: %d user(s) synced from %s", synced, sync_path)
+
+    # Initialize RAG retriever if docs path is configured
+    app.state.retriever = None
+    if config.rag_docs_path and Path(config.rag_docs_path).is_dir():
+        try:
+            from ..rag.embedder import LocalEmbedder
+            from ..rag.retriever import HybridRetriever
+            from ..rag.indexer import DocumentIndexer
+
+            embedder = LocalEmbedder(model_name=config.rag_embed_model)
+            indexer = DocumentIndexer(
+                embedder=embedder,
+                persist_dir=config.rag_persist_dir,
+            )
+            chunk_count = indexer.index_directory(config.rag_docs_path)
+            logger.info(
+                "rag: indexed %d chunks from %s (persist=%s)",
+                chunk_count, config.rag_docs_path, config.rag_persist_dir,
+            )
+            app.state.retriever = HybridRetriever(
+                embedder=embedder,
+                persist_dir=config.rag_persist_dir,
+            )
+            app.state.chat.retriever = app.state.retriever
+            logger.info("rag: retriever ready")
+        except Exception as exc:
+            logger.warning("rag: initialization failed (will run without RAG): %s", exc)
+
     yield
 
 
@@ -66,7 +107,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     cfg = config or load_config()
 
     # Initialize structured logging
-    setup_logging(level=cfg.log_level)
+    setup_logging(level=cfg.log_level, log_dir=cfg.log_dir)
 
     app = FastAPI(
         title="Matrix",
@@ -89,15 +130,22 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     async def request_id_middleware(request: Request, call_next):
         rid = request.headers.get("X-Request-ID", uuid.uuid4().hex[:12])
         RequestIdFilter.set_request_id(rid)
-        logger.info("request=%s %s", request.method, request.url.path)
+        start = time.perf_counter()
         response = await call_next(request)
+        duration_ms = round((time.perf_counter() - start) * 1000)
+        logger.info(
+            "request=%s %s status=%d duration=%dms",
+            request.method, request.url.path, response.status_code, duration_ms,
+        )
         response.headers["X-Request-ID"] = rid
+        response.headers["X-Response-Time"] = f"{duration_ms}ms"
         RequestIdFilter.set_request_id(None)
         return response
 
     # Register API routes FIRST (before any catch-all routes)
     app.include_router(auth.router)
     app.include_router(tools.router)
+    app.include_router(upload.router)
     app.include_router(chat.router)
     app.include_router(health.router)
     app.include_router(sessions.router)

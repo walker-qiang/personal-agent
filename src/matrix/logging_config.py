@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 
@@ -36,17 +38,21 @@ class RequestIdFilter(logging.Filter):
         return cls._request_id
 
 
-def setup_logging(level: int = logging.INFO) -> logging.Logger:
+def setup_logging(level: int = logging.INFO, log_dir: str = "") -> logging.Logger:
     """Configure root logger with structured format.
 
     Args:
         level: Logging level (default INFO).
+        log_dir: Directory for rotating log files. Empty string disables file logging.
 
     Returns:
         The "matrix" logger instance.
     """
+    formatter = logging.Formatter(LOG_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S")
+
+    # Console handler (stdout)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S"))
+    handler.setFormatter(formatter)
     handler.addFilter(RequestIdFilter())
 
     root = logging.getLogger()
@@ -54,6 +60,18 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # File handler with daily rotation, 7-day retention
+    if log_dir:
+        log_path = Path(log_dir) / "matrix.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = TimedRotatingFileHandler(
+            str(log_path), when="midnight", backupCount=7, encoding="utf-8",
+        )
+        fh.setFormatter(formatter)
+        fh.addFilter(RequestIdFilter())
+        fh.setLevel(level)
+        root.addHandler(fh)
 
     # Set matrix logger level
     logger = logging.getLogger("matrix")
