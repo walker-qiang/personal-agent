@@ -1,6 +1,7 @@
 """LocalEmbedder: 使用 sentence-transformers 加载本地模型，支持降级到伪向量。"""
 
 import logging
+import os
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class LocalEmbedder:
 
     DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 
+    # ModelScope mirror cache paths (faster in China)
+    _MODELSCOPE_ROOT = os.path.expanduser("~/.cache/modelscope/models")
+
     def __init__(
         self,
         model_name: Optional[str] = None,
@@ -63,9 +67,17 @@ class LocalEmbedder:
         self._model: Optional["SentenceTransformer"] = None
 
         if _HAS_SENTENCE_TRANSFORMERS:
+            # Try ModelScope local cache first, then HuggingFace
+            model_path = self.model_name
+            modelscope_path = self._find_modelscope_path(self.model_name)
+            if modelscope_path:
+                model_path = modelscope_path
+                logger.info(
+                    "LocalEmbedder 使用 ModelScope 缓存: %s", model_path
+                )
             try:
                 self._model = SentenceTransformer(
-                    self.model_name, device=self.device
+                    model_path, device=self.device
                 )
                 logger.info(
                     "LocalEmbedder 已加载模型: %s (device=%s)",
@@ -77,6 +89,24 @@ class LocalEmbedder:
                 self._model = None
         else:
             logger.info("LocalEmbedder 运行在降级模式（伪向量）。")
+
+    @classmethod
+    def _find_modelscope_path(cls, model_name: str) -> Optional[str]:
+        """Find model in ModelScope cache directory."""
+        # Convert HuggingFace name to ModelScope path format
+        # e.g. BAAI/bge-small-zh-v1.5 → BAAI--bge-small-zh-v1.5
+        fs_name = model_name.replace("/", "--")
+        snapshots_dir = os.path.join(
+            cls._MODELSCOPE_ROOT, fs_name, "snapshots"
+        )
+        if not os.path.isdir(snapshots_dir):
+            return None
+        # Find the first snapshot directory
+        for entry in os.listdir(snapshots_dir):
+            candidate = os.path.join(snapshots_dir, entry)
+            if os.path.isdir(candidate):
+                return candidate
+        return None
 
     # ------------------------------------------------------------------
     # 公共 API
