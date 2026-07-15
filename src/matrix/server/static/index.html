@@ -1,13 +1,1851 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Project Matrix</title>
-  <script type="module" crossorigin src="/assets/index-N_KGhjph.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-Bj0aIXp0.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrix</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --bg2: #e8e8ed;
+    --surface: #ffffff;
+    --border: #e5e5ea;
+    --text: #1d1d1f;
+    --text-secondary: #86868b;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --success: #34c759;
+    --warning: #ff9500;
+    --error: #ff3b30;
+    --tool-call: #f0f0f5;
+    --tool-result: #e8e8ed;
+    --radius: 8px;
+    --code-bg: #f0f0f5;
+    --table-stripe: #f5f5f7;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+  /* ---- Sidebar ---- */
+  .layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+  .sidebar {
+    width: 220px;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+    min-height: 0;
+    padding: 0;
+    -webkit-user-select: none;
+    user-select: none;
+    border-right: 1px solid var(--border);
+  }
+  .sb-top {
+    padding: 12px 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .new-session-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: rgba(99,102,241,0.08);
+    border: none;
+    border-radius: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 500;
+    transition: background 0.12s;
+  }
+  .new-session-btn:hover { background: rgba(99,102,241,0.2); }
+  .new-session-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+  /* Section headers */
+  .sb-section {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+    overflow: hidden;
+    flex-grow: 0;
+    flex-shrink: 0;
+    min-height: 0;
+  }
+  .sb-section.sb-skills {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  .sb-hints-body { transition: max-height 0.2s ease, opacity 0.15s; overflow: hidden; }
+  .sb-hints-body.collapsed { max-height: 0; opacity: 0; padding: 0; display: none; }
+  .sb-skills-body { transition: max-height 0.2s ease, opacity 0.15s; overflow: hidden; }
+  .sb-skills-body.collapsed { max-height: 0; opacity: 0; padding: 0; display: none; }
+  .sb-hint { display: block; padding: 6px 16px 6px 28px; font-size: 12px; cursor: pointer; color: var(--text-secondary); transition: color 0.15s; }
+  .sb-hint:hover { color: var(--text); }
+  .sb-section.sb-sessions {
+    flex: 1 1 0%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+  }
+  .sb-section.sb-sessions .sb-list {
+    flex: 1 1 0%;
+    min-height: 0;
+  }
+  .sb-section-hd {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 16px 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .sb-section-hd span {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .sb-chevron {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    opacity: 0.5;
+    transition: transform 0.15s;
+  }
+  .sb-chevron.collapsed { transform: rotate(-90deg); }
+  .sb-skills-body { transition: max-height 0.2s ease, opacity 0.15s; overflow: hidden; }
+  .sb-skills-body.collapsed { max-height: 0; opacity: 0; padding: 0; }
+  .sb-actions { display: flex; gap: 8px; }
+  .sb-actions svg {
+    width: 13px; height: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0.4;
+  }
+  .sb-actions svg:hover { opacity: 1; }
+  .sb-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 8px;
+  }
+  .sb-list .no-sessions {
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 16px 8px;
+    opacity: 0.6;
+  }
+  /* Skill items */
+  .sb-skill-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
+  }
+  .sb-skill-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+  .sb-skill-item svg { width: 14px; height: 14px; opacity: 0.4; flex-shrink: 0; }
+  .sb-skill-item .actions { display: none; gap: 4px; margin-left: auto; }
+  .sb-skill-item:hover .actions { display: flex; }
+  .sb-skill-item .actions svg { width: 12px; height: 12px; cursor: pointer; }
+  .sb-skill-item .actions svg:hover { opacity: 1; }
+  /* Session items */
+  .sb-session-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
+  }
+  .sb-session-item:hover { background: rgba(0,0,0,0.04); color: var(--text); }
+  .sb-session-item.active { background: rgba(99,102,241,0.08); color: var(--text); }
+  .sb-session-item .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sb-session-item .meta { font-size: 11px; color: var(--text-secondary); flex-shrink: 0; opacity: 0.6; }
+  .sb-session-item .del { display: none; font-size: 11px; padding: 2px; cursor: pointer; opacity: 0.4; flex-shrink: 0; }
+  .sb-session-item:hover .del { display: block; }
+  .sb-session-item .del:hover { opacity: 1; color: var(--error); }
+  /* ---- Right Panel ---- */
+  .rpanel {
+    width: 0;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 0;
+    gap: 16px;
+    border-left: 1px solid transparent;
+    transition: width 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
+  }
+  .rpanel.open {
+    width: 240px;
+    padding: 16px 12px;
+    border-left-color: var(--border);
+    overflow-y: auto;
+  }
+  .rpanel-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .rpanel-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .rpanel-content {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.6;
+    opacity: 0.7;
+  }
+  /* ---- Modal ---- */
+  .modal-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.25);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 24px;
+    width: 520px;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  }
+  .modal h3 { font-size: 16px; font-weight: 600; margin: 0 0 16px; color: var(--text); }
+  .modal label { font-size: 12px; font-weight: 600; color: var(--text-secondary); display: block; margin: 12px 0 4px; }
+  .modal input, .modal textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; font-family: inherit; outline: none; box-sizing: border-box;
+    background: var(--bg); color: var(--text);
+  }
+  .modal input:focus, .modal textarea:focus { border-color: var(--accent); }
+  .modal textarea { resize: vertical; min-height: 60px; }
+  .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+  .modal .btn-row button { padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
+  .modal .btn-row .btn-primary { background: var(--accent); color: #fff; }
+  .modal .btn-row .btn-cancel { background: var(--border); color: var(--text-secondary); }
+  /* Skill detail modal */
+  .sd-field { margin-bottom: 20px; }
+  .sd-field label { font-size: 12px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
+  .sd-field input:focus, .sd-field textarea:focus { border-color: var(--accent); }
+  /* Skill detail file section */
+  .sd-file-row { display: flex; align-items: center; gap: 4px; font-size: 13px; padding: 4px 0; }
+  .sd-file-row svg { width: 14px; height: 14px; color: var(--text-secondary); }
+  .sd-file-row .del-btn { margin-left: auto; cursor: pointer; color: var(--text-secondary); }
+  .sd-file-row .del-btn:hover { color: var(--error); }
+  .sd-file-add { display: flex; gap: 6px; margin-bottom: 20px; }
+  .sd-file-add input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: var(--bg); color: var(--text); }
+  .sd-file-add input:focus { border-color: var(--accent); }
+  .sd-file-add button { background: var(--border); border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; display: flex; align-items: center; }
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .status { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+  /* Footer model selector (per-session, next to send button) */
+  .footer-model {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+    position: relative;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .footer-model:hover { border-color: var(--accent); }
+  .footer-model svg { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
+  .footer-model .model-name { color: var(--text); font-weight: 500; font-size: 12px; }
+  .footer-model .chevron { width: 10px; height: 10px; color: var(--text-secondary); }
+  .footer-model-dropdown {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 200px;
+    max-height: 420px;
+    overflow-y: auto;
+    z-index: 50;
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
+  }
+  .footer-model-dropdown.show { display: block; }
+  .footer-model-dropdown .item {
+    padding: 10px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-secondary);
+    transition: background 0.1s;
+  }
+  .footer-model-dropdown .item:hover { background: rgba(99,102,241,0.08); color: var(--text); }
+  .footer-model-dropdown .item.active { background: rgba(99,102,241,0.08); color: var(--accent); }
+  .footer-model-dropdown .item .check { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
+  .footer-model-dropdown .item .desc { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-height: 0;
+  }
+  .main-inner {
+    max-width: 860px;
+    margin: 0 auto;
+    width: 100%;
+    padding: 0 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .message { max-width: 800px; width: 100%; margin: 0 auto; }
+  .message.user { margin-right: 0; margin-left: auto; }
+  .message.user .bubble { background: var(--accent); padding: 10px 16px; border-radius: var(--radius); display: inline-block; max-width: 85%; text-align: left; font-size: 14px; line-height: 1.6; }
+  .message.assistant { margin-right: auto; margin-left: 0; }
+  .message.assistant .bubble {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 20px 24px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    line-height: 1.85;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .message.assistant .bubble:empty { display: none; }
+  /* Agent execution chain */
+  .agent-chain {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 8px;
+    padding: 0;
+  }
+  .agent-step {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    transition: all 0.2s;
+  }
+  .agent-step .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .agent-step.running { border-color: var(--accent); color: var(--accent); }
+  .agent-step.running .dot { background: var(--accent); animation: pulse 1.2s infinite; }
+  .agent-step.done { border-color: #34c759; color: #34c759; }
+  .agent-step.done .dot { background: #34c759; }
+  .agent-step.error { border-color: #ff3b30; color: #ff3b30; }
+  .agent-step.error .dot { background: #ff3b30; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .agent-step-name { font-weight: 600; }
+  .agent-step-task { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Markdown content styles */
+  .content h1, .content h2, .content h3 { margin: 20px 0 10px; font-weight: 600; }
+  .content h1 { font-size: 1.25em; }
+  .content h2 { font-size: 1.1em; }
+  .content h3 { font-size: 1.02em; }
+  .content p { margin: 8px 0; }
+  .content ul, .content ol { margin: 8px 0; padding-left: 22px; }
+  .content li { margin: 4px 0; }
+  .content strong { color: var(--text); font-weight: 600; }
+  .content em { color: var(--accent); }
+  .content code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.9em;
+    color: var(--accent);
+  }
+  .content pre {
+    background: var(--code-bg);
+    padding: 14px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    margin: 8px 0;
+    font-size: 13px;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  .content pre code { padding: 0; background: none; color: var(--text-secondary); }
+  .content blockquote {
+    border-left: 3px solid var(--accent);
+    padding: 6px 14px;
+    margin: 8px 0;
+    color: var(--text-secondary);
+    background: rgba(99,102,241,0.05);
+    border-radius: 0 4px 4px 0;
+  }
+  .content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0;
+    font-size: 13px;
+  }
+  .content th, .content td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+  }
+  .content th { background: var(--code-bg); font-weight: 600; color: var(--text); }
+  .content tr:nth-child(even) td { background: var(--table-stripe); }
+  .content hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .content a { color: var(--accent-hover); }
+  /* Tool section */
+  .tool-section {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 6px 0;
+    overflow: hidden;
+  }
+  .tool-header {
+    background: var(--tool-call);
+    padding: 7px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .tool-header .name { font-family: monospace; color: var(--warning); }
+  .tool-header .arrow { margin-left: auto; transition: transform 0.15s; }
+  .tool-section.open .tool-header .arrow { transform: rotate(180deg); }
+  .tool-body {
+    background: var(--tool-result);
+    padding: 0;
+    font-size: 12px;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s ease-out, padding 0.2s;
+  }
+  .tool-section.open .tool-body {
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 10px 12px;
+  }
+  .tool-body pre {
+    margin: 0;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+  }
+  .tool-body table { width: 100%; border-collapse: collapse; margin: 0; }
+  .tool-body th, .tool-body td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; font-size: 12px; }
+  .tool-body th { background: var(--code-bg); color: var(--text); }
+  .tool-body .stat { color: var(--warning); font-weight: 600; }
+  .thinking { display: none; }
+  footer {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 0 20px 12px 20px;
+    flex-shrink: 0;
+  }
+  .status-bar {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 0;
+  }
+  .status-bar.active { display: flex; }
+  .status-bar .dots { display: inline-flex; gap: 4px; }
+  .status-bar .dots span {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: dotPulse 1.4s ease-in-out infinite;
+  }
+  .status-bar .dots span:nth-child(2) { animation-delay: 0.2s; }
+  .status-bar .dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes dotPulse { 0%,80%,100%{opacity:0.3;transform:scale(0.8);} 40%{opacity:1;transform:scale(1.2);} }
+  .input-row { display: flex; gap: 10px; max-width: 860px; margin: 0 auto; }
+  .input-row input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .input-row input:focus { border-color: var(--accent); }
+  .input-row input::placeholder { color: var(--text-secondary); }
+  .input-row button {
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius);
+    padding: 10px 20px;
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .input-row button:hover { background: var(--accent-hover); }
+  .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .error-block { background: rgba(239,68,68,0.1); border: 1px solid var(--error); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; color: var(--error); margin: 8px 0; }
+  .duration { font-size: 11px; color: var(--text-secondary); margin-top: 6px; opacity: 0.6; }
+
+  /* Login overlay */
+  .login-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: var(--bg); z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 40px 36px; width: 360px; max-width: 90vw;
+    text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+  .login-card h1 { font-size: 28px; font-weight: 800; margin: 0 0 16px; color: var(--accent); }
+  .login-tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 2px solid var(--border); }
+  .login-tab {
+    flex: 1; padding: 8px 0; font-size: 14px; font-weight: 600;
+    color: #6b7280; background: none; border: none;
+    cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .login-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .login-tab:hover { color: var(--text); }
+  .login-form { display: none; }
+  .login-form.active { display: block; }
+  .login-card input[type="text"],
+  .login-card input[type="password"] {
+    width: 100%; padding: 12px 16px; border: 1px solid var(--border);
+    border-radius: 10px; font-size: 15px; background: var(--bg);
+    color: var(--text); outline: none; box-sizing: border-box;
+    transition: border-color 0.2s; margin-bottom: 12px;
+  }
+  .login-card input[type="text"]:focus,
+  .login-card input[type="password"]:focus { border-color: var(--accent); }
+  .login-card button[type="submit"] {
+    width: 100%; margin-top: 16px; padding: 12px;
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 10px; font-size: 15px; font-weight: 600;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .login-card button[type="submit"]:hover { background: var(--accent-hover); }
+  .login-card button[type="submit"]:disabled { opacity: 0.5; cursor: not-allowed; }
+  .login-error {
+    margin-top: 12px; padding: 8px; border-radius: 8px;
+    background: rgba(239,68,68,0.1); color: var(--error); font-size: 13px;
+  }
+  .logout-btn {
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    padding: 4px 8px; cursor: pointer; color: var(--text-secondary);
+    display: flex; align-items: center; transition: color 0.15s;
+  }
+  .logout-btn:hover { color: var(--error); border-color: var(--error); }
+  .logout-btn svg { width: 18px; height: 18px; }
+</style>
 </head>
 <body>
-  <div id="root"></div>
+<!-- Auth overlay -->
+<div id="loginOverlay" class="login-overlay" style="display:none">
+  <div class="login-card">
+    <h1>Matrix</h1>
+    <div class="login-tabs">
+      <button class="login-tab active" onclick="switchAuthTab('login')">登录</button>
+      <button class="login-tab" onclick="switchAuthTab('register')">注册</button>
+    </div>
+    <!-- Login form -->
+    <form id="loginForm" class="login-form active" onsubmit="handleLogin(); return false">
+      <input type="text" id="loginUsername" placeholder="用户名" autocomplete="username" required>
+      <input type="password" id="loginPassword" placeholder="密码" autocomplete="current-password" required>
+      <div id="loginError" class="login-error" style="display:none"></div>
+      <button type="submit" id="loginBtn">登录</button>
+    </form>
+    <!-- Register form -->
+    <form id="registerForm" class="login-form" onsubmit="handleRegister(); return false">
+      <input type="text" id="regUsername" placeholder="用户名" autocomplete="username" required>
+      <input type="password" id="regPassword" placeholder="密码（至少4位）" autocomplete="new-password" required>
+      <input type="password" id="regPasswordConfirm" placeholder="确认密码" autocomplete="new-password" required>
+      <div id="registerError" class="login-error" style="display:none"></div>
+      <button type="submit" id="registerBtn">注册</button>
+    </form>
+  </div>
+</div>
+<header>
+  <h1>Matrix</h1>
+  <button id="logoutBtn" class="logout-btn" style="display:none" onclick="handleLogout()" title="退出登录">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+  </button>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sb-top">
+      <button class="new-session-btn" onclick="newSession()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        新建会话
+      </button>
+    </div>
+
+    <!-- Skills section (collapsible) -->
+    <div class="sb-section sb-skills">
+      <div class="sb-section-hd" onclick="toggleSection('skillsBody')">
+        <svg class="sb-chevron collapsed" id="skillsChevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <span>技能</span>
+        <span class="sb-actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="event.stopPropagation();showSkillModal()"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </span>
+      </div>
+      <div class="sb-list sb-skills-body collapsed" id="skillsBody">
+        <div id="skillList"></div>
+      </div>
+    </div>
+
+    <!-- Common questions section (collapsible) -->
+    <div class="sb-section">
+      <div class="sb-section-hd" onclick="toggleSection('hintsBody')">
+        <svg class="sb-chevron collapsed" id="hintsChevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <span>常用问题</span>
+      </div>
+      <div class="sb-list sb-hints-body collapsed" id="hintsBody">
+        <span class="sb-hint" data-msg="诊断我的持仓异动">持仓异动诊断</span>
+        <span class="sb-hint" data-msg="做一次组合复盘">组合复盘</span>
+        <span class="sb-hint" data-msg="检查配置偏离度">配置偏离检查</span>
+        <span class="sb-hint" data-msg="当前持仓总金额是多少？">持仓总览</span>
+        <span class="sb-hint" data-msg="分析我当前的资产配置，并与目标对比">配置分析</span>
+      </div>
+    </div>
+
+    <!-- Session list -->
+    <div class="sb-section sb-sessions">
+      <div class="sb-section-hd">
+        <span>会话</span>
+        <span class="sb-actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="loadSessions()"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </span>
+      </div>
+      <div class="sb-list" id="sessionList">
+        <div class="no-sessions">暂无会话</div>
+      </div>
+    </div>
+  </aside>
+  <main id="chat">
+    <div class="main-inner" id="chatInner">
+    </div>
+  </main>
+  <aside class="rpanel" id="rpanel">
+    <div class="rpanel-section">
+      <div class="rpanel-header">待办</div>
+      <div class="rpanel-content" id="rpTodo" style="font-size:12px;color:var(--text-secondary)">暂无待办</div>
+    </div>
+    <div class="rpanel-section">
+      <div class="rpanel-header">任务产物</div>
+      <div class="rpanel-content" id="rpArtifacts" style="font-size:12px;color:var(--text-secondary)">暂无产物</div>
+    </div>
+    <div class="rpanel-section">
+      <div class="rpanel-header">参考信息</div>
+      <div class="rpanel-content" id="rpRef" style="font-size:12px;color:var(--text-secondary)">暂无参考</div>
+    </div>
+  </aside>
+</div>
+<footer>
+  <div class="input-row">
+    <input type="text" id="input" placeholder="输入问题..." autofocus>
+    <button id="send" onclick="send()">发送</button>
+    <div class="footer-model" id="footerModel" onclick="toggleModelMenu()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span class="model-name" id="footerModelName">选择模型</span>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+      <div class="footer-model-dropdown" id="modelDropdown"></div>
+    </div>
+  </div>
+</footer>
+
+<script src="marked.min.js"></script>
+<script>
+// ---- Auth / Token Management ----
+const AUTH_TOKEN_KEY = 'mx_token';
+
+function getToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setToken(token) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+function clearToken() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+async function checkAuthStatus() {
+  const token = getToken();
+  if (!token) {
+    showLogin();
+    return false;
+  }
+  hideLogin();
+  return true;
+}
+
+function showLogin() {
+  document.getElementById('loginOverlay').style.display = 'flex';
+  document.getElementById('logoutBtn').style.display = 'none';
+  document.getElementById('loginUsername').focus();
+}
+
+function hideLogin() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('logoutBtn').style.display = '';
+}
+
+async function handleLogin() {
+  const btn = document.getElementById('loginBtn');
+  const errEl = document.getElementById('loginError');
+  btn.disabled = true;
+  btn.textContent = '登录中...';
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+
+  try {
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password }),
+    });
+    const data = await resp.json();
+    if (resp.ok && data.token) {
+      setToken(data.token);
+      hideLogin();
+      document.getElementById('loginPassword').value = '';
+      document.getElementById('loginUsername').value = '';
+      errEl.style.display = 'none';
+      // Reload after login
+      loadProviders();
+      loadSessions();
+      loadHistory();
+      loadSkills();
+    } else {
+      errEl.textContent = data.detail || '用户名或密码错误';
+      errEl.style.display = 'block';
+      document.getElementById('loginPassword').value = '';
+      document.getElementById('loginUsername').focus();
+    }
+  } catch (e) {
+    errEl.textContent = '网络错误，请重试';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登录';
+  }
+  return false;
+}
+
+function switchAuthTab(tab) {
+  const tabs = document.querySelectorAll('.login-tab');
+  const forms = document.querySelectorAll('.login-form');
+  tabs.forEach(t => t.classList.toggle('active', t.textContent === (tab === 'login' ? '登录' : '注册')));
+  forms.forEach(f => {
+    const isLogin = f.id === 'loginForm';
+    f.classList.toggle('active', (tab === 'login' && isLogin) || (tab === 'register' && !isLogin));
+  });
+  // Clear errors and focus first input of active form
+  document.getElementById('loginError').style.display = 'none';
+  document.getElementById('registerError').style.display = 'none';
+  if (tab === 'login') {
+    document.getElementById('loginUsername').focus();
+  } else {
+    document.getElementById('regUsername').focus();
+  }
+}
+
+async function handleRegister() {
+  const btn = document.getElementById('registerBtn');
+  const errEl = document.getElementById('registerError');
+  btn.disabled = true;
+  btn.textContent = '注册中...';
+  const username = document.getElementById('regUsername').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const confirm = document.getElementById('regPasswordConfirm').value;
+
+  if (password !== confirm) {
+    errEl.textContent = '两次密码不一致';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = '注册';
+    return false;
+  }
+
+  try {
+    const resp = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: username, password: password }),
+    });
+    const data = await resp.json();
+    if (resp.ok && data.token) {
+      setToken(data.token);
+      hideLogin();
+      document.getElementById('regPassword').value = '';
+      document.getElementById('regPasswordConfirm').value = '';
+      document.getElementById('regUsername').value = '';
+      errEl.style.display = 'none';
+      loadProviders();
+      loadSessions();
+      loadHistory();
+      loadSkills();
+    } else {
+      errEl.textContent = data.detail || '注册失败';
+      errEl.style.display = 'block';
+      document.getElementById('regPassword').value = '';
+      document.getElementById('regPasswordConfirm').value = '';
+      document.getElementById('regUsername').focus();
+    }
+  } catch (e) {
+    errEl.textContent = '网络错误，请重试';
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '注册';
+  }
+  return false;
+}
+
+async function handleLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) { /* ignore */ }
+  clearToken();
+  showLogin();
+  // Clear the chat UI
+  document.getElementById('chatInner').innerHTML = '';
+  document.getElementById('sbSessions').innerHTML = '<div class="no-sessions">暂无会话</div>';
+}
+
+// Override fetch to inject Authorization header
+const _origFetch = window.fetch;
+window.fetch = function(url, options) {
+  const token = getToken();
+  if (token) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (!options.headers['Authorization']) {
+      options.headers['Authorization'] = 'Bearer ' + token;
+    }
+  }
+  return _origFetch(url, options).then(function(resp) {
+    // If token expired (401), redirect to login
+    if (resp.status === 401) {
+      clearToken();
+      showLogin();
+    }
+    return resp;
+  });
+};
+
+const SESSION = localStorage.getItem('mx_session') || ('web-' + Math.random().toString(36).slice(2, 8));
+localStorage.setItem('mx_session', SESSION);
+let sending = false;
+
+// Configure marked.js
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  // Sanitize URLs for XSS protection
+  linkSanitizer: function(url) {
+    return sanitizeUrl(url);
+  },
+  imageSanitizer: function(url) {
+    return sanitizeUrl(url);
+  },
+});
+
+// ---- HTML sanitizer for XSS protection ----
+function sanitizeHtml(html) {
+  const el = document.createElement('div');
+  el.textContent = html;
+  return el.innerHTML;
+}
+
+function sanitizeUrl(url) {
+  const allowed = /^(https?:|data:image\/)/i;
+  if (!allowed.test(url)) return '#';
+  // Strip javascript: and other dangerous protocols
+  if (/^javascript:/i.test(url)) return '#';
+  return url;
+}
+
+// ---- Provider management (per-session, in footer) ----
+let _providers = [];
+let _imageModels = [];
+let _videoModels = [];
+let currentModel = '';  // "provider:model_id"
+
+function loadProviders() {
+  fetch('/api/provider?session_id=' + encodeURIComponent(SESSION) + '&token=' + encodeURIComponent(getToken()))
+    .then(r => r.json())
+    .then(data => {
+      _providers = data.providers || [];
+      _imageModels = data.image_models || [];
+      _videoModels = data.video_models || [];
+      const cur = data.current || {};
+      currentModel = (cur.provider && cur.model) ? (cur.provider + ':' + cur.model) : '';
+      updateFooterModel();
+    })
+    .catch(() => {
+      document.getElementById('footerModelName').textContent = '加载失败';
+    });
+}
+
+function updateFooterModel() {
+  // Find active model display name
+  let displayName = '选择模型';
+  if (currentModel) {
+    const parts = currentModel.split(':');
+    const provId = parts[0];
+    const modelId = parts.slice(1).join(':');
+    const provider = _providers.find(p => p.id === provId);
+    if (provider) {
+      const model = (provider.models || []).find(m => m.id === modelId);
+      displayName = model ? model.name : modelId;
+    }
+  }
+  document.getElementById('footerModelName').textContent = displayName;
+
+  // Build dropdown with models grouped by provider
+  const dropdown = document.getElementById('modelDropdown');
+  const checkSvg = '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  let html = '';
+  _providers.forEach(function(prov) {
+    html += '<div class="prov-group" style="padding:6px 14px 2px;font-size:10px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px">' + prov.name + '</div>';
+    (prov.models || []).forEach(function(m) {
+      const key = prov.id + ':' + m.id;
+      const isActive = key === currentModel;
+      html += '<div class="item' + (isActive ? ' active' : '') + '" onclick="event.stopPropagation();switchModel(\'' + prov.id + '\',\'' + m.id + '\')">' +
+        (isActive ? checkSvg : '<span style="width:14px;flex-shrink:0"></span>') +
+        '<span>' + m.name + '</span>' +
+        '<span class="desc">' + m.desc + '</span>' +
+        '</div>';
+    });
+  });
+  // Separator + Image models
+  if (_imageModels.length > 0) {
+    html += '<div style="margin:4px 14px;border-top:1px solid var(--border)"></div>';
+    _imageModels.forEach(function(prov) {
+      html += '<div class="prov-group" style="padding:6px 14px 2px;font-size:10px;font-weight:600;color:#f59e0b;text-transform:uppercase;letter-spacing:0.5px">' + prov.name + ' · 图像生成</div>';
+      (prov.models || []).forEach(function(m) {
+        const imgSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+        html += '<div class="item" onclick="event.stopPropagation();document.getElementById(\'input\').value=\'帮我生成一张图片：\';document.getElementById(\'input\').focus();document.getElementById(\'modelDropdown\').classList.remove(\'show\')">' +
+          '<span style="width:14px;flex-shrink:0">' + imgSvg + '</span>' +
+          '<span>' + m.name + '</span>' +
+          '<span class="desc">' + m.desc + '</span>' +
+          '</div>';
+      });
+    });
+  }
+
+  // Separator + Video models
+  if (_videoModels.length > 0) {
+    html += '<div style="margin:4px 14px;border-top:1px solid var(--border)"></div>';
+    _videoModels.forEach(function(prov) {
+      html += '<div class="prov-group" style="padding:6px 14px 2px;font-size:10px;font-weight:600;color:#ef4444;text-transform:uppercase;letter-spacing:0.5px">' + prov.name + ' · 视频生成</div>';
+      (prov.models || []).forEach(function(m) {
+        const vidSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>';
+        html += '<div class="item" onclick="event.stopPropagation();document.getElementById(\'input\').value=\'帮我生成一个视频：\';document.getElementById(\'input\').focus();document.getElementById(\'modelDropdown\').classList.remove(\'show\')">' +
+          '<span style="width:14px;flex-shrink:0">' + vidSvg + '</span>' +
+          '<span>' + m.name + '</span>' +
+          '<span class="desc">' + m.desc + '</span>' +
+          '</div>';
+      });
+    });
+  }
+
+  dropdown.innerHTML = html;
+}
+
+function toggleModelMenu() {
+  const dropdown = document.getElementById('modelDropdown');
+  dropdown.classList.toggle('show');
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  const dropdown = document.getElementById('modelDropdown');
+  const footer = document.getElementById('footerModel');
+  if (dropdown && footer && !footer.contains(e.target)) {
+    dropdown.classList.remove('show');
+  }
+});
+
+function switchModel(providerId, modelId) {
+  const key = providerId + ':' + modelId;
+  if (key === currentModel) return;
+  fetch('/api/provider?token=' + encodeURIComponent(getToken()), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: providerId, model: modelId, session_id: SESSION }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        currentModel = data.provider + ':' + (data.model || '');
+        updateFooterModel();
+        document.getElementById('modelDropdown').classList.remove('show');
+      } else {
+        alert('切换失败: ' + (data.error || 'unknown'));
+        loadProviders();
+      }
+    })
+    .catch(err => {
+      alert('切换失败: ' + err.message);
+      loadProviders();
+    });
+}
+
+// ---- Session management ----
+function loadSessions() {
+  fetch('/sessions?token=' + encodeURIComponent(getToken()))
+    .then(r => r.json())
+    .then(data => {
+      const list = document.getElementById('sessionList');
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        list.innerHTML = '<div class="no-sessions">暂无会话</div>';
+        return;
+      }
+      const msgIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:14px;height:14px;opacity:0.4;flex-shrink:0"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+      list.innerHTML = sessions.map(s => {
+        const active = s.id === SESSION ? ' active' : '';
+        const title = escapeHtml(s.title || s.id.slice(0, 8) + '...');
+        const count = s.turn_count ? s.turn_count + '轮' : '';
+        return '<div class="sb-session-item' + active + '" data-sid="' + s.id + '" onclick="selectSession(\'' + s.id + '\')">' +
+          msgIcon +
+          '<span class="title">' + title + '</span>' +
+          '<span class="meta">' + count + '</span>' +
+          '<span class="del" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')">\u00d7</span>' +
+          '</div>';
+      }).join('');
+    });
+}
+
+function newSession() {
+  const id = 'web-' + Math.random().toString(36).slice(2, 8);
+  localStorage.setItem('mx_session', id);
+  location.reload();
+}
+
+function selectSession(id) {
+  localStorage.setItem('mx_session', id);
+  location.reload();
+}
+
+function deleteSession(id) {
+  if (!confirm('删除此会话？')) return;
+  fetch('/sessions/' + id + '?token=' + encodeURIComponent(getToken()), { method: 'DELETE' }).then(() => {
+    if (id === SESSION) newSession();
+    else loadSessions();
+  });
+}
+
+// Init: check auth first, then load data
+(async function() {
+  const authed = await checkAuthStatus();
+  if (authed) {
+    loadProviders();
+    loadSessions();
+    loadHistory();
+    loadSkills();
+  }
+})();
+
+// ---- Load skills for quick entries ----
+let _skillsData = [];
+function loadSkills() {
+  fetch('/skills?token=' + encodeURIComponent(getToken()))
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      _skillsData = data.skills || [];
+      renderSkills();
+    })
+    .catch(() => { _skillsData = []; renderSkills(); });
+}
+
+function renderSkills() {
+  const container = document.getElementById('skillList');
+  const skills = _skillsData;
+  const skillIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+  const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+  if (skills.length === 0) {
+    container.innerHTML = '<div class="no-sessions">暂无技能</div>';
+    return;
+  }
+  container.innerHTML = skills.map(s =>
+    '<div class="sb-skill-item" onclick="showSkillModal(\'' + s.name + '\')">' +
+      skillIcon +
+      '<span>' + escapeHtml(s.title) + '</span>' +
+      '<span class="actions">' +
+        '<span onclick="event.stopPropagation();showSkillModal(\'' + s.name + '\')">' + editIcon + '</span>' +
+        '<span onclick="event.stopPropagation();deleteSkill(\'' + s.name + '\')">' + trashIcon + '</span>' +
+      '</span>' +
+    '</div>'
+  ).join('');
+}
+
+function toggleSection(bodyId) {
+  const body = document.getElementById(bodyId);
+  body.classList.toggle('collapsed');
+  // Find the chevron in the same section
+  const hd = body.parentElement.querySelector('.sb-section-hd');
+  if (hd) {
+    const chevron = hd.querySelector('.sb-chevron');
+    if (chevron) chevron.classList.toggle('collapsed');
+  }
+}
+
+// ---- Skill CRUD ----
+function showSkillModal(skillName) {
+  const existing = skillName ? _skillsData.find(s => s.name === skillName) : null;
+  const isEdit = !!existing;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'skillModal';
+  overlay.style.cssText = 'align-items:flex-start;padding-top:40px;padding-bottom:40px';
+
+  const headerBg = isEdit ? 'var(--bg)' : 'var(--bg)';
+  overlay.innerHTML =
+    '<div class="modal skill-detail" onclick="event.stopPropagation()" style="width:680px;max-width:94vw;padding:0;overflow:hidden;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.12)">' +
+      // Header
+      '<div class="sd-header" style="background:' + headerBg + ';padding:28px 32px 20px;border-bottom:1px solid var(--border)">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;color:var(--text-secondary)"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>' +
+          '<span style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px">' + (isEdit ? '编辑技能' : '新建技能') + '</span>' +
+        '</div>' +
+        '<h2 style="margin:0;font-size:22px;font-weight:700;color:var(--text)" id="sdTitleDisplay">' + escapeHtml(existing ? existing.title : '新建技能') + '</h2>' +
+        (existing ? '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">' + escapeHtml(existing.name) + '</div>' : '') +
+      '</div>' +
+      // Body
+      '<div style="padding:24px 32px;max-height:55vh;overflow-y:auto">' +
+        // Name (new only)
+        (isEdit ? '' :
+          '<div class="sd-field">' +
+            '<label>标识 <span style="font-weight:400;color:var(--text-secondary)">(英文，唯一)</span></label>' +
+            '<input id="skillName" value="" placeholder="my-skill" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;box-sizing:border-box">' +
+          '</div>') +
+        // Title
+        '<div class="sd-field">' +
+          '<label>名称</label>' +
+          '<input id="skillTitle" value="' + escapeHtml(existing ? existing.title : '') + '" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;box-sizing:border-box">' +
+        '</div>' +
+        // Description
+        '<div class="sd-field">' +
+          '<label>简介 <span style="font-weight:400;color:var(--text-secondary)">(同时也是匹配触发词)</span></label>' +
+          '<textarea id="skillDesc" rows="2" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box">' + escapeHtml(existing ? existing.description : '') + '</textarea>' +
+        '</div>' +
+        // Workflow
+        '<div class="sd-field">' +
+          '<label>工作流 <span style="font-weight:400;color:var(--text-secondary)">(每行一步，格式: 1. tool_name())</span></label>' +
+          '<textarea id="skillWorkflow" rows="5" placeholder="1. finance.holdings_summary()&#10;2. finance.bucket_allocation()&#10;3. finance.recent_snapshots()" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;outline:none;resize:vertical;box-sizing:border-box">' + escapeHtml(existing ? existing.workflow_text : '') + '</textarea>' +
+        '</div>' +
+        // Output format
+        '<div class="sd-field">' +
+          '<label>输出格式</label>' +
+          '<textarea id="skillOutput" rows="3" placeholder="- 总资产概览（总额、币种）&#10;- 各 bucket 配置偏离度" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;outline:none;resize:vertical;font-family:inherit;box-sizing:border-box">' + escapeHtml(existing ? existing.output_format : '') + '</textarea>' +
+        '</div>' +
+        // Knowledge & Scripts (edit only)
+        (isEdit ? _renderFileSection('参考', 'knowledge', skillName, existing ? existing.knowledge_files : []) : '') +
+        (isEdit ? _renderFileSection('脚本', 'script', skillName, existing ? existing.script_files : []) : '') +
+      '</div>' +
+      // Footer
+      '<div style="padding:16px 32px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+        '<div>' +
+          (isEdit ? '<button onclick="deleteSkill(\'' + skillName + '\');closeModal()" style="background:none;border:none;color:var(--error);font-size:13px;cursor:pointer;padding:8px 12px;border-radius:6px">删除技能</button>' : '') +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button onclick="closeModal()" style="background:var(--border);border:none;color:var(--text-secondary);font-size:13px;cursor:pointer;padding:10px 20px;border-radius:8px">取消</button>' +
+          '<button onclick="saveSkill(\'' + (skillName || '') + '\')" style="background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:10px 24px;border-radius:8px">' + (isEdit ? '保存修改' : '创建技能') + '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  overlay.onclick = closeModal;
+  document.body.appendChild(overlay);
+
+  setTimeout(() => {
+    const el = document.getElementById(isEdit ? 'skillTitle' : 'skillName');
+    if (el) { el.focus(); el.select(); }
+  }, 100);
+}
+
+function _renderFileSection(label, type, skillName, files) {
+  const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+  const plusIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:14px;height:14px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;margin-left:2px"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const fileList = (files || []).map(f =>
+    '<div class="sd-file-row">' +
+      folderIcon +
+      '<span style="cursor:pointer;color:var(--accent);text-decoration:none" onclick="openFileEditor(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + escapeHtml(f) + '</span>' +
+      '<span class="del-btn" onclick="event.stopPropagation();deleteFile(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(f) + '\')">' + trashIcon + '</span>' +
+    '</div>'
+  ).join('');
+  return '<div class="sd-field">' +
+    '<label>' + label + ' <span style="font-weight:400;color:var(--text-secondary);text-transform:none">(' + (files || []).length + '个)</span></label>' +
+    (fileList || '<div style="font-size:12px;color:var(--text-secondary);padding:4px 0">暂无</div>') +
+    '<div class="sd-file-add"><input id="fileInput_' + type + '" placeholder="新建文件名"><button onclick="addFile(\'' + skillName + '\',\'' + type + '\')">' + plusIcon + '</button></div>' +
+    '</div>';
+}
+
+function addFile(skillName, type) {
+  const input = document.getElementById('fileInput_' + type);
+  const filename = input.value.trim();
+  if (!filename) return;
+  const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '' }) })
+    .then(r => r.json()).then(() => {
+      closeModal();
+      loadSkills();
+      setTimeout(() => openFileEditor(skillName, type, filename), 100);
+    });
+}
+
+function deleteFile(skillName, type, filename) {
+  if (!confirm('删除 ' + filename + '？')) return;
+  const url = '/skills/' + skillName + '/' + (type === 'knowledge' ? 'knowledge' : 'scripts') + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'DELETE' }).then(() => { closeModal(); loadSkills(); setTimeout(() => showSkillModal(skillName), 100); });
+}
+
+function openFileEditor(skillName, type, filename) {
+  const apiPath = type === 'knowledge' ? 'knowledge' : 'scripts';
+  const url = '/skills/' + skillName + '/' + apiPath + '/' + encodeURIComponent(filename);
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      const content = data.content || '';
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.style.cssText = 'align-items:flex-start;padding-top:60px;z-index:110';
+      overlay.innerHTML =
+        '<div class="modal" style="width:600px;max-width:94vw;padding:0;overflow:hidden;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.12)" onclick="event.stopPropagation()">' +
+          '<div style="padding:20px 24px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;color:var(--text-secondary)"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+            '<span style="font-size:14px;font-weight:600;color:var(--text)">' + escapeHtml(filename) + '</span>' +
+            '<span style="font-size:11px;color:var(--text-secondary);margin-left:auto">' + (type === 'knowledge' ? '参考' : '脚本') + '</span>' +
+          '</div>' +
+          '<div style="padding:16px 24px">' +
+            '<textarea id="fileEditorContent" style="width:100%;min-height:300px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;outline:none;resize:vertical;box-sizing:border-box">' + escapeHtml(content) + '</textarea>' +
+          '</div>' +
+          '<div style="padding:12px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">' +
+            '<button onclick="this.closest(\'.modal-overlay\').remove()" style="background:var(--border);border:none;color:var(--text-secondary);font-size:13px;cursor:pointer;padding:8px 18px;border-radius:8px">取消</button>' +
+            '<button onclick="saveFileContent(\'' + skillName + '\',\'' + type + '\',\'' + escapeHtml(filename) + '\')" style="background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:8px 18px;border-radius:8px">保存</button>' +
+          '</div>' +
+        '</div>';
+      overlay.onclick = function() { overlay.remove(); };
+      overlay.id = 'fileEditorOverlay';
+      document.body.appendChild(overlay);
+      setTimeout(() => {
+        const ta = document.getElementById('fileEditorContent');
+        if (ta) ta.focus();
+      }, 100);
+    });
+}
+
+function saveFileContent(skillName, type, filename) {
+  const content = document.getElementById('fileEditorContent').value;
+  const apiPath = type === 'knowledge' ? 'knowledge' : 'scripts';
+  const url = '/skills/' + skillName + '/' + apiPath + '/' + encodeURIComponent(filename);
+  fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: content }) })
+    .then(r => r.json())
+    .then(() => {
+      const overlay = document.getElementById('fileEditorOverlay');
+      if (overlay) overlay.remove();
+      closeModal();
+      loadSkills();
+      setTimeout(() => showSkillModal(skillName), 100);
+    });
+}
+
+function closeModal() {
+  const m = document.getElementById('skillModal');
+  if (m) m.remove();
+}
+
+function saveSkill(skillName) {
+  const isEdit = !!skillName;
+  const name = isEdit ? skillName : document.getElementById('skillName').value.trim();
+  const title = document.getElementById('skillTitle').value.trim();
+  const description = document.getElementById('skillDesc').value.trim();
+  const workflow = document.getElementById('skillWorkflow').value.trim();
+  const output_format = document.getElementById('skillOutput').value.trim();
+
+  if (!name || !title) { alert('请填写标识和名称'); return; }
+
+  const url = isEdit ? '/skills/' + skillName : '/skills';
+  const method = isEdit ? 'PUT' : 'POST';
+  fetch(url, {
+    method: method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, title: title, description: description, workflow: workflow, output_format: output_format }),
+  }).then(r => r.json()).then(d => {
+    closeModal();
+    if (d.error) { alert(d.error); return; }
+    loadSkills();
+  });
+}
+
+function deleteSkill(name) {
+  if (!confirm('删除技能 "' + name + '"？')) return;
+  fetch('/skills/' + name + '?token=' + encodeURIComponent(getToken()), { method: 'DELETE' }).then(() => loadSkills());
+}
+
+function runSkill(name) {
+  const skill = _skillsData.find(s => s.name === name);
+  // Use title as the trigger query
+  document.getElementById('input').value = skill ? skill.title : name;
+  send();
+}
+
+// ---- Keyboard shortcuts ----
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+    e.preventDefault();
+    newSession();
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    document.getElementById('input').focus();
+  }
+});
+
+// ---- Load chat history on page load ----
+function loadHistory() {
+  fetch('/sessions/' + SESSION + '/messages?token=' + encodeURIComponent(getToken()))
+    .then(r => r.json())
+    .then(data => {
+      const msgs = data.messages || [];
+      if (msgs.length === 0) return;
+      const chat = document.getElementById('chat');
+      const inner = document.getElementById('chatInner');
+      msgs.forEach(m => {
+        if (m.role === 'user') {
+          inner.appendChild(userBubble(m.content));
+        } else {
+          const div = document.createElement('div');
+          div.className = 'message assistant';
+          const bubble = document.createElement('div');
+          bubble.className = 'bubble';
+          const content = document.createElement('div');
+          content.className = 'content';
+          content.innerHTML = renderMarkdown(m.content);
+          bubble.appendChild(content);
+          div.appendChild(bubble);
+          inner.appendChild(div);
+        }
+      });
+      chat.scrollTop = chat.scrollHeight;
+    });
+}
+
+document.querySelectorAll('.sb-hint').forEach(hint => {
+  hint.addEventListener('click', () => {
+    document.getElementById('input').value = hint.dataset.msg;
+    send();
+  });
+});
+
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// ---- Markdown renderer using marked.js (better compatibility) ----
+function renderMarkdown(text) {
+  if (!text) return '';
+  // Use marked.js to parse Markdown
+  let html = marked.parse(text);
+  // Convert video img tags (generated from ![alt](video_url)) to <video> elements
+  // marked.js renders all ![alt](url) as <img> — but video URLs should be <video>
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  temp.querySelectorAll('img').forEach(img => {
+    const alt = (img.getAttribute('alt') || '');
+    const src = img.getAttribute('src') || '';
+    const isVideo = src && /视频|video|\.(mp4|webm|mov|avi|mkv)($|\?)/i.test(alt + '|' + src);
+    if (isVideo) {
+      const video = document.createElement('video');
+      video.setAttribute('controls', '');
+      video.setAttribute('src', src);
+      video.style.cssText = 'max-width:100%;max-height:400px;border-radius:8px;margin:6px 0';
+      if (alt) video.setAttribute('title', alt);
+      img.replaceWith(video);
+    }
+  });
+  return temp.innerHTML;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---- Format tool result as readable HTML ----
+function formatToolResult(data) {
+  let obj;
+  try {
+    obj = typeof data === 'string' ? JSON.parse(data) : data;
+  } catch (_) {
+    return '<pre>' + escapeHtml(String(data)) + '</pre>';
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return '<pre>[]</pre>';
+    // Array of objects → table
+    if (typeof obj[0] === 'object' && obj[0] !== null) {
+      const keys = Object.keys(obj[0]);
+      let tbl = '<table><thead><tr>';
+      keys.forEach(k => { tbl += '<th>' + escapeHtml(k) + '</th>'; });
+      tbl += '</tr></thead><tbody>';
+      obj.forEach(row => {
+        tbl += '<tr>';
+        keys.forEach(k => {
+          let val = row[k];
+          if (val === null || val === undefined) val = '-';
+          else if (typeof val === 'number') {
+            val = Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2);
+            val = '<span class="stat">' + val + '</span>';
+          }
+          tbl += '<td>' + (typeof val === 'string' ? escapeHtml(val) : val) + '</td>';
+        });
+        tbl += '</tr>';
+      });
+      tbl += '</tbody></table>';
+      return tbl;
+    }
+    return '<pre>' + escapeHtml(JSON.stringify(obj, null, 2)) + '</pre>';
+  }
+  if (typeof obj === 'object' && obj !== null) {
+    return formatToolResultObject(obj);
+  }
+  return '<pre>' + escapeHtml(JSON.stringify(obj, null, 2)) + '</pre>';
+}
+
+function formatToolResultObject(obj) {
+  // Image generation results: show actual images
+  if (obj.images && Array.isArray(obj.images) && obj.images.length > 0) {
+    let html = '';
+    if (obj.prompt) html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">&#x1F3A8; ' + escapeHtml(obj.prompt) + '</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px">';
+    obj.images.forEach(img => {
+      if (img.url) {
+        const safeUrl = sanitizeUrl(img.url);
+        html += '<a href="' + escapeHtml(safeUrl) + '" target="_blank"><img src="' + escapeHtml(safeUrl) + '" alt="' + escapeHtml(obj.prompt || '') + '" style="max-width:300px;max-height:300px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy"></a>';
+      }
+    });
+    html += '</div>';
+    if (obj.size) html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">尺寸: ' + escapeHtml(obj.size) + ' | 数量: ' + (obj.count || obj.images.length) + '</div>';
+    return html;
+  }
+  // Video generation results: show video player
+  if (obj.videos && Array.isArray(obj.videos) && obj.videos.length > 0) {
+    let html = '';
+    if (obj.prompt) html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">&#x1F3AC; ' + escapeHtml(obj.prompt) + '</div>';
+    obj.videos.forEach(v => {
+      if (v.url) {
+        const safeUrl = sanitizeUrl(v.url);
+        html += '<video controls style="max-width:100%;max-height:400px;border-radius:8px;margin:6px 0" src="' + escapeHtml(safeUrl) + '"></video>';
+      }
+    });
+    if (obj.duration) html += '<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">时长: ' + obj.duration + 's | 分辨率: ' + escapeHtml(obj.resolution || '') + '</div>';
+    return html;
+  }
+  // Special handling for holdings_summary
+  if (obj.buckets && obj.holdings) {
+    let html = '';
+
+    // Bucket overview
+    if (obj.buckets.length > 0) {
+      html += '<h4 style="margin:8px 0 4px;color:var(--accent);">分桶概览</h4>';
+      html += '<table><thead><tr><th>分桶</th><th>数量</th><th>金额</th><th>币种</th></tr></thead><tbody>';
+      obj.buckets.forEach(b => {
+        html += '<tr><td>' + escapeHtml(b.name || '') + '</td>';
+        html += '<td class="stat">' + (b.count || 0) + '</td>';
+        html += '<td class="stat">' + formatMoney(b.total) + '</td>';
+        html += '<td>' + escapeHtml(b.currency || '') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // Holdings detail
+    if (obj.holdings.length > 0) {
+      html += '<h4 style="margin:8px 0 4px;color:var(--accent);">持仓明细</h4>';
+      const cols = ['code', 'name', 'bucket', 'type', 'balance', 'currency'];
+      html += '<table><thead><tr>';
+      cols.forEach(c => { html += '<th>' + c + '</th>'; });
+      html += '</tr></thead><tbody>';
+      obj.holdings.forEach(h => {
+        html += '<tr>';
+        cols.forEach(c => {
+          let val = h[c];
+          if (c === 'balance') val = formatMoney(val);
+          html += '<td>' + (val != null ? escapeHtml(String(val)) : '-') + '</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    return html;
+  }
+
+  // Generic object → key-value table
+  const keys = Object.keys(obj);
+  if (keys.length === 0) return '<pre>{}</pre>';
+  let html = '<table><tbody>';
+  keys.forEach(k => {
+    let val = obj[k];
+    if (typeof val === 'number') val = '<span class="stat">' + formatMoney(val) + '</span>';
+    else if (val && typeof val === 'object') val = '<pre style="margin:0;font-size:11px;">' + escapeHtml(JSON.stringify(val, null, 2)) + '</pre>';
+    else val = escapeHtml(String(val));
+    html += '<tr><td style="color:var(--text-secondary);width:140px;">' + escapeHtml(k) + '</td><td>' + val + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+function formatMoney(v) {
+  if (typeof v !== 'number') return escapeHtml(String(v));
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ---- Send message ----
+function send() {
+  if (sending) return;
+  const input = document.getElementById('input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  sending = true;
+
+  // Reset right panel
+  resetRPanel();
+  // Track tool names for reference panel
+  let rpTools = [];
+  // Track execution chain in chat
+  let executionChain = [];
+
+  const chat = document.getElementById('chat');
+  const inner = document.getElementById('chatInner');
+  inner.appendChild(userBubble(msg));
+  const asst = assistantBubble();
+  inner.appendChild(asst);
+  chat.scrollTop = chat.scrollHeight;
+
+  const toolCache = new Map();
+  // Status bar: appears below assistant bubble in chat
+  const statusBar = document.createElement('div');
+  statusBar.className = 'status-bar';
+  asst.appendChild(statusBar);
+  setStatus(statusBar, '思考中...');
+  // Right panel tracking
+  let rpSteps = [];
+  let rpTodos = [];
+
+  const params = new URLSearchParams({
+    message: encodeURIComponent(msg),
+    session_id: SESSION,
+  });
+  // EventSource doesn't support custom headers, pass token as query param
+  const token = getToken();
+  const streamUrl = '/chat/stream?' + params.toString() + (token ? '&token=' + encodeURIComponent(token) : '');
+  const es = new EventSource(streamUrl);
+
+  es.addEventListener('classify', (e) => {
+    document.getElementById('rpanel').classList.add('open');
+    const data = JSON.parse(e.data);
+    let title = data.intent === 'simple' ? '\u76f4\u63a5\u56de\u7b54' :
+                data.intent === 'delegate' ? '\u591a Agent \u534f\u540c' :
+                data.intent === 'skill' ? '\u6280\u80fd: ' + data.skill_name : '\u5206\u6790\u4e2d';
+    setRPTodo(title);
+    // Build agent execution chain in chat (skip if only commander — internal fallback)
+    const isCommanderOnly = data.delegation_plan && data.delegation_plan.length === 1 && data.delegation_plan[0].agent_id === 'commander';
+    if (data.delegation_plan && data.delegation_plan.length > 0 && !isCommanderOnly) {
+      // Remove any existing chain (safety: prevent duplicates from duplicate classify events)
+      const oldChain = asst.querySelector('.agent-chain');
+      if (oldChain) oldChain.remove();
+      executionChain.length = 0;
+      const chain = document.createElement('div');
+      chain.className = 'agent-chain';
+      const steps = data.delegation_plan.map(p => p.agent_id + ': ' + p.task).join(' | ');
+      const agents = data.delegation_plan.map(p => p.agent_id);
+      const names = data.delegation_plan.map(p => p.agent_id === 'commander' ? '\u6307\u6325\u5b98' : p.agent_id === 'investment-analyst' ? '\u6295\u8d44\u5206\u6790\u5458' : p.agent_id === 'media-generator' ? '\u5a92\u4f53\u751f\u6210\u5668' : p.agent_id);
+      setRPRef('plan', steps);
+      for (let i = 0; i < data.delegation_plan.length; i++) {
+        const p = data.delegation_plan[i];
+        const chip = document.createElement('span');
+        chip.className = 'agent-step';
+        chip.id = 'agent-step-' + i;
+        chip.innerHTML = '<span class="dot"></span><span class="agent-step-name">' + escapeHtml(names[i]) + '</span>';
+        chain.appendChild(chip);
+        executionChain.push({ el: chip, agentId: p.agent_id, task: p.task, done: false });
+      }
+      // Mark first step as running
+      if (executionChain.length > 0) executionChain[0].el.classList.add('running');
+      asst.prepend(chain);
+    }
+    rpTools = [];
+  });
+
+  es.addEventListener('tool_call', (e) => {
+    setStatus(statusBar, '\u6267\u884c\u4e2d...');
+    const data = JSON.parse(e.data);
+    const name = data.name || '';
+    toolCache.set(name, { name, args: data.args, preview: '' });
+    rpTools.push(name);
+    setRPRef('tools', rpTools.join(', '));
+  });
+
+  es.addEventListener('tool_result', (e) => {
+    setStatus(statusBar, '执行中...');
+    const data = JSON.parse(e.data);
+    const name = data.name || '';
+    const cached = toolCache.get(name);
+    if (cached) {
+      cached.preview = data.preview || '';
+      asst.appendChild(toolSection(cached));
+      toolCache.delete(name);
+    }
+    addRPArtifact(name, data.preview || '');
+  });
+
+  es.addEventListener('token', (e) => {
+    setStatus(statusBar, '生成中...');
+    let content = asst.querySelector('.content');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'content';
+      asst.appendChild(content);
+    }
+    const raw = (e.data ? JSON.parse(e.data).content : '') || '';
+    // Accumulate tokens for streaming support
+    if (!content._accumulated) content._accumulated = '';
+    content._accumulated += raw;
+    content.innerHTML = renderMarkdown(content._accumulated);
+    chat.scrollTop = chat.scrollHeight;
+  });
+
+  es.addEventListener('agent_result', (e) => {
+    setStatus(statusBar, '\u6267\u884c\u4e2d...');
+    const data = JSON.parse(e.data);
+    const aid = data.agent_id || '';
+    const task = data.task || '';
+    if (aid) {
+      setRPRef('agent', aid + ': ' + task);
+    }
+    // Update execution chain
+    const step = executionChain.find(s => s.agentId === aid && !s.done);
+    if (step) {
+      step.done = true;
+      step.el.classList.remove('running');
+      step.el.classList.add(data.error ? 'error' : 'done');
+      if (data.result) {
+        step.el.title = data.result.substring(0, 200);
+      }
+    }
+    // Mark next pending step as running
+    const next = executionChain.find(s => !s.done);
+    if (next) {
+      next.el.classList.add('running');
+    } else {
+      // All steps done — hide all chains immediately
+      asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
+    }
+    if (data.error) {
+      addRPArtifact(aid + '-error', data.error);
+    }
+  });
+
+  es.addEventListener('error', (e) => {
+    hideStatus(statusBar);
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
+    executionChain.forEach(s => s.el.classList.remove('running'));
+    document.getElementById('rpanel').classList.remove('open');
+    try {
+      const data = JSON.parse(e.data);
+      asst.appendChild(errorBlock(data.message || ''));
+    } catch (_) {}
+  });
+
+  es.addEventListener('done', (e) => {
+    hideStatus(statusBar);
+    // Hide all agent chains — internal orchestration, not for end users
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
+    // Ensure no running animation remains
+    executionChain.forEach(s => s.el.classList.remove('running'));
+    try {
+      const data = JSON.parse(e.data);
+      const dur = data.duration_ms ? (data.duration_ms / 1000).toFixed(1) + 's' : '';
+      if (dur) {
+        const durEl = document.createElement('div');
+        durEl.className = 'duration';
+        durEl.textContent = '\u8017\u65f6 ' + dur;
+        asst.appendChild(durEl);
+      }
+    } catch (_) {}
+    es.close();
+    sending = false;
+    document.getElementById('input').focus();
+    loadSessions();
+  });
+
+  es.onerror = () => {
+    hideStatus(statusBar);
+    asst.querySelectorAll('.agent-chain').forEach(c => c.style.display = 'none');
+    executionChain.forEach(s => s.el.classList.remove('running'));
+    es.close();
+    sending = false;
+    document.getElementById('input').focus();
+  };
+}
+
+function setStatus(el, text) {
+  el.className = 'status-bar active';
+  el.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> ' + text;
+}
+
+function hideStatus(el) {
+  el.className = 'status-bar';
+  el.innerHTML = '';
+}
+
+function addThinking(asst) { return null; }  // deprecated, kept for compatibility
+
+function userBubble(msg) {
+  const div = document.createElement('div');
+  div.className = 'message user';
+  div.innerHTML = '<div class="bubble">' + escapeHtml(msg) + '</div>';
+  return div;
+}
+
+function assistantBubble() {
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.innerHTML = '<div class="bubble"></div>';
+  return div;
+}
+
+function toolSection(tool) {
+  const div = document.createElement('div');
+  div.className = 'tool-section';
+  div.innerHTML = '<div class="tool-header" onclick="this.parentElement.classList.toggle(\'open\')"><span>&#9881;</span><span class="name">' + escapeHtml(tool.name) + '</span><span class="arrow">&#9660;</span></div><div class="tool-body">' + formatToolResult(tool.preview) + '</div>';
+  return div;
+}
+
+function errorBlock(msg) {
+  const div = document.createElement('div');
+  div.className = 'error-block';
+  div.textContent = msg;
+  return div;
+}
+
+// ---- Right Panel Helpers ----
+
+function resetRPanel() {
+  document.getElementById('rpTodo').innerHTML = '<span style="color:var(--text-secondary)">暂无待办</span>';
+  document.getElementById('rpArtifacts').innerHTML = '<span style="color:var(--text-secondary)">暂无产物</span>';
+  document.getElementById('rpRef').innerHTML = '<span style="color:var(--text-secondary)">暂无参考</span>';
+}
+
+function setRPTodo(text) {
+  document.getElementById('rpTodo').innerHTML = text;
+}
+
+function setRPRef(key, val) {
+  var el = document.getElementById('rpRef');
+  if (el.innerHTML.indexOf('暂无参考') === 0) el.innerHTML = '';
+  var div = document.createElement('div');
+  div.style.cssText = 'font-size:11px;margin-bottom:4px;display:flex;gap:6px';
+  div.innerHTML = '<span style="color:var(--text-secondary);flex-shrink:0">' + escapeHtml(key) + '</span><span style="color:var(--text);word-break:break-all">' + escapeHtml(val) + '</span>';
+  if (el.children.length > 5) el.removeChild(el.lastElementChild);
+  el.insertBefore(div, el.firstChild);
+}
+
+function addRPArtifact(name, preview) {
+  var el = document.getElementById('rpArtifacts');
+  if (el.innerHTML.indexOf('暂无产物') === 0) el.innerHTML = '';
+  var div = document.createElement('div');
+  div.style.cssText = 'font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);';
+  div.innerHTML = '<span style="font-weight:600">' + escapeHtml(name) + '</span><br><span style="color:var(--text-secondary)">' + escapeHtml(preview).substring(0, 80) + '</span>';
+  el.appendChild(div);
+}
+
+</script>
 </body>
 </html>

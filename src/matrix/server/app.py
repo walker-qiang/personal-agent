@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -161,7 +161,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
             return HTMLResponse(_INDEX_HTML)
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
 
-    # Mount static files (JS, CSS, etc.) — after all routes
+    # Mount static files (marked.min.js, etc.) — after all routes
     static_dir = Path(__file__).parent / "static"
     if static_dir.is_dir():
         app.mount("/", StaticFiles(directory=str(static_dir), html=False), name="static")
