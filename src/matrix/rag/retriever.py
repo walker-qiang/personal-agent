@@ -41,12 +41,12 @@ def _rrf_fuse(
     """使用 Reciprocal Rank Fusion 融合两路检索结果。
 
     Args:
-        vector_results: 向量检索结果，每项需含 ``id`` 和 ``score``。
+        vector_results: 向量检索结果，每项需含 ``id``、``score`` 和 ``vector_similarity``。
         bm25_results: BM25 检索结果，每项需含 ``id`` 和 ``score``。
         k: RRF 平滑参数。
 
     Returns:
-        融合后的结果列表，按融合分数降序排列。
+        融合后的结果列表，按融合分数降序排列。每项含 ``vector_similarity`` 字段。
     """
     # 按 id 合并分数
     fused: Dict[str, Dict] = {}
@@ -55,14 +55,14 @@ def _rrf_fuse(
         doc_id = item["id"]
         rrf_score = 1.0 / (k + rank + 1)
         if doc_id not in fused:
-            fused[doc_id] = {**item, "score": 0.0}
+            fused[doc_id] = {**item, "score": 0.0, "vector_similarity": item.get("vector_similarity", 0.0)}
         fused[doc_id]["score"] += rrf_score
 
     for rank, item in enumerate(bm25_results):
         doc_id = item["id"]
         rrf_score = 1.0 / (k + rank + 1)
         if doc_id not in fused:
-            fused[doc_id] = {**item, "score": 0.0}
+            fused[doc_id] = {**item, "score": 0.0, "vector_similarity": 0.0}
         fused[doc_id]["score"] += rrf_score
 
     # 按融合分数降序排列
@@ -127,15 +127,18 @@ class HybridRetriever:
     # 公共 API
     # ------------------------------------------------------------------
 
-    def query(self, text: str, top_k: int = 5) -> List[Dict]:
+    def query(self, text: str, top_k: int = 5, min_similarity: float = 0.0) -> List[Dict]:
         """混合检索：向量 + BM25，RRF 融合后返回 top-k 结果。
 
         Args:
             text: 查询文本。
             top_k: 返回结果数量。
+            min_similarity: 最小向量相似度阈值（0~1），低于此值的文档不返回。
+                           设为 0 表示不过滤。建议值 0.35~0.45。
 
         Returns:
-            结果列表，每项包含 ``id``, ``title``, ``content``, ``score``。
+            结果列表，每项包含 ``id``, ``title``, ``content``, ``score``,
+            ``vector_similarity``。
         """
         # 1. 向量检索
         vector_results = self._vector_search(text, top_k=_VECTOR_TOP_K)
@@ -146,10 +149,17 @@ class HybridRetriever:
         # 3. RRF 融合
         fused = _rrf_fuse(vector_results, bm25_results, k=_RRF_K)
 
-        # 4. 取 top_k
+        # 4. 按相似度阈值过滤
+        if min_similarity > 0:
+            fused = [
+                item for item in fused
+                if item.get("vector_similarity", 0.0) >= min_similarity
+            ]
+
+        # 5. 取 top_k
         top_results = fused[:top_k]
 
-        # 5. 统一输出格式
+        # 6. 统一输出格式
         output: List[Dict] = []
         for item in top_results:
             output.append(
@@ -158,6 +168,7 @@ class HybridRetriever:
                     "title": item.get("title", item.get("source_file", "")),
                     "content": item.get("content", ""),
                     "score": item.get("score", 0.0),
+                    "vector_similarity": item.get("vector_similarity", 0.0),
                 }
             )
         return output
@@ -189,13 +200,16 @@ class HybridRetriever:
 
         for i, doc_id in enumerate(ids_list):
             meta = metas_list[i] if i < len(metas_list) else {}
+            dist = dists_list[i] if i < len(dists_list) else 0.0
+            vector_similarity = 1.0 - min(dist, 1.0)
             output.append(
                 {
                     "id": doc_id,
                     "content": docs_list[i] if i < len(docs_list) else "",
                     "source_file": meta.get("source_file", ""),
                     "title": meta.get("source_file", ""),
-                    "score": 1.0 - min(dists_list[i] if i < len(dists_list) else 0.0, 1.0),
+                    "score": vector_similarity,
+                    "vector_similarity": vector_similarity,
                 }
             )
         return output

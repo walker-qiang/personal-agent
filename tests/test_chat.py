@@ -172,19 +172,29 @@ class TestChatService:
         assert len(tokens) >= 1
 
     def test_needs_summary_streaming_path(self, chat_service):
-        """Test streaming summarization when function_call returns tool_calls."""
+        """Test streaming summarization when function_call returns tool_calls then answer."""
         from matrix.llm import FunctionCallResult, ToolCall
 
         class StreamingLLM(FakeLLM):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self._fc_count = 0
+
             def function_call(self, system, messages, tools, tool_choice="auto"):
                 self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="",
-                    tool_calls=[
-                        ToolCall(name="web_search", arguments={"query": "test"}),
-                    ],
-                    finish_reason="tool_calls",
-                )
+                self._fc_count += 1
+                if self._fc_count == 1:
+                    # First call: return tool calls
+                    return FunctionCallResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(id="call_1", name="web_search", arguments={"query": "test"}),
+                        ],
+                        finish_reason="tool_calls",
+                    )
+                # Subsequent calls: return the answer
+                text = self.responses.pop(0) if self.responses else ""
+                return FunctionCallResult(content=text, tool_calls=[])
 
         chat_service._default_llm = StreamingLLM([
             "当前持仓健康，共2个持仓。",

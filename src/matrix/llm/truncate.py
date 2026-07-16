@@ -9,6 +9,7 @@ to fit within a maximum token budget. Uses a conservative heuristic:
 from __future__ import annotations
 
 import re
+from typing import Any
 
 
 # Conservative token estimation: count Chinese and non-Chinese characters separately
@@ -27,12 +28,30 @@ def estimate_tokens(text: str) -> int:
     return int(chinese * 1.5 + other * 0.25)
 
 
+def _msg_content(msg: dict[str, Any]) -> str:
+    """Extract text content from a message dict for token estimation."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # Anthropic-style content blocks
+        return " ".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        )
+    return str(content)
+
+
+def _msg_tokens(msg: dict[str, Any]) -> int:
+    """Estimate tokens for a message dict."""
+    return estimate_tokens(_msg_content(msg))
+
+
 def truncate_messages(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     system_prompt: str = "",
     max_tokens: int = 8000,
     reserve_tokens: int = 2000,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Truncate message history to fit within a token budget.
 
     Args:
@@ -44,6 +63,8 @@ def truncate_messages(
     Returns:
         Truncated list of messages (removes oldest messages first).
         At least the last message is always kept, even if it exceeds budget.
+        Tool messages (role="tool") are kept together with their preceding
+        assistant message to avoid breaking the tool calling context.
     """
     if not messages:
         return []
@@ -53,18 +74,24 @@ def truncate_messages(
         # Budget exhausted by system prompt; keep only the last message
         return [messages[-1]]
 
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     used = 0
 
     # Always keep the last message (most recent user query)
     for msg in reversed(messages[:-1]):
-        tokens = estimate_tokens(msg.get("content", ""))
+        tokens = _msg_tokens(msg)
         if used + tokens > budget:
             break
+        # Keep tool messages paired with their preceding assistant message
         result.insert(0, msg)
         used += tokens
 
     # Append the last message unconditionally
     result.append(messages[-1])
+
+    # Ensure we don't leave orphan tool messages at the start
+    # (tool messages without their preceding assistant message)
+    while result and result[0].get("role") == "tool":
+        result.pop(0)
 
     return result

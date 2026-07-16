@@ -172,15 +172,19 @@ class TestDelegateNode:
         from matrix.llm import FunctionCallResult, ToolCall
 
         class ToolLLM(FakeLLM):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self._fc_count = 0
+
             def function_call(self, system, messages, tools, tool_choice="auto"):
                 self.calls.append(("function_call", messages))
-                return FunctionCallResult(
-                    content="",
-                    tool_calls=[ToolCall(name="finance.holdings_summary", arguments={})],
-                )
-            def complete(self, system, messages):
-                self.calls.append(("complete", messages))
-                return "当前持仓健康，共2个持仓。"
+                self._fc_count += 1
+                if self._fc_count == 1:
+                    return FunctionCallResult(
+                        content="",
+                        tool_calls=[ToolCall(id="call_1", name="finance.holdings_summary", arguments={})],
+                    )
+                return FunctionCallResult(content="当前持仓健康，共2个持仓。", tool_calls=[])
 
         llm = ToolLLM([])
         state = base_state(

@@ -19,20 +19,26 @@ class LLMClient(Protocol):
     def function_call(
         self,
         system: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
     ) -> FunctionCallResult:
-        """Call LLM with native function/tool calling support."""
+        """Call LLM with native function/tool calling support.
+
+        Supports multi-turn tool messages:
+        - role="tool" with tool_call_id + content
+        - role="assistant" with tool_calls[] + content
+        """
         ...
 
 
 @dataclass(frozen=True)
 class ToolCall:
-    """A parsed tool call from the planner LLM response."""
+    """A parsed tool call from the LLM response."""
 
-    name: str
-    arguments: dict[str, Any]
+    id: str = ""
+    name: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

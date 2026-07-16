@@ -34,19 +34,28 @@ class DeepSeekClient:
         self.timeout_sec = timeout_sec
         self.max_message_chars = max_message_chars
 
-    def _build_payload(self, system: str, messages: list[dict[str, str]]) -> dict:
+    def _build_payload(
+        self, system: str, messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": [{"role": "system", "content": system}],
+        }
         if self.max_message_chars > 0:
             messages = truncate_messages(
                 messages,
                 system_prompt=system,
-                max_tokens=self.max_message_chars // 2,  # rough: 2 chars per token
+                max_tokens=self.max_message_chars // 2,
                 reserve_tokens=500,
             )
-        return {
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "system", "content": system}, *messages],
-        }
+        payload["messages"].extend(messages)
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+        return payload
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -89,27 +98,30 @@ class DeepSeekClient:
     def function_call(
         self,
         system: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
     ) -> FunctionCallResult:
-        """Call DeepSeek with native function calling.
+        """Call DeepSeek/Agnes with native function calling.
 
-        DeepSeek uses OpenAI-compatible tool calling format.
         Returns a FunctionCallResult with either content or tool_calls.
+        Supports multi-turn tool messages:
+        - role="tool" with tool_call_id + content
+        - role="assistant" with tool_calls[] + content
         """
         url = self.base_url.rstrip("/") + "/chat/completions"
-        payload = self._build_payload(system, messages)
 
         # Sanitize tool names: replace dots with underscores for APIs that
         # only accept ^[a-zA-Z0-9_-]+$ (e.g. Agnes AI, strict OpenAI-compatible).
         name_map: dict[str, str] = {}  # sanitized → original
-        payload["tools"] = []
+        reverse_map: dict[str, str] = {}  # original → sanitized
+        api_tools: list[dict[str, Any]] = []
         for t in tools:
             original = t["name"]
             sanitized = original.replace(".", "_")
             name_map[sanitized] = original
-            payload["tools"].append({
+            reverse_map[original] = sanitized
+            api_tools.append({
                 "type": "function",
                 "function": {
                     "name": sanitized,
@@ -117,7 +129,27 @@ class DeepSeekClient:
                     "parameters": t.get("input_schema", {}),
                 },
             })
-        payload["tool_choice"] = tool_choice
+
+        # Normalize messages: ensure tool_calls use sanitized names
+        api_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            api_msg = dict(msg)
+            if msg.get("role") == "assistant" and "tool_calls" in msg:
+                normalized_tcs = []
+                for tc in msg["tool_calls"]:
+                    ntc = dict(tc)
+                    if "function" in ntc:
+                        ntc["function"] = dict(ntc["function"])
+                        ntc["function"]["name"] = reverse_map.get(
+                            ntc["function"]["name"], ntc["function"]["name"],
+                        )
+                    normalized_tcs.append(ntc)
+                api_msg["tool_calls"] = normalized_tcs
+            api_messages.append(api_msg)
+
+        payload = self._build_payload(
+            system, api_messages, tools=api_tools, tool_choice=tool_choice,
+        )
 
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
         try:
@@ -134,13 +166,17 @@ class DeepSeekClient:
             for tc in raw_tool_calls:
                 func = tc.get("function", {})
                 name = func.get("name", "")
-                # Map sanitized name back to original (e.g. "finance_holdings_summary" → "finance.holdings_summary")
+                # Map sanitized name back to original
                 name = name_map.get(name, name)
                 try:
                     args = json.loads(func.get("arguments", "{}"))
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                result.tool_calls.append(ToolCall(name=name, arguments=args))
+                result.tool_calls.append(ToolCall(
+                    id=tc.get("id", ""),
+                    name=name,
+                    arguments=args,
+                ))
 
             return result
         except (KeyError, IndexError, TypeError) as err:

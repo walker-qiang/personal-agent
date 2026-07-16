@@ -32,7 +32,7 @@ class AnthropicClient:
         self.timeout_sec = timeout_sec
         self.max_message_chars = max_message_chars
 
-    def _truncate(self, messages: list[dict[str, str]], system: str) -> list[dict[str, str]]:
+    def _truncate(self, messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:
         if self.max_message_chars <= 0:
             return messages
         return truncate_messages(
@@ -49,7 +49,7 @@ class AnthropicClient:
             "content-type": "application/json",
         }
 
-    def complete(self, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, system: str, messages: list[dict[str, Any]]) -> str:
         payload = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -70,7 +70,7 @@ class AnthropicClient:
         except (KeyError, TypeError) as err:
             raise LLMError("Anthropic response did not include text content") from err
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]]) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, Any]]) -> Iterator[str]:
         """Stream completion tokens from Anthropic Messages API.
 
         Uses SSE streaming (stream=True). Yields text delta chunks.
@@ -104,7 +104,7 @@ class AnthropicClient:
     def function_call(
         self,
         system: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
     ) -> FunctionCallResult:
@@ -112,6 +112,7 @@ class AnthropicClient:
 
         Anthropic uses a different tool format. Convert from OpenAI-compatible format.
         Returns a FunctionCallResult with either content or tool_calls.
+        Supports multi-turn tool messages (role="tool" with tool_call_id).
         """
         # Convert tools to Anthropic format
         anthropic_tools = []
@@ -125,11 +126,14 @@ class AnthropicClient:
                 }),
             })
 
+        # Convert messages to Anthropic format
+        anthropic_messages = self._to_anthropic_messages(messages)
+
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": system,
-            "messages": self._truncate(messages, system),
+            "messages": anthropic_messages,
             "tools": anthropic_tools,
         }
 
@@ -162,6 +166,7 @@ class AnthropicClient:
                 elif block.get("type") == "tool_use":
                     result.tool_calls.append(
                         ToolCall(
+                            id=block.get("id", ""),
                             name=block.get("name", ""),
                             arguments=block.get("input", {}),
                         )
@@ -171,3 +176,51 @@ class AnthropicClient:
             raise LLMError("Anthropic tool use response parsing failed") from err
 
         return result
+
+    def _to_anthropic_messages(
+        self, messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert OpenAI-compatible messages to Anthropic format.
+
+        Handles: user, assistant, assistant+tool_calls, tool messages.
+        """
+        converted: list[dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "tool":
+                # Anthropic format: tool_result content block
+                converted.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.get("tool_call_id", ""),
+                            "content": content if isinstance(content, str) else json.dumps(content),
+                        }
+                    ],
+                })
+            elif role == "assistant" and "tool_calls" in msg:
+                content_blocks: list[dict[str, Any]] = []
+                if content:
+                    content_blocks.append({"type": "text", "text": content})
+                for tc in msg["tool_calls"]:
+                    func = tc.get("function", {})
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "input": json.loads(func.get("arguments", "{}"))
+                        if isinstance(func.get("arguments"), str)
+                        else func.get("arguments", {}),
+                    })
+                converted.append({"role": "assistant", "content": content_blocks})
+            elif role == "assistant":
+                converted.append({"role": "assistant", "content": content})
+            elif role == "user":
+                converted.append({"role": "user", "content": content})
+            else:
+                converted.append({"role": "user", "content": str(content)})
+
+        return self._truncate(converted, "")
