@@ -199,8 +199,10 @@ class TestChatService:
         chat_service._default_llm = StreamingLLM([
             "当前持仓健康，共2个持仓。",
         ])
-        # Pipeline LLM used by commander_plan_node; returns empty plan → Commander self-plan
-        chat_service._pipeline_llm = FakeLLM(["[]"])
+        # Pipeline LLM used by commander_plan_node; returns single commander step
+        chat_service._pipeline_llm = FakeLLM([
+            '[{"agent_id": "commander", "task": "查询当前持仓", "step": 1}]',
+        ])
         chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]

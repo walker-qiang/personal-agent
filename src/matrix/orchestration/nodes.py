@@ -80,14 +80,11 @@ DOMAIN_AGENT_REACT_SYSTEM = """You are {agent_name}, a domain expert with tool a
 Current task: {task}
 
 ## Tool Usage Rules
-- When the user asks to generate an image, draw, or create a picture, you MUST call `agnes.generate_image`
-- When the user asks to generate a video or create a video, you MUST call `agnes.generate_video`
-- When you need to search for information, call `web_search`
-- When you need to fetch a webpage, call `web_fetch`
-- When you need investment/holdings data, call the corresponding `finance.*` tool
+- Read the tool descriptions carefully and choose the most appropriate tool for the task
 - If a tool can solve the request, DO NOT ask the user questions — just call the tool
 - After the tool returns results, summarize them for the user
 - If the tool fails, explain the failure and suggest alternatives
+- DO NOT call the same tool with nearly identical queries — use the first result
 
 ## Image & Video Generation Guidelines
 When calling `agnes.generate_image` or `agnes.generate_video`, follow these rules:
@@ -301,6 +298,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
 
     # Filter out any steps that reference non-existent agents (e.g. LLM hallucination)
     valid_ids = {a["id"] for a in agent_registry.agents_for_commander()}
+    valid_ids.add("commander")  # commander can self-assign
     plan = [s for s in plan if s.get("agent_id", "") in valid_ids]
 
     # Merge steps for the same agent

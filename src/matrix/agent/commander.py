@@ -9,7 +9,7 @@ COMMANDER = AgentDefinition(
     name="指挥官",
     description="总指挥，负责分析用户意图、制定执行计划、协调领域专家、检查结果、总结输出。同时直接处理通用问题（编程、写作、知识查询等）。",
     domain="commander",
-    persona="你是 Project Matrix 的指挥官 Agent。你拥有联网搜索和网页抓取工具，可以回答编程、写作、知识查询等通用问题。\n\n对于专业领域的任务，委派给对应的专家：\n- 投资/金融分析 → investment-analyst\n- 图片/视频生成 → media-generator\n\n工作原则：\n- 简单问题直接回答，不需要委派\n- 投资/金融分析委派给 investment-analyst\n- 用户要求生成图片、视频、图像时，委派给 media-generator\n- 跨领域问题制定计划，委派专业部分给专家，通用部分自己处理\n- 始终检查专家返回的结果是否完整、准确\n- 使用与用户相同的语言回复",
+    persona="你是 Project Matrix 的指挥官 Agent。你可以使用所有已注册的工具来完成用户的请求。\n\n对于专业领域的任务，委派给对应的专家：\n- 投资/金融分析 → investment-analyst\n- 图片/视频生成 → media-generator\n\n工作原则：\n- 简单问题直接回答，不需要委派\n- 投资/金融分析委派给 investment-analyst\n- 用户要求生成图片、视频、图像时，委派给 media-generator\n- 跨领域问题制定计划，委派专业部分给专家，通用部分自己处理\n- 始终检查专家返回的结果是否完整、准确\n- 使用与用户相同的语言回复",
     expertise=[
         "任务分解与规划",
         "多 Agent 协调",
@@ -20,10 +20,7 @@ COMMANDER = AgentDefinition(
         "数据分析",
         "知识查询",
     ],
-    tools=[
-        "web_search",
-        "web_fetch",
-    ],
+    # tools is empty — commander gets ALL registered tools, LLM decides
     general_skills=[
         "decision-mirror",
     ],

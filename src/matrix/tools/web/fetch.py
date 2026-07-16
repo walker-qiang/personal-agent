@@ -34,7 +34,6 @@ tool_definition = ToolDefinition(
 
 _SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
 _STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
-_HEAD_RE = re.compile(r"<head[^>]*>.*?</head>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 _ENTITY_RE = re.compile(r"&[a-z]+;")
 _SPACE_RE = re.compile(r"\s+")
@@ -97,24 +96,41 @@ def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
 
 
 def _extract_text(html: str) -> str:
-    """Extract readable text from HTML."""
+    """Extract readable text from HTML, prioritizing content areas."""
     # Try to get meta description
-    meta_desc = _META_RE.search(html)
-    meta = f"[页面描述] {meta_desc.group(1)}\n\n" if meta_desc else ""
+    meta_match = _META_RE.search(html)
+    meta = f"[页面描述] {meta_match.group(1)}\n\n" if meta_match else ""
 
-    # Remove scripts, styles, head
-    html = _SCRIPT_RE.sub("", html)
-    html = _STYLE_RE.sub("", html)
-    html = _HEAD_RE.sub("", html)
+    # Try to extract <main> or <article> content first
+    body = html
+    for tag in ("main", "article"):
+        m = re.search(
+            rf"<{tag}[^>]*>(.*?)</{tag}>", html, re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            body = m.group(1)
+            break
+
+    if body == html:
+        # No main/article — remove nav, header, footer, aside
+        for tag in ("nav", "header", "footer", "aside", "script", "style", "head"):
+            body = re.sub(
+                rf"<{tag}[^>]*>.*?</{tag}>", "", body,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
+    # Remove remaining scripts and styles
+    body = _SCRIPT_RE.sub("", body)
+    body = _STYLE_RE.sub("", body)
 
     # Remove remaining tags
-    text = _TAG_RE.sub(" ", html)
+    text = _TAG_RE.sub(" ", body)
     text = _ENTITY_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text)
 
-    # Clean up
+    # Clean up: remove very short lines (nav items) and blank lines
     lines = [line.strip() for line in text.split("\n")]
-    lines = [line for line in lines if line]
+    lines = [line for line in lines if line and len(line) > 1]
     text = "\n".join(lines)
 
     return meta + text

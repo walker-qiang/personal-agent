@@ -91,13 +91,15 @@ class AgentRegistry:
     def build_tool_registry(self, agent_id: str, full_registry: ToolRegistry) -> ToolRegistry:
         """Build a filtered ToolRegistry for a specific agent.
 
-        Only includes tools that match the agent's tool patterns.
+        When agent.tools is empty, ALL tools are available — the LLM decides.
+        Otherwise, only matching tools are included.
         """
         agent = self._agents.get(agent_id)
         if agent is None:
             raise ValueError(f"agent not found: {agent_id}")
         if not agent.tools:
-            return ToolRegistry()
+            # Empty tools list = all tools available
+            return full_registry
 
         filtered = ToolRegistry()
         for tool_name in full_registry.tool_names():

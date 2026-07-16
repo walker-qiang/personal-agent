@@ -61,9 +61,14 @@ class AgentDefinition:
         return "\n".join(lines)
 
     def matches_tool(self, tool_name: str) -> bool:
-        """Check if this agent has access to a given tool."""
+        """Check if this agent has access to a given tool.
+
+        When `tools` is empty (default), ALL tools are available — the LLM
+        decides which tool to use based on the task.  When `tools` is specified,
+        only matching tools are available (useful for domain agents).
+        """
         if not self.tools:
-            return False
+            return True  # empty = all tools available
         for pattern in self.tools:
             if pattern.endswith(".*"):
                 if tool_name.startswith(pattern[:-2]):

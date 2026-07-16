@@ -1,9 +1,9 @@
-"""Web search and fetch tools."""
+"""Web search, fetch, and weather tools."""
 
 from __future__ import annotations
 
 from ..registry import ToolRegistry
-from . import fetch, search
+from . import fetch, search, weather
 
 
 def register_all(registry: ToolRegistry) -> None:
@@ -26,10 +26,19 @@ def register_all(registry: ToolRegistry) -> None:
             handler=fetch.web_fetch,
         )
     )
+    registry.register(
+        ToolDefinition(
+            name=weather.tool_definition.name,
+            description=weather.tool_definition.description,
+            input_schema=weather.tool_definition.input_schema,
+            handler=weather.weather,
+        )
+    )
 
 
 __all__ = [
     "register_all",
     "fetch",
     "search",
+    "weather",
 ]
