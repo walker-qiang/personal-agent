@@ -18,6 +18,7 @@ PUBLIC_PATHS = {
     "/docs",
     "/redoc",
     "/",
+    "/trace",
 }
 
 # Static file extensions that don't need auth
