@@ -35,7 +35,7 @@
   /* ---- Sidebar ---- */
   .layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
   .sidebar {
-    width: 220px;
+    width: var(--sidebar-width, 220px);
     background: var(--surface);
     display: flex;
     flex-direction: column;
@@ -199,7 +199,7 @@
     transition: width 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
   }
   .rpanel.open {
-    width: 240px;
+    width: var(--rpanel-width, 240px);
     padding: 16px 12px;
     border-left-color: var(--border);
     overflow-y: auto;
@@ -607,6 +607,33 @@
   }
   .logout-btn:hover { color: var(--error); border-color: var(--error); }
   .logout-btn svg { width: 18px; height: 18px; }
+  /* Resize handles */
+  .resize-handle {
+    width: 5px; flex-shrink: 0; cursor: col-resize;
+    background: transparent; transition: background 0.12s;
+    position: relative; z-index: 10;
+  }
+  .resize-handle:hover,
+  .resize-handle.active {
+    background: var(--accent);
+  }
+  .resize-handle-left {
+    width: 5px; cursor: col-resize;
+    background: transparent; transition: background 0.12s;
+    position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
+  }
+  .resize-handle-left:hover,
+  .resize-handle-left.active {
+    background: var(--accent);
+  }
+  body.resize-active {
+    -webkit-user-select: none; user-select: none;
+    cursor: col-resize;
+  }
+  body.resize-active * { pointer-events: none; }
+  body.resize-active .resize-handle,
+  body.resize-active .resize-handle-left { pointer-events: auto; }
+  body.resize-active iframe { pointer-events: none; }
   /* Trace drawer */
   .trace-btn {
     padding: 5px 12px; border-radius: var(--radius);
@@ -628,7 +655,7 @@
   .trace-overlay.hidden { opacity: 0; pointer-events: none; }
   .trace-drawer {
     position: fixed; top: 0; right: 0; bottom: 0;
-    width: 380px; max-width: 90vw;
+    width: var(--trace-width, 380px); max-width: 90vw;
     background: var(--surface); border-left: 1px solid var(--border);
     z-index: 200; display: flex; flex-direction: column;
     box-shadow: -4px 0 24px rgba(0,0,0,0.08);
@@ -785,10 +812,12 @@
       </div>
     </div>
   </aside>
+  <div class="resize-handle" data-resize="sidebar" id="rhSidebar"></div>
   <main id="chat">
     <div class="main-inner" id="chatInner">
     </div>
   </main>
+  <div class="resize-handle" data-resize="rpanel" id="rhRpanel"></div>
   <aside class="rpanel" id="rpanel">
     <div class="rpanel-section">
       <div class="rpanel-header">待办</div>
@@ -827,6 +856,7 @@
 <div class="trace-overlay hidden" id="traceOverlay" onclick="toggleTrace()"></div>
 <!-- Trace drawer -->
 <div class="trace-drawer hidden" id="traceDrawer">
+  <div class="resize-handle-left" data-resize="trace" id="rhTrace"></div>
   <div class="td-header">
     <h2>Trace</h2>
     <button class="td-close" onclick="toggleTrace()">&times;</button>
@@ -2049,6 +2079,61 @@ function backToList() {
   document.getElementById('traceList').style.display = '';
   document.getElementById('traceDetail').style.display = 'none';
 }
+
+// ---- Resizable panels ----
+(function() {
+  var CONFIG = {
+    sidebar: { key: 'mx-sidebar-w', min: 160, max: 400, default: 220, cssVar: '--sidebar-width', el: null },
+    rpanel:  { key: 'mx-rpanel-w',  min: 160, max: 500, default: 240, cssVar: '--rpanel-width',  el: null },
+    trace:   { key: 'mx-trace-w',   min: 280, max: 600, default: 380, cssVar: '--trace-width',   el: null, reverse: true }
+  };
+
+  // Restore saved widths
+  Object.keys(CONFIG).forEach(function(k) {
+    var c = CONFIG[k];
+    var saved = localStorage.getItem(c.key);
+    if (saved) {
+      var v = parseInt(saved, 10);
+      if (v >= c.min && v <= c.max) {
+        document.documentElement.style.setProperty(c.cssVar, v + 'px');
+      }
+    }
+  });
+
+  // Init handles
+  document.getElementById('rhSidebar').addEventListener('mousedown', makeDrag(CONFIG.sidebar, 'rhSidebar'));
+  document.getElementById('rhRpanel').addEventListener('mousedown', makeDrag(CONFIG.rpanel, 'rhRpanel'));
+  document.getElementById('rhTrace').addEventListener('mousedown', makeDrag(CONFIG.trace, 'rhTrace'));
+
+  function makeDrag(config, handleId) {
+    return function(e) {
+      e.preventDefault();
+      var startX = e.clientX;
+      var startWidth = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(config.cssVar)) || config.default;
+      var handle = document.getElementById(handleId);
+      handle.classList.add('active');
+      document.body.classList.add('resize-active');
+
+      function onMove(ev) {
+        var delta = config.reverse ? (startX - ev.clientX) : (ev.clientX - startX);
+        var newWidth = Math.max(config.min, Math.min(config.max, startWidth + delta));
+        document.documentElement.style.setProperty(config.cssVar, newWidth + 'px');
+      }
+
+      function onUp() {
+        handle.classList.remove('active');
+        document.body.classList.remove('resize-active');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        var finalWidth = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(config.cssVar));
+        localStorage.setItem(config.key, Math.round(finalWidth));
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+  }
+})();
 
 </script>
 </body>
