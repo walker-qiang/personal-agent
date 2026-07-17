@@ -607,6 +607,95 @@
   }
   .logout-btn:hover { color: var(--error); border-color: var(--error); }
   .logout-btn svg { width: 18px; height: 18px; }
+  /* Trace drawer */
+  .trace-btn {
+    padding: 5px 12px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    font-size: 12px; font-family: inherit; cursor: pointer;
+    color: var(--text-secondary); transition: all 0.12s;
+    display: flex; align-items: center; gap: 5px; position: relative;
+  }
+  .trace-btn:hover { background: rgba(99,102,241,0.08); border-color: var(--accent); color: var(--accent); }
+  .trace-btn .badge {
+    background: var(--accent); color: #fff; font-size: 10px;
+    padding: 1px 6px; border-radius: 10px; font-weight: 700;
+    min-width: 18px; text-align: center;
+  }
+  .trace-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.2);
+    z-index: 100; opacity: 1; transition: opacity 0.2s;
+  }
+  .trace-overlay.hidden { opacity: 0; pointer-events: none; }
+  .trace-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: 380px; max-width: 90vw;
+    background: var(--surface); border-left: 1px solid var(--border);
+    z-index: 200; display: flex; flex-direction: column;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+    transform: translateX(0);
+    transition: transform 0.25s cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .trace-drawer.hidden { transform: translateX(100%); }
+  .td-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .td-header h2 { font-size: 15px; font-weight: 700; }
+  .td-close {
+    width: 28px; height: 28px; border-radius: var(--radius);
+    border: none; background: transparent; cursor: pointer;
+    font-size: 18px; color: var(--text-secondary); line-height: 1;
+  }
+  .td-close:hover { background: var(--bg); color: var(--text); }
+  .td-stats { display: flex; gap: 8px; padding: 12px 16px; flex-shrink: 0; }
+  .td-stat {
+    flex: 1; text-align: center; padding: 8px 4px;
+    background: var(--bg); border-radius: var(--radius);
+  }
+  .td-stat .val { font-size: 18px; font-weight: 700; color: var(--accent); }
+  .td-stat .lbl { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .td-list { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
+  .td-item {
+    padding: 10px 12px; border-radius: var(--radius);
+    border: 1px solid var(--border); margin-bottom: 6px;
+    cursor: pointer; transition: all 0.12s;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .td-item:hover { border-color: var(--accent); background: rgba(99,102,241,0.04); }
+  .td-item .sid { font-family: monospace; font-size: 12px; }
+  .td-item .meta { font-size: 11px; color: var(--text-secondary); display: flex; gap: 8px; margin-top: 2px; }
+  .td-tag {
+    font-size: 10px; padding: 2px 6px; border-radius: 10px; font-weight: 600;
+  }
+  .td-tag-ok { background: #dcfce7; color: #16a34a; }
+  .td-tag-info { background: rgba(99,102,241,0.08); color: var(--accent); }
+  .td-tag-err { background: rgba(255,59,48,0.1); color: var(--error); }
+  .td-detail { flex: 1; overflow-y: auto; padding: 0 16px 12px; display: flex; flex-direction: column; }
+  .td-back {
+    font-size: 12px; color: var(--accent); cursor: pointer;
+    padding: 4px 0 8px; background: none; border: none; font-family: inherit;
+    text-align: left;
+  }
+  .td-back:hover { text-decoration: underline; }
+  .td-event {
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .td-event:last-child { border-bottom: none; }
+  .td-event .erow {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 2px;
+  }
+  .td-event .etype { font-weight: 600; font-size: 11px; }
+  .td-event .etime { font-size: 10px; color: var(--text-secondary); }
+  .td-event .edetail { font-size: 11px; color: var(--text-secondary); }
+  .td-event code {
+    background: var(--bg); padding: 1px 4px; border-radius: 3px;
+    font-size: 10px; color: var(--accent);
+  }
+  .td-event .eerror { color: var(--error); }
+  .td-empty { text-align: center; color: var(--text-secondary); padding: 40px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -637,6 +726,10 @@
 </div>
 <header>
   <h1>Matrix</h1>
+  <button id="traceBtn" class="trace-btn" style="display:none" onclick="toggleTrace()" title="追踪面板">
+    <span>Trace</span>
+    <span class="badge" id="traceBadge" style="display:none">0</span>
+  </button>
   <button id="logoutBtn" class="logout-btn" style="display:none" onclick="handleLogout()" title="退出登录">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
   </button>
@@ -730,6 +823,19 @@
   </div>
 </footer>
 
+<!-- Trace drawer overlay -->
+<div class="trace-overlay hidden" id="traceOverlay" onclick="toggleTrace()"></div>
+<!-- Trace drawer -->
+<div class="trace-drawer hidden" id="traceDrawer">
+  <div class="td-header">
+    <h2>Trace</h2>
+    <button class="td-close" onclick="toggleTrace()">&times;</button>
+  </div>
+  <div class="td-stats" id="traceStats"></div>
+  <div class="td-list" id="traceList"></div>
+  <div class="td-detail" id="traceDetail" style="display:none"></div>
+</div>
+
 <script src="marked.min.js"></script>
 <script>
 // ---- Auth / Token Management ----
@@ -766,6 +872,7 @@ function showLogin() {
 function hideLogin() {
   document.getElementById('loginOverlay').style.display = 'none';
   document.getElementById('logoutBtn').style.display = '';
+  document.getElementById('traceBtn').style.display = '';
 }
 
 async function handleLogin() {
@@ -1844,6 +1951,103 @@ function addRPArtifact(name, preview) {
   div.style.cssText = 'font-size:11px;padding:4px 0;border-bottom:1px solid var(--border);';
   div.innerHTML = '<span style="font-weight:600">' + escapeHtml(name) + '</span><br><span style="color:var(--text-secondary)">' + escapeHtml(preview).substring(0, 80) + '</span>';
   el.appendChild(div);
+}
+
+// ---- Trace panel ----
+var _traceOpen = false;
+function toggleTrace() {
+  _traceOpen = !_traceOpen;
+  document.getElementById('traceOverlay').classList.toggle('hidden', !_traceOpen);
+  document.getElementById('traceDrawer').classList.toggle('hidden', !_traceOpen);
+  if (_traceOpen) {
+    loadTrace();
+    // Reset to list view
+    document.getElementById('traceList').style.display = '';
+    document.getElementById('traceDetail').style.display = 'none';
+  }
+}
+
+function loadTrace() {
+  fetch('/api/trace/stats')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      document.getElementById('traceStats').innerHTML =
+        '<div class="td-stat"><div class="val">' + (data.total_events || 0) + '</div><div class="lbl">Events</div></div>' +
+        '<div class="td-stat"><div class="val">' + (data.total_sessions || 0) + '</div><div class="lbl">Sessions</div></div>' +
+        '<div class="td-stat"><div class="val" style="color:' + (data.total_errors ? 'var(--error)' : 'var(--success)') + '">' + (data.total_errors || 0) + '</div><div class="lbl">Errors</div></div>';
+      document.getElementById('traceBadge').textContent = data.total_sessions || 0;
+      document.getElementById('traceBadge').style.display = data.total_sessions ? '' : 'none';
+    })
+    .catch(function() {});
+
+  fetch('/api/trace/sessions?limit=50')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var el = document.getElementById('traceList');
+      if (!data.length) {
+        el.innerHTML = '<div class="td-empty">暂无追踪数据</div>';
+        return;
+      }
+      el.innerHTML = data.map(function(s) {
+        return '<div class="td-item" onclick="loadTraceDetail(\'' + s.session_id + '\')">' +
+          '<div>' +
+            '<div class="sid">' + escapeHtml(s.session_id) + '</div>' +
+            '<div class="meta">' +
+              '<span>' + (s.started || '') + '</span>' +
+              '<span>' + (s.total_events || 0) + ' events</span>' +
+              '<span>' + (s.tool_calls || 0) + ' tools</span>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:4px">' +
+            (s.errors ? '<span class="td-tag td-tag-err">' + s.errors + ' err</span>' : '') +
+            '<span class="td-tag td-tag-info">' + (s.tool_calls || 0) + ' tools</span>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function() {});
+}
+
+function loadTraceDetail(sid) {
+  document.getElementById('traceList').style.display = 'none';
+  var el = document.getElementById('traceDetail');
+  el.style.display = 'flex';
+  el.innerHTML = '<div class="td-empty">加载中...</div>';
+
+  fetch('/api/trace/sessions/' + encodeURIComponent(sid))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.events.length) {
+        el.innerHTML = '<button class="td-back" onclick="backToList()">&larr; 返回</button><div class="td-empty">无事件</div>';
+        return;
+      }
+      var html = '<button class="td-back" onclick="backToList()">&larr; 返回会话列表</button>';
+      html += data.events.map(function(e) {
+        var icon = e.ok === 0 ? '&#x26D4;' : '&#x2705;';
+        var err = e.error ? '<div class="eerror">' + escapeHtml(e.error) + '</div>' : '';
+        var args = e.arguments ? '<code>' + escapeHtml(typeof e.arguments === 'string' ? e.arguments : JSON.stringify(e.arguments).substring(0, 200)) + '</code>' : '';
+        var preview = e.result_preview ? '<div>' + escapeHtml(e.result_preview) + '</div>' : '';
+        return '<div class="td-event">' +
+          '<div class="erow">' +
+            '<span class="etype">' + icon + ' ' + (e.event_type || 'event') +
+              (e.tool_name ? ' &rarr; ' + escapeHtml(e.tool_name) : '') +
+              (e.agent_id ? ' (' + escapeHtml(e.agent_id) + ')' : '') +
+            '</span>' +
+            '<span class="etime">' + (e.ts || '') + (e.elapsed_ms ? ' ' + e.elapsed_ms + 'ms' : '') + '</span>' +
+          '</div>' +
+          err + args + preview +
+        '</div>';
+      }).join('');
+      el.innerHTML = html;
+    })
+    .catch(function() {
+      el.innerHTML = '<button class="td-back" onclick="backToList()">&larr; 返回</button><div class="td-empty">加载失败</div>';
+    });
+}
+
+function backToList() {
+  document.getElementById('traceList').style.display = '';
+  document.getElementById('traceDetail').style.display = 'none';
 }
 
 </script>

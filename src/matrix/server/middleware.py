@@ -18,7 +18,6 @@ PUBLIC_PATHS = {
     "/docs",
     "/redoc",
     "/",
-    "/trace",
 }
 
 # Public path prefixes (e.g. /api/trace/stats, /api/trace/sessions)

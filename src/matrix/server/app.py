@@ -162,14 +162,6 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
             return HTMLResponse(_INDEX_HTML)
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
 
-    # Trace panel
-    @app.get("/trace", include_in_schema=False)
-    async def serve_trace():
-        trace_path = static_dir / "trace.html"
-        if trace_path.exists():
-            return HTMLResponse(trace_path.read_text(encoding="utf-8"))
-        return HTMLResponse("<h1>Trace Panel</h1><p>Not found.</p>", status_code=404)
-
     # Mount static files (marked.min.js, etc.) — after all routes
     static_dir = Path(__file__).parent / "static"
     if static_dir.is_dir():
