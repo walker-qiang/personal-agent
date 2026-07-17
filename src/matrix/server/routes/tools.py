@@ -41,11 +41,12 @@ async def tools_call(request: Request) -> JSONResponse:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         trace.record(
             {
+                "event_type": "tool_call",
                 "ok": True,
-                "tool": tool,
+                "tool_name": tool,
                 "arguments": arguments,
+                "result": str(result)[:500],
                 "elapsed_ms": elapsed_ms,
-                "result_count": result_count(result),
                 "ts": timestamp(),
             }
         )

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trace Panel — Matrix</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --bg2: #1a1d27;
+  --bg3: #252836;
+  --ink: #e4e6ed;
+  --muted: #8b8fa3;
+  --accent: #6c8aff;
+  --accent2: #4ade80;
+  --err: #f87171;
+  --warn: #fbbf24;
+  --rule: #2a2d3a;
+  --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.5;
+  padding: 24px;
+}
+h1 { font-size: 20px; margin-bottom: 20px; }
+h2 { font-size: 16px; margin-bottom: 12px; color: var(--accent); }
+
+/* Stats */
+.stats { display: flex; gap: 16px; margin-bottom: 24px; }
+.stat-card {
+  background: var(--bg2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  flex: 1;
+}
+.stat-value { font-size: 28px; font-weight: 700; color: var(--accent); }
+.stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* Session list */
+.session-list { margin-bottom: 24px; }
+.session-item {
+  background: var(--bg2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center;
+  transition: border-color 0.15s;
+}
+.session-item:hover { border-color: var(--accent); }
+.session-item.active { border-color: var(--accent); background: var(--bg3); }
+.session-id { font-family: monospace; font-size: 13px; }
+.session-meta { font-size: 12px; color: var(--muted); display: flex; gap: 16px; }
+.badge {
+  padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+}
+.badge-ok { background: rgba(74,222,128,0.15); color: var(--accent2); }
+.badge-err { background: rgba(248,113,113,0.15); color: var(--err); }
+.badge-info { background: rgba(108,138,255,0.15); color: var(--accent); }
+
+/* Detail panel */
+.detail-panel {
+  background: var(--bg2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 16px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+.event-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.event-item:last-child { border-bottom: none; }
+.event-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 4px;
+}
+.event-type { font-weight: 600; }
+.event-time { font-size: 11px; color: var(--muted); }
+.event-body { font-size: 12px; color: var(--muted); }
+.event-body code {
+  background: var(--bg3); padding: 1px 6px; border-radius: 4px;
+  font-size: 11px; color: var(--accent2);
+}
+.event-error { color: var(--err); }
+
+.empty { text-align: center; color: var(--muted); padding: 40px; }
+.loading { color: var(--muted); }
+.refresh-btn {
+  background: var(--accent); color: #fff; border: none;
+  padding: 6px 16px; border-radius: var(--radius); cursor: pointer;
+  font-size: 13px; margin-left: 12px;
+}
+.refresh-btn:hover { opacity: 0.9; }
+.header-row { display: flex; align-items: center; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<div class="header-row">
+  <h1>Trace Panel</h1>
+  <button class="refresh-btn" onclick="loadAll()">Refresh</button>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<h2>Sessions</h2>
+<div class="session-list" id="sessions"></div>
+
+<h2>Detail</h2>
+<div class="detail-panel" id="detail">
+  <div class="empty">Select a session to view trace events</div>
+</div>
+
+<script>
+const API = '/api/trace';
+
+async function loadAll() {
+  await Promise.all([loadStats(), loadSessions()]);
+}
+
+async function loadStats() {
+  try {
+    const res = await fetch(API + '/stats');
+    const data = await res.json();
+    document.getElementById('stats').innerHTML = `
+      <div class="stat-card">
+        <div class="stat-value">${data.total_events}</div>
+        <div class="stat-label">Total Events</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${data.total_sessions}</div>
+        <div class="stat-label">Sessions</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color:${data.total_errors ? 'var(--err)' : 'var(--accent2)'}">${data.total_errors}</div>
+        <div class="stat-label">Errors</div>
+      </div>
+    `;
+  } catch (e) {
+    console.error('stats:', e);
+  }
+}
+
+async function loadSessions() {
+  try {
+    const res = await fetch(API + '/sessions');
+    const data = await res.json();
+    const el = document.getElementById('sessions');
+    if (!data.length) {
+      el.innerHTML = '<div class="empty">No sessions recorded yet</div>';
+      return;
+    }
+    el.innerHTML = data.map(s => `
+      <div class="session-item" onclick="loadDetail('${s.session_id}')" id="sess-${s.session_id}">
+        <div>
+          <div class="session-id">${s.session_id}</div>
+          <div class="session-meta">
+            <span>${s.started || ''}</span>
+            <span>${s.total_events} events</span>
+            <span>${s.tool_calls} tool calls</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px">
+          ${s.errors ? `<span class="badge badge-err">${s.errors} errors</span>` : ''}
+          <span class="badge badge-info">${s.tool_calls} tools</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    console.error('sessions:', e);
+  }
+}
+
+async function loadDetail(sid) {
+  document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('sess-' + sid)?.classList.add('active');
+
+  const el = document.getElementById('detail');
+  el.innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    const res = await fetch(API + '/sessions/' + sid);
+    const data = await res.json();
+    if (!data.events.length) {
+      el.innerHTML = '<div class="empty">No events for this session</div>';
+      return;
+    }
+    el.innerHTML = data.events.map(e => `
+      <div class="event-item">
+        <div class="event-header">
+          <span class="event-type">
+            ${e.ok === 0 ? '&#x26D4;' : '&#x2705;'}
+            ${e.event_type || 'event'}
+            ${e.tool_name ? ' &rarr; ' + e.tool_name : ''}
+            ${e.agent_id ? ' (' + e.agent_id + ')' : ''}
+          </span>
+          <span class="event-time">${e.ts || ''} ${e.elapsed_ms ? e.elapsed_ms + 'ms' : ''}</span>
+        </div>
+        <div class="event-body">
+          ${e.error ? '<div class="event-error">' + e.error + '</div>' : ''}
+          ${e.arguments ? '<code>' + truncate(e.arguments, 200) + '</code>' : ''}
+          ${e.result_preview ? '<div>' + e.result_preview + '</div>' : ''}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="event-error">Failed to load: ' + e.message + '</div>';
+  }
+}
+
+function truncate(v, n) {
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  return s.length > n ? s.slice(0, n) + '...' : s;
+}
+
+loadAll();
+setInterval(loadAll, 10000);
+</script>
+</body>
+</html>

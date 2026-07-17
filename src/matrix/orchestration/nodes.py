@@ -448,6 +448,8 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         tools=agent_tools,
         skill_results=skill_results,
         cfg=cfg,
+        session_id=state.get("session_id", ""),
+        agent_id=agent_id,
     )
 
     new_result = {
@@ -495,6 +497,8 @@ def _run_domain_agent_react(
     tools: ToolRegistry,
     skill_results: list[dict[str, Any]],
     cfg: dict[str, Any],
+    session_id: str = "",
+    agent_id: str = "",
 ) -> dict[str, Any]:
     """Run a ReAct loop for a domain agent using standard multi-turn tool calling.
 
@@ -587,7 +591,12 @@ def _run_domain_agent_react(
                     tool_result = tools.call(tc.name, tc.arguments)
                     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
                     _trace(cfg, {
-                        "ok": True, "tool": tc.name, "arguments": tc.arguments,
+                        "session_id": session_id,
+                        "event_type": "tool_call",
+                        "node_name": "delegate",
+                        "agent_id": agent_id,
+                        "ok": True, "tool_name": tc.name, "arguments": tc.arguments,
+                        "result": str(tool_result)[:500],
                         "elapsed_ms": elapsed_ms, "ts": _now_ts(),
                     })
                     tool_results.append({
@@ -603,7 +612,11 @@ def _run_domain_agent_react(
                 except FinanceToolError as err:
                     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
                     _trace(cfg, {
-                        "ok": False, "tool": tc.name, "arguments": tc.arguments,
+                        "session_id": session_id,
+                        "event_type": "tool_call",
+                        "node_name": "delegate",
+                        "agent_id": agent_id,
+                        "ok": False, "tool_name": tc.name, "arguments": tc.arguments,
                         "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
                     })
                     tool_results.append({

@@ -21,7 +21,7 @@ from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
-from .routes import auth, chat, health, provider, sessions, tools, upload
+from .routes import auth, chat, health, provider, sessions, tools, trace, upload
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
@@ -150,6 +150,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(sessions.router)
     app.include_router(provider.router)
+    app.include_router(trace.router)
 
     # Auth middleware — verify JWT on protected routes
     app.add_middleware(AuthMiddleware)
@@ -160,6 +161,14 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
         if _INDEX_HTML:
             return HTMLResponse(_INDEX_HTML)
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
+
+    # Trace panel
+    @app.get("/trace", include_in_schema=False)
+    async def serve_trace():
+        trace_path = static_dir / "trace.html"
+        if trace_path.exists():
+            return HTMLResponse(trace_path.read_text(encoding="utf-8"))
+        return HTMLResponse("<h1>Trace Panel</h1><p>Not found.</p>", status_code=404)
 
     # Mount static files (marked.min.js, etc.) — after all routes
     static_dir = Path(__file__).parent / "static"

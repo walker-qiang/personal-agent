@@ -152,7 +152,7 @@ class TestTools:
         assert resp.status_code == 400
 
     def test_tools_call_writes_trace(self, client, tmp_cache_path, auth_token):
-        trace_path = tmp_cache_path.parent / "trace" / "tool-calls.jsonl"
+        trace_path = tmp_cache_path.parent / "trace" / "tool-calls.db"
         resp = client.post(
             "/tools/call",
             json={"tool": "finance.asset_lookup", "arguments": {"query": "sample-cash"}},
@@ -160,12 +160,15 @@ class TestTools:
         )
         assert resp.status_code == 200
         assert trace_path.exists()
-        lines = trace_path.read_text(encoding="utf-8").strip().split("\n")
-        trace = [json.loads(line) for line in lines if line.strip()]
-        assert len(trace) >= 1
-        assert trace[-1]["tool"] == "finance.asset_lookup"
-        assert trace[-1]["ok"] is True
-        assert trace[-1]["result_count"] == 1
+        import sqlite3
+        conn = sqlite3.connect(str(trace_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM trace_events WHERE event_type = 'tool_call' ORDER BY id DESC LIMIT 1"
+        ).fetchall()
+        assert len(rows) >= 1
+        assert rows[0]["tool_name"] == "finance.asset_lookup"
+        assert rows[0]["ok"] == 1
 
 
 class TestChat:
