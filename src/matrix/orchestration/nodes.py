@@ -743,7 +743,7 @@ def _run_domain_agent_react(
                         "tool_call_id": tc.id,
                         "content": json.dumps(tool_result, ensure_ascii=False),
                     })
-                except FinanceToolError as err:
+                except (FinanceToolError, TypeError) as err:
                     failed += 1
                     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
                     _trace(cfg, {
@@ -976,7 +976,7 @@ def _run_tool_calls(
                 "name": name, "arguments": args,
                 "result": result, "elapsed_ms": elapsed_ms,
             })
-        except FinanceToolError as err:
+        except (FinanceToolError, TypeError) as err:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             _trace(cfg, {
                 "ok": False, "tool": name, "arguments": args,
@@ -1078,7 +1078,7 @@ Strict rules:
             "name": tool_name, "arguments": arguments,
             "result": result, "elapsed_ms": elapsed_ms,
         })
-    except FinanceToolError as err:
+    except (FinanceToolError, TypeError) as err:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         tool_results.append({
             "name": tool_name, "arguments": arguments,
