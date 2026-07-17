@@ -21,6 +21,9 @@ PUBLIC_PATHS = {
     "/trace",
 }
 
+# Public path prefixes (e.g. /api/trace/stats, /api/trace/sessions)
+PUBLIC_PREFIXES = ("/api/trace",)
+
 # Static file extensions that don't need auth
 PUBLIC_SUFFIXES = {".js", ".css", ".png", ".jpg", ".svg", ".ico", ".woff2", ".map"}
 
@@ -36,6 +39,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         if path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        # Allow public path prefixes (e.g. /api/trace/*)
+        if path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
 
         # Allow static files (JS, CSS, images, etc.) without auth
