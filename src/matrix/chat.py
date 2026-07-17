@@ -271,22 +271,10 @@ class ChatService:
 
         # Load conversation history for context injection into LLM calls
         history = self._get_history(sid, user_id)
-        initial_state: AgentState = {
-            "messages": [],
-            "user_message": text,
-            "session_id": sid,
-            "intent": "",
-            "delegation_plan": [],
-            "current_step": 0,
-            "agent_results": [],
-            "tool_results": [],
-            "tool_call_count": 0,
-            "react_iteration": 0,
-            "final_answer": "",
-            "needs_summary": False,
-            "skip_reflection": False,
-            "error": "",
-        }
+        initial_state = AgentState(
+            user_message=text,
+            session_id=sid,
+        )
 
         interrupted = False
         try:

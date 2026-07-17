@@ -99,21 +99,8 @@ def _build_agent_registry() -> AgentRegistry:
 @pytest.fixture
 def base_state():
     def _make(**overrides) -> AgentState:
-        return {
-            "messages": [],
-            "user_message": "当前持仓情况如何？",
-            "session_id": "test",
-            "delegation_plan": [],
-            "current_step": 0,
-            "agent_results": [],
-            "tool_results": [],
-            "tool_call_count": 0,
-            "react_iteration": 0,
-            "final_answer": "",
-            "needs_summary": False,
-            "error": "",
-            **overrides,
-        }
+        defaults = {"user_message": "当前持仓情况如何？", "session_id": "test"}
+        return AgentState(**(defaults | overrides))
     return _make
 
 

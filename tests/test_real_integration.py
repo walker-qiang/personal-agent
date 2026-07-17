@@ -97,21 +97,10 @@ class TestClassifyReal:
         """Simple greeting → simple."""
         graph = build_graph()
         compiled = graph.compile()
-        state: AgentState = {
-            "messages": [],
-            "user_message": "你好",
-            "session_id": "test-real",
-            "intent": "",
-            "delegation_plan": [],
-            "current_step": 0,
-            "agent_results": [],
-            "tool_results": [],
-            "tool_call_count": 0,
-            "react_iteration": 0,
-            "final_answer": "",
-            "needs_summary": False,
-            "error": "",
-        }
+        state = AgentState(
+            user_message="你好",
+            session_id="test-real",
+        )
         events = list(
             compiled.stream(
                 state,
@@ -128,21 +117,10 @@ class TestClassifyReal:
         """Investment question → delegate."""
         graph = build_graph()
         compiled = graph.compile()
-        state: AgentState = {
-            "messages": [],
-            "user_message": "我的持仓最近有什么变化？",
-            "session_id": "test-real-invest",
-            "intent": "",
-            "delegation_plan": [],
-            "current_step": 0,
-            "agent_results": [],
-            "tool_results": [],
-            "tool_call_count": 0,
-            "react_iteration": 0,
-            "final_answer": "",
-            "needs_summary": False,
-            "error": "",
-        }
+        state = AgentState(
+            user_message="我的持仓最近有什么变化？",
+            session_id="test-real-invest",
+        )
         events = list(
             compiled.stream(
                 state,
@@ -162,21 +140,11 @@ class TestCommanderPlanReal:
         """Commander generates a plan for an investment question."""
         graph = build_graph()
         compiled = graph.compile()
-        state: AgentState = {
-            "messages": [],
-            "user_message": "分析我的持仓配置偏离度",
-            "session_id": "test-real-plan",
-            "intent": "delegate",
-            "delegation_plan": [],
-            "current_step": 0,
-            "agent_results": [],
-            "tool_results": [],
-            "tool_call_count": 0,
-            "react_iteration": 0,
-            "final_answer": "",
-            "needs_summary": False,
-            "error": "",
-        }
+        state = AgentState(
+            user_message="分析我的持仓配置偏离度",
+            session_id="test-real-plan",
+            intent="delegate",
+        )
         events = list(
             compiled.stream(
                 state,
