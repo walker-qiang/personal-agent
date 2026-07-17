@@ -23,8 +23,12 @@ logger = logging.getLogger("matrix.orchestration")
 
 # ---- Limits ----
 
-MAX_REACT_ITERATIONS = 10
+MAX_REACT_ITERATIONS = 20  # Hard safety net; goal-driven stopping should trigger earlier
 MAX_PLAN_STEPS = 3
+MAX_CONSECUTIVE_FAILURES = 2      # Stop if N consecutive tool calls all fail
+MAX_CONSECUTIVE_NO_PROGRESS = 3   # Stop if N consecutive steps add no new info
+MAX_SAME_TOOL_CALLS = 5           # Stop if same tool+args called N+ times
+EVALUATOR_INTERVAL = 3            # Run evaluator every N iterations
 
 # ---- Prompts ----
 
@@ -247,6 +251,120 @@ def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) ->
         role_label = "用户" if h["role"] == "user" else "助手"
         lines.append(f"[{role_label}]: {h['content'][:300]}")
     return "对话历史：\n" + "\n".join(lines) + "\n\n"
+
+
+# ---- Goal-driven Evaluator ----
+
+EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的信息是否已经足够回答用户的问题。
+
+评估标准：
+- SUFFICIENT（充分）：所有回答问题的关键数据已获取，agent 的回答直接针对用户问题，不需要更多工具调用
+- INSUFFICIENT（不充分）：关键数据缺失、agent 拒绝回答、答案含糊其辞、或重要事实陈述缺乏工具结果支撑
+
+请只输出一个词：SUFFICIENT 或 INSUFFICIENT，然后输出一行简短原因（中文）。"""
+
+
+def _evaluate_sufficiency(
+    question: str,
+    tool_results: list[dict[str, Any]],
+    llm_response: str,
+    llm: Any,
+) -> tuple[bool, str]:
+    """Evaluate whether current results are sufficient to answer the question.
+
+    Returns: (is_sufficient: bool, reason: str)
+    """
+    if not tool_results and not llm_response:
+        return False, "无工具结果且无LLM输出"
+
+    # Build a compact summary of tool results
+    tool_summary = []
+    for tr in tool_results[-8:]:  # Last 8 results to keep prompt short
+        name = tr.get("name", "unknown")
+        if "error" in tr:
+            tool_summary.append(f"  [{name}] 失败: {str(tr['error'])[:100]}")
+        else:
+            result = tr.get("result", "")
+            tool_summary.append(f"  [{name}] 结果: {str(result)[:200]}")
+    tool_text = "\n".join(tool_summary) if tool_summary else "（无工具结果）"
+
+    eval_prompt = f"""用户问题：{question}
+
+已收集的工具结果：
+{tool_text}
+
+Agent 当前回答：
+{llm_response[:500] if llm_response else "（尚未生成回答）"}"""
+
+    try:
+        verdict = llm.complete(EVALUATOR_PROMPT, [{"role": "user", "content": eval_prompt}])
+        verdict_clean = verdict.strip().upper()
+        # Validate: must be a meaningful response
+        if len(verdict_clean) < 5 or (
+            "SUFFICIENT" not in verdict_clean and "INSUFFICIENT" not in verdict_clean
+        ):
+            logger.warning("Evaluator returned invalid verdict: %s", verdict[:100])
+            return _evaluate_heuristic(tool_results, llm_response)
+        is_sufficient = verdict_clean.startswith("SUFFICIENT")
+        # Extract reason (after the keyword)
+        reason = verdict.strip()
+        if "\n" in reason:
+            reason = reason.split("\n", 1)[-1].strip()
+        else:
+            # Remove the keyword prefix
+            for prefix in ("SUFFICIENT", "INSUFFICIENT"):
+                if reason.upper().startswith(prefix):
+                    reason = reason[len(prefix):].strip(" ,，:：")
+                    break
+        return is_sufficient, reason
+    except Exception as e:
+        # Evaluator call failed — fall back to heuristic
+        logger.warning("Evaluator call failed: %s, falling back to heuristic", e)
+        return _evaluate_heuristic(tool_results, llm_response)
+
+
+def _evaluate_heuristic(
+    tool_results: list[dict[str, Any]],
+    llm_response: str,
+) -> tuple[bool, str]:
+    """Heuristic fallback when evaluator LLM call fails."""
+    if not llm_response:
+        return False, "无LLM回答"
+    if len(llm_response) < 10:
+        return False, "回答过短"
+    if _is_refusal(llm_response):
+        return False, "回答为拒绝"
+    if _is_hallucination(llm_response):
+        return False, "回答疑似幻觉"
+    if not tool_results:
+        return False, "无工具调用结果"
+    return True, "启发式判定充分"
+
+
+def _check_early_stop(
+    tool_results: list[dict[str, Any]],
+    iteration: int,
+    consecutive_failures: int,
+    consecutive_no_progress: int,
+) -> str | None:
+    """Check early stopping signals. Returns reason string if should stop, None otherwise."""
+    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+        return f"连续 {consecutive_failures} 次工具调用全部失败"
+
+    if consecutive_no_progress >= MAX_CONSECUTIVE_NO_PROGRESS:
+        return f"连续 {consecutive_no_progress} 步未收集到新信息"
+
+    # Check for excessive same-tool calls
+    if tool_results:
+        tool_counts: dict[str, int] = {}
+        for tr in tool_results:
+            key = tr.get("name", "") + ":" + json.dumps(tr.get("arguments", {}), sort_keys=True)
+            tool_counts[key] = tool_counts.get(key, 0) + 1
+        for key, count in tool_counts.items():
+            if count >= MAX_SAME_TOOL_CALLS:
+                return f"同一工具调用 {count} 次: {key[:60]}"
+
+    return None
 
 
 def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
@@ -510,6 +628,12 @@ def _run_domain_agent_react(
     llm = cfg["llm"]
     tool_results: list[dict[str, Any]] = list(skill_results)
     iteration = 0
+    prev_result_count = len(tool_results)
+    consecutive_failures = 0
+    consecutive_no_progress = 0
+
+    # Extract the original user question from config for evaluator
+    original_question = cfg.get("question", task)
 
     # Build conversation history context for multi-turn awareness
     history_context = _build_history_context(cfg.get("history", []))
@@ -529,6 +653,15 @@ def _run_domain_agent_react(
 
     while iteration < MAX_REACT_ITERATIONS:
         iteration += 1
+
+        # ---- Early stop check ----
+        early_reason = _check_early_stop(
+            tool_results, iteration,
+            consecutive_failures, consecutive_no_progress,
+        )
+        if early_reason:
+            logger.info("ReAct early stop at iteration %d: %s", iteration, early_reason)
+            break
 
         llm_tools = _build_tools_for_llm(tools)
 
@@ -568,6 +701,7 @@ def _run_domain_agent_react(
 
             # Execute tools and append tool messages with tool_call_id
             executed = 0
+            failed = 0
             for tc in result.tool_calls:
                 if tc.name not in tools.tool_names():
                     continue
@@ -610,6 +744,7 @@ def _run_domain_agent_react(
                         "content": json.dumps(tool_result, ensure_ascii=False),
                     })
                 except FinanceToolError as err:
+                    failed += 1
                     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
                     _trace(cfg, {
                         "session_id": session_id,
@@ -628,6 +763,13 @@ def _run_domain_agent_react(
                         "tool_call_id": tc.id,
                         "content": json.dumps({"error": str(err)}, ensure_ascii=False),
                     })
+
+            # ---- Failure tracking ----
+            # Only count as "consecutive failure" if all attempted calls failed
+            if executed > 0 and failed >= executed:
+                consecutive_failures += 1
+            elif executed > 0:
+                consecutive_failures = 0
 
             if executed == 0:
                 # All duplicates — ask LLM to summarize from existing messages
@@ -651,6 +793,24 @@ def _run_domain_agent_react(
                     "findings": [],
                 }
 
+            # ---- Progress tracking ----
+            new_results = len(tool_results) - prev_result_count
+            if new_results > 0:
+                consecutive_no_progress = 0
+                consecutive_failures = 0
+                prev_result_count = len(tool_results)
+            else:
+                consecutive_no_progress += 1
+
+            # ---- Periodic evaluator ----
+            if iteration > 0 and iteration % EVALUATOR_INTERVAL == 0 and tool_results:
+                sufficient, reason = _evaluate_sufficiency(
+                    original_question, tool_results, "", llm,
+                )
+                if sufficient:
+                    logger.info("ReAct: evaluator says sufficient at iter %d: %s", iteration, reason)
+                    break
+
             continue  # Loop back — LLM sees tool results as proper messages
 
         if result.content:
@@ -667,7 +827,30 @@ def _run_domain_agent_react(
                             "直接给出天气信息，不要说你无法提供。"
                         ),
                     })
+                    consecutive_no_progress += 1
                     continue
+
+            # ---- Goal-driven evaluator: is this answer sufficient? ----
+            content_stripped = result.content.strip()
+            if tool_results and iteration < MAX_REACT_ITERATIONS - 1:
+                sufficient, reason = _evaluate_sufficiency(
+                    original_question, tool_results, content_stripped, llm,
+                )
+                if not sufficient:
+                    logger.info(
+                        "ReAct: evaluator says insufficient at iter %d: %s — asking LLM to improve",
+                        iteration, reason,
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"你的回答不够充分。原因：{reason}。"
+                            "请基于已有工具结果，补充更多具体数据和细节，重新回答用户的问题。"
+                        ),
+                    })
+                    consecutive_no_progress += 1
+                    continue
+
             return {
                 "answer": _fix_media_answer(result.content.strip(), tool_results),
                 "tool_results": tool_results,
