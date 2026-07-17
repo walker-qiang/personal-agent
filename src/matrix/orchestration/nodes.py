@@ -720,6 +720,10 @@ def _run_domain_agent_react(
             return {"answer": _fix_media_answer("无法完成任务，请检查工具和数据。", tool_results), "tool_results": tool_results, "findings": []}
 
         if result.tool_calls:
+            # Push thinking content (LLM reasoning before tool calls)
+            if result.content:
+                _push_event(cfg, "thinking", {"content": result.content.strip()})
+
             # Append assistant message with tool_calls (standard format)
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",

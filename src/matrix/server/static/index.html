@@ -500,6 +500,51 @@
   .tool-body th, .tool-body td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; font-size: 12px; }
   .tool-body th { background: var(--code-bg); color: var(--text); }
   .tool-body .stat { color: var(--warning); font-weight: 600; }
+  .thinking-group {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .thinking-group-header {
+    background: var(--tool-call);
+    padding: 7px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .thinking-group-header .arrow { margin-left: auto; transition: transform 0.15s; }
+  .thinking-group.open .thinking-group-header .arrow { transform: rotate(180deg); }
+  .thinking-group-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease-out;
+  }
+  .thinking-group.open .thinking-group-body {
+    max-height: 2000px;
+    overflow-y: auto;
+  }
+  .thinking-group-body .tool-section {
+    border: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    margin: 0;
+  }
+  .thinking-text {
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    background: var(--tool-result);
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+  }
   .thinking { display: none; }
   footer {
     background: var(--surface);
@@ -1807,6 +1852,24 @@ function send() {
     toolCache.set(name, { name, args: data.args, preview: '' });
     rpTools.push(name);
     setRPRef('tools', rpTools.join(', '));
+    // Ensure thinking group exists
+    ensureThinkingGroup(asst);
+  });
+
+  es.addEventListener('thinking', (e) => {
+    const data = JSON.parse(e.data);
+    const content = data.content || '';
+    if (!content) return;
+    const grp = ensureThinkingGroup(asst);
+    const body = grp.querySelector('.thinking-group-body');
+    // Add thinking text entry
+    const div = document.createElement('div');
+    div.className = 'thinking-text';
+    div.textContent = content;
+    body.appendChild(div);
+    // Update tool count in header
+    updateThinkingGroupHeader(grp);
+    chat.scrollTop = chat.scrollHeight;
   });
 
   es.addEventListener('tool_result', (e) => {
@@ -1816,14 +1879,21 @@ function send() {
     const cached = toolCache.get(name);
     if (cached) {
       cached.preview = data.preview || '';
-      asst.appendChild(toolSection(cached));
+      const grp = ensureThinkingGroup(asst);
+      grp.querySelector('.thinking-group-body').appendChild(toolSection(cached));
       toolCache.delete(name);
+      updateThinkingGroupHeader(grp);
     }
     addRPArtifact(name, data.preview || '');
   });
 
   es.addEventListener('token', (e) => {
     setStatus(statusBar, '生成中...');
+    // Collapse thinking group when final answer starts
+    const tg = asst.querySelector('.thinking-group');
+    if (tg && tg.classList.contains('open')) {
+      tg.classList.remove('open');
+    }
     let content = asst.querySelector('.content');
     if (!content) {
       content = document.createElement('div');
@@ -1923,6 +1993,36 @@ function hideStatus(el) {
 }
 
 function addThinking(asst) { return null; }  // deprecated, kept for compatibility
+
+// ---- Thinking Group (parent accordion for tool calls + reasoning) ----
+
+function ensureThinkingGroup(asst) {
+  let grp = asst.querySelector('.thinking-group');
+  if (!grp) {
+    grp = document.createElement('div');
+    grp.className = 'thinking-group open';
+    grp.innerHTML = '<div class="thinking-group-header" onclick="this.parentElement.classList.toggle(\'open\')"><span>&#128161;</span><span class="name">思考过程</span><span class="arrow">&#9660;</span></div><div class="thinking-group-body"></div>';
+    // Insert before any existing content div
+    const content = asst.querySelector('.content');
+    if (content) {
+      asst.insertBefore(grp, content);
+    } else {
+      asst.appendChild(grp);
+    }
+  }
+  return grp;
+}
+
+function updateThinkingGroupHeader(grp) {
+  const header = grp.querySelector('.thinking-group-header .name');
+  const body = grp.querySelector('.thinking-group-body');
+  const toolCount = body.querySelectorAll('.tool-section').length;
+  const thinkCount = body.querySelectorAll('.thinking-text').length;
+  const parts = [];
+  if (thinkCount > 0) parts.push(thinkCount + ' 步思考');
+  if (toolCount > 0) parts.push(toolCount + ' 次工具调用');
+  header.textContent = '思考过程' + (parts.length > 0 ? ' · ' + parts.join(' · ') : '');
+}
 
 function userBubble(msg) {
   const div = document.createElement('div');

@@ -719,6 +719,16 @@ def _drain_queue(q: queue.Queue) -> Iterator[dict[str, Any]]:
                         limit=2000,
                     ),
                 }
+            elif evt_type == "thinking":
+                yield {
+                    "type": "thinking",
+                    "content": evt_data.get("content", ""),
+                }
+            elif evt_type == "progress":
+                yield {
+                    "type": "progress",
+                    "message": evt_data.get("message", ""),
+                }
         except queue.Empty:
             break
 
