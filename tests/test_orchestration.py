@@ -194,7 +194,6 @@ class TestDelegateNode:
             current_step=0,
         )
         result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert result["current_step"] == 1
         assert len(result["agent_results"]) == 1
         assert "持仓" in result["agent_results"][0]["result"]
 
@@ -207,7 +206,6 @@ class TestDelegateNode:
             current_step=0,
         )
         result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert result["current_step"] == 1
         assert "error" in result["agent_results"][0]
 
     def test_delegate_with_tool_call(self, base_state, full_tools, agent_registry):
@@ -236,7 +234,6 @@ class TestDelegateNode:
             current_step=0,
         )
         result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert result["current_step"] == 1
         assert len(result["agent_results"]) == 1
 
 

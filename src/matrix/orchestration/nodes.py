@@ -383,6 +383,10 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
 
     Runs a domain agent's ReAct loop to complete the assigned task.
     RAG context (if needed) is already injected by commander_plan_node.
+
+    Returns only the NEW result for this agent (single-element list).
+    agent_results / tool_results / tool_call_count use operator.add reducers
+    in AgentState, so LangGraph merges parallel branch outputs automatically.
     """
     cfg = _get_configurable(config)
     agent_registry: AgentRegistry = cfg["agent_registry"]
@@ -390,7 +394,6 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
 
     plan = state.get("delegation_plan", [])
     current_step = state.get("current_step", 0)
-    agent_results = list(state.get("agent_results", []))
 
     if current_step >= len(plan):
         return {}
@@ -403,15 +406,13 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     # Look up agent
     agent_def = agent_registry.get(agent_id)
     if agent_def is None:
-        agent_results.append({
-            "agent_id": agent_id,
-            "task": task,
-            "error": f"Agent not found: {agent_id}",
-            "findings": [],
-        })
         return {
-            "agent_results": agent_results,
-            "current_step": current_step + 1,
+            "agent_results": [{
+                "agent_id": agent_id,
+                "task": task,
+                "error": f"Agent not found: {agent_id}",
+                "findings": [],
+            }],
         }
 
     # Build agent-specific tools and skills
@@ -419,7 +420,7 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     agent_skills = agent_registry.load_skills_for_agent(agent_id)
 
     # Execute skill if specified
-    skill_results = []
+    skill_results: list[dict[str, Any]] = []
     if skill_name:
         skill = next((s for s in agent_skills if getattr(s, "name", "") == skill_name), None)
         if skill is not None:
@@ -427,17 +428,17 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
             skill_result = execute_skill(skill, agent_tools, cfg.get("trace"))
             skill_results = skill_result.get("results", [])
             if skill_result.get("errors"):
-                agent_results.append({
-                    "agent_id": agent_id,
-                    "task": task,
-                    "skill_name": skill_name,
-                    "error": "; ".join(skill_result["errors"]),
-                    "findings": skill_result.get("findings", []),
-                    "tool_results": skill_results,
-                })
                 return {
-                    "agent_results": agent_results,
-                    "current_step": current_step + 1,
+                    "agent_results": [{
+                        "agent_id": agent_id,
+                        "task": task,
+                        "skill_name": skill_name,
+                        "error": "; ".join(skill_result["errors"]),
+                        "findings": skill_result.get("findings", []),
+                        "tool_results": skill_results,
+                    }],
+                    "tool_results": skill_results,
+                    "tool_call_count": len(skill_results),
                 }
 
     # Run domain agent's ReAct loop
@@ -449,7 +450,7 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         cfg=cfg,
     )
 
-    agent_results.append({
+    new_result = {
         "agent_id": agent_id,
         "task": task,
         "skill_name": skill_name,
@@ -457,18 +458,19 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         "findings": result.get("findings", []),
         "tool_results": result.get("tool_results", []),
         "error": result.get("error", ""),
-    })
+    }
+    new_tool_results = result.get("tool_results", [])
 
     logger.debug(
         "delegate: agent=%s answer_len=%d preview=%s tools=%d",
         agent_id, len(result.get("answer", "")),
         result.get("answer", "")[:80],
-        len(result.get("tool_results", [])),
+        len(new_tool_results),
     )
 
     # Check for high-risk tool calls
     pending_actions = []
-    for tr in result.get("tool_results", []):
+    for tr in new_tool_results:
         tool_name = tr.get("name", "")
         if _is_high_risk(tool_name) and not tr.get("error"):
             pending_actions.append({
@@ -479,10 +481,9 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
             })
 
     return {
-        "agent_results": agent_results,
-        "tool_results": result.get("tool_results", []),
-        "current_step": current_step + 1,
-        "react_iteration": 0,
+        "agent_results": [new_result],
+        "tool_results": new_tool_results,
+        "tool_call_count": len(new_tool_results),
         "needs_confirmation": len(pending_actions) > 0,
         "pending_actions": pending_actions,
     }
@@ -999,6 +1000,7 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         pass
 
     return {}
+
 
 # ---- High-risk tool patterns ----
 

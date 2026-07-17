@@ -288,6 +288,7 @@ class ChatService:
             "error": "",
         }
 
+        interrupted = False
         try:
             emitted_tool_count = 0
             emitted_agent_count = 0
@@ -399,6 +400,7 @@ class ChatService:
 
             except GraphInterrupt as gi:
                 # HITL: graph paused at confirm_node, waiting for user input
+                interrupted = True
                 interrupt_value = gi.args[0] if gi.args else {}
                 pending_actions = interrupt_value.get("actions", [])
                 logger.info(
@@ -411,6 +413,8 @@ class ChatService:
                     "session_llm": session_llm,
                     "user_id": user_id,
                 }
+                # Keep the latest checkpoint (paused state) for HITL resume
+                self._prune_checkpoints(sid, keep_latest=True)
                 yield {
                     "type": "confirm_required",
                     "actions": pending_actions,
@@ -423,7 +427,11 @@ class ChatService:
             yield {"type": "error", "message": f"agent error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
-            self._prune_checkpoints(sid)
+            if not interrupted:
+                # Normal completion: delete all checkpoints so stale state
+                # (agent_results, tool_results, tool_call_count) doesn't
+                # leak into the next call via operator.add reducers.
+                self._prune_checkpoints(sid, keep_latest=False)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
     def resume_chat(self, session_id: str, decision: str = "approve") -> Iterator[dict[str, Any]]:
@@ -520,36 +528,52 @@ class ChatService:
             yield {"type": "error", "message": f"resume error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
-            self._prune_checkpoints(session_id)
+            # Resume completed: delete all checkpoints to prevent stale state
+            # from leaking into the next call.
+            self._prune_checkpoints(session_id, keep_latest=False)
             yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
 
     # ---- Internal ----
 
-    def _prune_checkpoints(self, thread_id: str) -> None:
-        """Keep only the latest checkpoint per thread to prevent unbounded growth.
+    def _prune_checkpoints(self, thread_id: str, keep_latest: bool = True) -> None:
+        """Clean up checkpoints per thread to prevent unbounded growth.
 
         LangGraph's SqliteSaver writes a checkpoint after every node execution.
         Each user question generates 5-6 checkpoints. Over time this accumulates
-        useless history — only the latest checkpoint is needed to resume a
-        conversation. This method deletes all but the most recent checkpoint for
-        the given thread and cleans up the corresponding writes table.
+        useless history.
+
+        Two modes:
+        - keep_latest=True (default): keeps only the latest checkpoint, used for
+          HITL (interrupt/resume) where the paused state must be preserved.
+        - keep_latest=False: deletes ALL checkpoints for this thread, used for
+          normal call completion. This is critical because operator.add reducers
+          on AgentState fields (agent_results, tool_results, tool_call_count)
+          would otherwise merge stale checkpointed state into the next call,
+          causing duplicate results and incorrect routing.
         """
         try:
             conn = self._checkpoint_conn
             if conn is None:
                 return
-            # Delete all but the latest checkpoint for this thread
-            conn.execute(
-                """DELETE FROM checkpoints
-                   WHERE (thread_id, checkpoint_ns, checkpoint_id) IN (
-                     SELECT thread_id, checkpoint_ns, checkpoint_id
-                     FROM checkpoints
-                     WHERE thread_id = ?
-                     ORDER BY checkpoint_id DESC
-                     LIMIT -1 OFFSET 1
-                   )""",
-                (thread_id,),
-            )
+            if keep_latest:
+                # Delete all but the latest checkpoint for this thread
+                conn.execute(
+                    """DELETE FROM checkpoints
+                       WHERE (thread_id, checkpoint_ns, checkpoint_id) IN (
+                         SELECT thread_id, checkpoint_ns, checkpoint_id
+                         FROM checkpoints
+                         WHERE thread_id = ?
+                         ORDER BY checkpoint_id DESC
+                         LIMIT -1 OFFSET 1
+                       )""",
+                    (thread_id,),
+                )
+            else:
+                # Delete all checkpoints for this thread
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?",
+                    (thread_id,),
+                )
             # Clean orphaned writes (no matching checkpoint)
             conn.execute(
                 """DELETE FROM writes

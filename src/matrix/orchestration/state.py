@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import add_messages
@@ -11,6 +12,10 @@ class AgentState(TypedDict):
     """State flowing through the multi-agent LangGraph orchestration graph.
 
     Flow: commander_plan → delegate → aggregate → reflection
+
+    Fields annotated with ``operator.add`` use list concatenation / integer
+    addition as state reducers, enabling parallel agent execution via
+    LangGraph Send API fan-out → fan-in without data loss.
     """
 
     # Core conversation fields
@@ -25,12 +30,12 @@ class AgentState(TypedDict):
     delegation_plan: list[dict[str, Any]]  # [{step, agent_id, task, skill_name, purpose}]
     current_step: int  # index into delegation_plan
 
-    # Agent execution results
-    agent_results: list[dict[str, Any]]  # [{agent_id, task, result, findings, errors}]
+    # Agent execution results — operator.add concatenates results from parallel branches
+    agent_results: Annotated[list[dict[str, Any]], operator.add]
 
     # Tool results (accumulated from all domain agents)
-    tool_results: list[dict[str, Any]]
-    tool_call_count: int
+    tool_results: Annotated[list[dict[str, Any]], operator.add]
+    tool_call_count: Annotated[int, operator.add]
 
     # ReAct (for domain agent execution)
     react_iteration: int

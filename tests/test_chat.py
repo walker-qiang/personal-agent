@@ -125,7 +125,7 @@ class TestChatService:
         chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]
-        assert len(tokens) >= 1
+        assert len(tokens) >= 1, f"events={[(e['type'], e.get('content','')[:60]) for e in events]}"
 
     def test_session_memory_persists(self, chat_service):
         chat_service._default_llm = FakeLLM([
@@ -138,7 +138,7 @@ class TestChatService:
         list(chat_service.stream_chat("当前持仓怎么样？", sid))
         events = list(chat_service.stream_chat("还有变化吗？", sid))
         tokens = [e for e in events if e["type"] == "token"]
-        assert len(tokens) >= 1
+        assert len(tokens) >= 1, f"events={[(e['type'], e.get('content','')[:60]) for e in events]}"
 
     def test_reset_clears_session(self, chat_service):
         chat_service._default_llm = FakeLLM([
