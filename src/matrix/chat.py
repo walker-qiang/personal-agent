@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -299,6 +300,7 @@ class ChatService:
                     "trace": self.trace,
                     "history": history,
                     "retriever": self.retriever,
+                    "event_queue": queue.Queue(),
                 },
                 "thread_id": sid,
             }
@@ -309,6 +311,8 @@ class ChatService:
                     stream_mode="values",
                     config=graph_config,
                 ):
+                    # Drain real-time events from the queue (tool calls from delegate node)
+                    yield from _drain_queue(graph_config["configurable"]["event_queue"])
                     if not isinstance(event, dict):
                         continue
                     final_state = event
@@ -440,6 +444,9 @@ class ChatService:
             return
 
         graph_config = pending["config"]
+        # Ensure the resumed graph has an event queue for real-time streaming
+        if "event_queue" not in graph_config.get("configurable", {}):
+            graph_config.setdefault("configurable", {})["event_queue"] = queue.Queue()
         session_llm = pending["session_llm"]
         user_id = pending["user_id"]
 
@@ -458,6 +465,8 @@ class ChatService:
                 stream_mode="values",
                 config=graph_config,
             ):
+                # Drain real-time events from the queue
+                yield from _drain_queue(graph_config["configurable"]["event_queue"])
                 if not isinstance(event, dict):
                     continue
                 final_state = event
@@ -688,6 +697,30 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
         MEDIA_GENERATOR,
     ])
     return registry
+
+
+def _drain_queue(q: queue.Queue) -> Iterator[dict[str, Any]]:
+    """Drain all pending events from the queue and yield SSE events."""
+    while True:
+        try:
+            evt_type, evt_data = q.get_nowait()
+            if evt_type == "tool_call":
+                yield {
+                    "type": "tool_call",
+                    "name": evt_data["name"],
+                    "args": evt_data.get("args", {}),
+                }
+            elif evt_type == "tool_result":
+                yield {
+                    "type": "tool_result",
+                    "name": evt_data["name"],
+                    "preview": preview_json(
+                        evt_data.get("result", evt_data.get("error", "")),
+                        limit=2000,
+                    ),
+                }
+        except queue.Empty:
+            break
 
 
 def preview_json(value: Any, limit: int = 1200) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import time
 from typing import Any
@@ -609,6 +610,16 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     }
 
 
+def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> None:
+    """Push a real-time event to the SSE queue if available."""
+    q = cfg.get("event_queue")
+    if q is not None:
+        try:
+            q.put_nowait((evt_type, payload))
+        except queue.Full:
+            pass
+
+
 def _run_domain_agent_react(
     agent_def: Any,
     task: str,
@@ -650,6 +661,8 @@ def _run_domain_agent_react(
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": task_content},
     ]
+
+    _push_event(cfg, "progress", {"message": "Agent 开始分析任务，调用工具获取数据..."})
 
     while iteration < MAX_REACT_ITERATIONS:
         iteration += 1
@@ -717,6 +730,7 @@ def _run_domain_agent_react(
 
                 executed += 1
                 started = time.perf_counter()
+                _push_event(cfg, "tool_call", {"name": tc.name, "args": tc.arguments})
                 logger.debug(
                     "tool_call: tool=%s args=%s",
                     tc.name, json.dumps(tc.arguments, ensure_ascii=False)[:200],
@@ -743,6 +757,9 @@ def _run_domain_agent_react(
                         "tool_call_id": tc.id,
                         "content": json.dumps(tool_result, ensure_ascii=False),
                     })
+                    _push_event(cfg, "tool_result", {
+                        "name": tc.name, "result": tool_result,
+                    })
                 except (FinanceToolError, TypeError) as err:
                     failed += 1
                     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -762,6 +779,9 @@ def _run_domain_agent_react(
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": json.dumps({"error": str(err)}, ensure_ascii=False),
+                    })
+                    _push_event(cfg, "tool_result", {
+                        "name": tc.name, "error": str(err)[:200],
                     })
 
             # ---- Failure tracking ----
@@ -841,6 +861,10 @@ def _run_domain_agent_react(
                         "ReAct: evaluator says insufficient at iter %d: %s — asking LLM to improve",
                         iteration, reason,
                     )
+                    _push_event(cfg, "progress", {
+                        "message": f"🔍 评估：回答不够充分 — {reason}，补充更多数据...",
+                        "iteration": iteration,
+                    })
                     messages.append({
                         "role": "user",
                         "content": (
