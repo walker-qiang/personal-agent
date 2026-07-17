@@ -23,7 +23,7 @@ logger = logging.getLogger("matrix.orchestration")
 
 # ---- Limits ----
 
-MAX_REACT_ITERATIONS = 5
+MAX_REACT_ITERATIONS = 10
 MAX_PLAN_STEPS = 3
 
 # ---- Prompts ----
@@ -685,7 +685,19 @@ def _run_domain_agent_react(
 
         return {"answer": _fix_media_answer("无法完成任务，请检查工具和数据。", tool_results), "tool_results": tool_results, "findings": []}
 
-    # Max iterations reached
+    # Max iterations reached — try to generate a partial answer from collected data
+    if tool_results:
+        try:
+            summary_prompt = f"""你已收集了以下工具结果，但步数已达上限。请基于这些数据给出一段简洁的回答：
+
+{json.dumps(tool_results, ensure_ascii=False, indent=2)}
+
+请直接回答用户的问题，不要提及"步数"或"限制"。"""
+            partial = llm.complete("你是专业的回答助手，请基于已有数据回答。", [{"role": "user", "content": summary_prompt}])
+            if partial and len(partial) > 10:
+                return {"answer": _fix_media_answer(partial, tool_results), "tool_results": tool_results, "findings": []}
+        except Exception:
+            pass
     return {
         "answer": _fix_media_answer("已达到最大分析步数，请基于已有数据回答。", tool_results),
         "tool_results": tool_results,
