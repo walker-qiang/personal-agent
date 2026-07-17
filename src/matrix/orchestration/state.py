@@ -38,6 +38,7 @@ class AgentState(TypedDict):
     # Output
     final_answer: str
     needs_summary: bool  # signal that chat.py should stream the final answer
+    skip_reflection: bool  # skip reflection review (e.g. commander pass-through with tool data)
 
     # Error
     error: str

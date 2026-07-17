@@ -284,6 +284,7 @@ class ChatService:
             "react_iteration": 0,
             "final_answer": "",
             "needs_summary": False,
+            "skip_reflection": False,
             "error": "",
         }
 

@@ -455,6 +455,13 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         "error": result.get("error", ""),
     })
 
+    logger.debug(
+        "delegate: agent=%s answer_len=%d preview=%s tools=%d",
+        agent_id, len(result.get("answer", "")),
+        result.get("answer", "")[:80],
+        len(result.get("tool_results", [])),
+    )
+
     # Check for high-risk tool calls
     pending_actions = []
     for tr in result.get("tool_results", []):
@@ -637,6 +644,20 @@ def _run_domain_agent_react(
             continue  # Loop back — LLM sees tool results as proper messages
 
         if result.content:
+            # Refusal check: if the LLM says it cannot answer but we have tool
+            # results, the model ignored the tool data. Append a follow-up
+            # message forcing it to use the available data and loop again.
+            if _is_refusal(result.content) and tool_results:
+                if iteration < MAX_REACT_ITERATIONS:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "你刚才说无法提供数据，但实际上工具已经返回了结果。"
+                            "请基于以上工具返回的真实数据回答用户的问题。"
+                            "直接给出天气信息，不要说你无法提供。"
+                        ),
+                    })
+                    continue
             return {
                 "answer": _fix_media_answer(result.content.strip(), tool_results),
                 "tool_results": tool_results,
@@ -874,11 +895,13 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         return {"needs_summary": True}
 
     # Commander handled it directly: pass through result without re-aggregating
+    # Skip reflection since commander's answer is tool-generated and reflection LLM
+    # doesn't have tool context — it would flag tool data as hallucination.
     if len(agent_results) == 1 and agent_results[0].get("agent_id") == "commander":
         result_text = agent_results[0].get("result", "")
         if result_text:
-            return {"final_answer": result_text, "needs_summary": False}
-        return {"needs_summary": True}
+            return {"final_answer": result_text, "needs_summary": False, "skip_reflection": True}
+        return {"needs_summary": True, "skip_reflection": True}
 
     # Check if all agents failed
     all_errors = all(r.get("error") for r in agent_results)
@@ -935,6 +958,11 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
     answer = state.get("final_answer", "")
     user_msg = state.get("user_message", "")
+
+    # Skip reflection when commander handled directly with tools
+    # (reflection LLM doesn't see tool results and would flag real data as hallucination)
+    if state.get("skip_reflection"):
+        return {}
 
     if not answer or not user_msg:
         return {}
