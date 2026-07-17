@@ -383,7 +383,7 @@ class ChatService:
                 # Streaming summarization
                 if final_state.get("needs_summary"):
                     answer_parts: list[str] = []
-                    for event in self._stream_summarize(final_state, sid, text, session_llm):
+                    for event in self._stream_summarize(final_state, sid, text, session_llm, history):
                         yield event
                         if event["type"] == "token":
                             answer_parts.append(event["content"])
@@ -612,7 +612,8 @@ class ChatService:
             pass  # Memory extraction is best-effort
 
     def _stream_summarize(
-        self, state: dict[str, Any], session_id: str, original_text: str, llm: LLMClient
+        self, state: dict[str, Any], session_id: str, original_text: str, llm: LLMClient,
+        history: list[dict[str, str]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream the LLM summarization token by token via SSE."""
         user_msg = state.get("user_message", original_text)
@@ -629,6 +630,16 @@ Rules:
 - Do NOT include execution process review, agent status tables, or step-by-step workflow
 - Your output is for the end user, not an internal log"""
 
+        # Build conversation history context for multi-turn awareness
+        history_context = ""
+        if history:
+            recent = history[-6:]  # last 3 turns
+            lines = []
+            for h in recent:
+                role_label = "用户" if h["role"] == "user" else "助手"
+                lines.append(f"[{role_label}]: {h['content'][:300]}")
+            history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
+
         user_message = f"""User question: {user_msg}
 
 Tool results:
@@ -639,7 +650,7 @@ Please answer the user's question using only the provided data."""
         full_answer: list[str] = []
         try:
             for token in llm.stream_complete(
-                system_prompt, [{"role": "user", "content": user_message}]
+                system_prompt, [{"role": "user", "content": history_context + user_message}]
             ):
                 full_answer.append(token)
                 yield {"type": "token", "content": token}

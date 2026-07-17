@@ -237,6 +237,18 @@ def _force_tool_call(
         return FunctionCallResult(content="", tool_calls=[])
 
 
+def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) -> str:
+    """Build compact conversation history context for injection into LLM prompts."""
+    if not history:
+        return ""
+    recent = history[-(max_turns * 2):]  # each turn = user + assistant
+    lines = []
+    for h in recent:
+        role_label = "用户" if h["role"] == "user" else "助手"
+        lines.append(f"[{role_label}]: {h['content'][:300]}")
+    return "对话历史：\n" + "\n".join(lines) + "\n\n"
+
+
 def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
     """Build tool definitions list for LLM function calling."""
     return tools.list_tools()
@@ -275,15 +287,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     )
 
     # Build conversation history context for multi-turn awareness
-    history = cfg.get("history", [])
-    history_context = ""
-    if history:
-        recent = history[-6:]  # last 3 turns
-        lines = []
-        for h in recent:
-            role_label = "用户" if h["role"] == "user" else "助手"
-            lines.append(f"[{role_label}]: {h['content'][:300]}")
-        history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
+    history_context = _build_history_context(cfg.get("history", []))
 
     try:
         response = llm.complete(
@@ -503,15 +507,7 @@ def _run_domain_agent_react(
     iteration = 0
 
     # Build conversation history context for multi-turn awareness
-    history = cfg.get("history", [])
-    history_context = ""
-    if history:
-        recent = history[-6:]  # last 3 turns
-        lines = []
-        for h in recent:
-            role_label = "用户" if h["role"] == "user" else "助手"
-            lines.append(f"[{role_label}]: {h['content'][:300]}")
-        history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
+    history_context = _build_history_context(cfg.get("history", []))
 
     # System prompt
     system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
@@ -931,6 +927,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         results_summary.append(summary)
 
     # Commander aggregates
+    history_context = _build_history_context(cfg.get("history", []))
     system_prompt = COMMANDER_AGGREGATE_PROMPT.format(
         question=user_msg,
         results=json.dumps(results_summary, ensure_ascii=False, indent=2),
@@ -939,7 +936,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     try:
         response = llm.complete(
             system_prompt,
-            [{"role": "user", "content": "请汇总回答。"}],
+            [{"role": "user", "content": history_context + "请汇总回答。"}],
         )
         return {"final_answer": response.strip(), "needs_summary": False}
     except LLMError:
@@ -973,9 +970,10 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
     # Step 1: Evaluate
     try:
+        history_context = _build_history_context(cfg.get("history", []))
         response = llm.complete(
             REFLECTION_PROMPT.format(question=user_msg, answer=answer),
-            [{"role": "user", "content": "Evaluate the answer."}],
+            [{"role": "user", "content": history_context + "Evaluate the answer."}],
         )
         data = _extract_json(response)
         if not isinstance(data, dict) or data.get("ok") is not False:
