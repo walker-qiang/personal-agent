@@ -73,25 +73,27 @@ def build_graph() -> StateGraph:
 
 
 def _route_after_commander(state: AgentState):
-    """Route after commander plan: parallel fan-out for multi-agent, direct for single.
+    """Route after commander plan: parallel fan-out for multi-agent or subtask plans.
 
-    When the plan has multiple agents, returns a list of Send objects to
-    dispatch each delegate_node invocation concurrently.  LangGraph waits
-    for all branches to complete before continuing from delegate's edges.
+    When the plan has multiple steps (multi-agent or subtask decomposition),
+    returns a list of Send objects to dispatch each delegate_node invocation
+    concurrently.  LangGraph waits for all branches to complete before
+    continuing from delegate's edges.
 
     NOTE: LangGraph 1.2.x Send API passes only the `arg` dict as the state
     update to the target node, NOT the merged state.  We must include all
-    necessary state fields (delegation_plan, etc.) in the arg.
+    necessary state fields (delegation_plan, plan_type, etc.) in the arg.
     """
     plan = state.get("delegation_plan", [])
     if len(plan) <= 1:
         return "delegate"
-    # Fan out: one Send per agent, each with its own current_step
+    # Fan out: one Send per step, each with its own current_step
     # Include essential state fields that delegate_node needs
     return [
         Send("delegate", {
             "current_step": i,
             "delegation_plan": plan,
+            "plan_type": state.get("plan_type", "agent"),
             "user_message": state.get("user_message", ""),
             "session_id": state.get("session_id", ""),
         })
