@@ -11,6 +11,7 @@ import logging
 import queue
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from langgraph.types import RunnableConfig, interrupt
@@ -134,7 +135,8 @@ When calling `agnes.generate_image` or `agnes.generate_video`, follow these rule
 - Never use plain text links [text](url) for images/videos — always use ![](url) format
 - Use Markdown formatting: **bold** for key figures, `code` for code, bullet lists for breakdowns
 - Do NOT include execution process review, agent status tables, or step-by-step workflow in your output
-- Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so."""
+- Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so.
+- Today is {today}. Never invent dates — only cite dates found in search results. If the user asks about recent events, use news_search."""
 
 REFLECTION_PROMPT = """You are a quality reviewer. Check if the answer below is accurate and complete.
 
@@ -680,6 +682,7 @@ def _run_domain_agent_react(
         agent_name=agent_def.name,
         persona=agent_def.persona,
         task=task,
+        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
 
     # Build initial messages — standard multi-turn format
