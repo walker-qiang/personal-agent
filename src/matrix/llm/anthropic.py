@@ -12,7 +12,7 @@ from .truncate import truncate_messages
 
 
 # Maximum characters per message before truncation
-_DEFAULT_MAX_MESSAGE_CHARS = 8000
+_DEFAULT_MAX_MESSAGE_CHARS = 16000
 
 
 class AnthropicClient:
@@ -49,13 +49,15 @@ class AnthropicClient:
             "content-type": "application/json",
         }
 
-    def complete(self, system: str, messages: list[dict[str, Any]]) -> str:
+    def complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
         payload = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": system,
             "messages": self._truncate(messages, system),
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         data = post_json_with_retry(
             "https://api.anthropic.com/v1/messages",
             payload,
@@ -70,7 +72,7 @@ class AnthropicClient:
         except (KeyError, TypeError) as err:
             raise LLMError("Anthropic response did not include text content") from err
 
-    def stream_complete(self, system: str, messages: list[dict[str, Any]]) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from Anthropic Messages API.
 
         Uses SSE streaming (stream=True). Yields text delta chunks.
@@ -82,6 +84,8 @@ class AnthropicClient:
             "messages": self._truncate(messages, system),
             "stream": True,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         for raw in post_json_stream(
             "https://api.anthropic.com/v1/messages",
             payload,
@@ -107,6 +111,7 @@ class AnthropicClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
+        temperature: float | None = None,
     ) -> FunctionCallResult:
         """Call Anthropic with native tool use.
 
@@ -136,6 +141,8 @@ class AnthropicClient:
             "messages": anthropic_messages,
             "tools": anthropic_tools,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         # Map tool_choice to Anthropic format
         if tool_choice == "auto":

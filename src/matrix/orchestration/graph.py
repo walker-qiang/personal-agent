@@ -15,10 +15,16 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 
 from .nodes import (
+    _route_after_react_evaluate,
+    _route_after_react_llm,
     aggregate_node,
     commander_plan_node,
     confirm_node,
     delegate_node,
+    react_evaluate_node,
+    react_llm_node,
+    react_prepare_node,
+    react_tool_node,
     reflection_node,
 )
 from .state import AgentState
@@ -37,6 +43,10 @@ def build_graph() -> StateGraph:
 
     # Add nodes
     graph.add_node("commander_plan", commander_plan_node)
+    graph.add_node("react_prepare", react_prepare_node)
+    graph.add_node("react_llm", react_llm_node)
+    graph.add_node("react_tool", react_tool_node)
+    graph.add_node("react_evaluate", react_evaluate_node)
     graph.add_node("delegate", delegate_node)
     graph.add_node("confirm", confirm_node)
     graph.add_node("aggregate", aggregate_node)
@@ -45,14 +55,47 @@ def build_graph() -> StateGraph:
     # Start → commander_plan
     graph.set_entry_point("commander_plan")
 
-    # commander_plan → conditional: parallel fan-out or direct delegate
+    # commander_plan → conditional:
+    #   single-step: react_prepare (top-level ReAct with real-time streaming)
+    #   multi-step:  delegate (Send fan-out, subgraph ReAct)
     graph.add_conditional_edges(
         "commander_plan",
         _route_after_commander,
-        {"delegate": "delegate"},
+        {
+            "react_prepare": "react_prepare",
+            "delegate": "delegate",
+        },
     )
 
-    # delegate → confirm or aggregate (no more loop-back)
+    # ---- Top-level ReAct loop (single-step plans) ----
+    # react_prepare → react_llm
+    graph.add_edge("react_prepare", "react_llm")
+
+    # react_llm → conditional: tool calls → react_tool, otherwise → react_evaluate
+    graph.add_conditional_edges(
+        "react_llm",
+        _route_after_react_llm,
+        {
+            "react_tool": "react_tool",
+            "react_evaluate": "react_evaluate",
+        },
+    )
+
+    # react_tool → back to react_llm (loop)
+    graph.add_edge("react_tool", "react_llm")
+
+    # react_evaluate → conditional: not done → react_llm (loop), done → aggregate
+    graph.add_conditional_edges(
+        "react_evaluate",
+        _route_after_react_evaluate,
+        {
+            "react_llm": "react_llm",
+            "aggregate": "aggregate",
+        },
+    )
+
+    # ---- Multi-step plan path (existing) ----
+    # delegate → confirm or aggregate
     graph.add_conditional_edges(
         "delegate",
         _route_after_delegate,
@@ -73,12 +116,18 @@ def build_graph() -> StateGraph:
 
 
 def _route_after_commander(state: AgentState):
-    """Route after commander plan: parallel fan-out for multi-agent or subtask plans.
+    """Route after commander plan.
 
-    When the plan has multiple steps (multi-agent or subtask decomposition),
-    returns a list of Send objects to dispatch each delegate_node invocation
-    concurrently.  LangGraph waits for all branches to complete before
-    continuing from delegate's edges.
+    Single-step plans:
+      → "react_prepare" (top-level ReAct loop with real-time per-node streaming)
+      The react_prepare node sets up the react context, then the
+      react_llm → react_tool → react_evaluate loop runs as top-level
+      LangGraph nodes, yielding SSE events after each node completes.
+
+    Multi-step plans (multi-agent or subtask decomposition):
+      → list of Send("delegate") for parallel fan-out.
+      Each delegate_node runs the subgraph ReAct internally.
+      LangGraph waits for all branches to complete before continuing.
 
     NOTE: LangGraph 1.2.x Send API passes only the `arg` dict as the state
     update to the target node, NOT the merged state.  We must include all
@@ -86,7 +135,7 @@ def _route_after_commander(state: AgentState):
     """
     plan = state.get("delegation_plan", [])
     if len(plan) <= 1:
-        return "delegate"
+        return "react_prepare"
     # Fan out: one Send per step, each with its own current_step
     # Include essential state fields that delegate_node needs
     return [

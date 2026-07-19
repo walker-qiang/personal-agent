@@ -59,6 +59,11 @@ class AgentState(BaseModel):
     # ReAct (for domain agent execution)
     react_iteration: int = 0
 
+    # ReAct context dict — used by the split ReAct nodes (react_prepare → react_llm → react_tool → react_evaluate)
+    # Contains: messages, system, tools_json, question, iteration, consecutive_failures,
+    #           consecutive_no_progress, prev_result_count, agent_id, agent_name, answer
+    react: dict[str, Any] = Field(default_factory=dict)
+
     # Output
     final_answer: str = ""
     needs_summary: bool = False  # signal that chat.py should stream the final answer

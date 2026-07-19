@@ -12,7 +12,7 @@ from .truncate import truncate_messages
 
 
 # Maximum characters per message before truncation
-_DEFAULT_MAX_MESSAGE_CHARS = 8000
+_DEFAULT_MAX_MESSAGE_CHARS = 16000
 
 
 class DeepSeekClient:
@@ -38,12 +38,15 @@ class DeepSeekClient:
         self, system: str, messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
+        temperature: float | None = None,
     ) -> dict:
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": [{"role": "system", "content": system}],
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if self.max_message_chars > 0:
             messages = truncate_messages(
                 messages,
@@ -63,22 +66,22 @@ class DeepSeekClient:
             "content-type": "application/json",
         }
 
-    def complete(self, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         url = self.base_url.rstrip("/") + "/chat/completions"
-        payload = self._build_payload(system, messages)
+        payload = self._build_payload(system, messages, temperature=temperature)
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
         try:
             return str(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as err:
             raise LLMError("DeepSeek response did not include message content") from err
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]]) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from DeepSeek API.
 
         Uses SSE streaming (stream=True). Yields content delta chunks.
         """
         url = self.base_url.rstrip("/") + "/chat/completions"
-        payload = self._build_payload(system, messages)
+        payload = self._build_payload(system, messages, temperature=temperature)
         payload["stream"] = True
         payload.setdefault("stream_options", {"include_usage": False})
 
@@ -101,6 +104,7 @@ class DeepSeekClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
+        temperature: float | None = None,
     ) -> FunctionCallResult:
         """Call DeepSeek/Agnes with native function calling.
 
@@ -148,7 +152,7 @@ class DeepSeekClient:
             api_messages.append(api_msg)
 
         payload = self._build_payload(
-            system, api_messages, tools=api_tools, tool_choice=tool_choice,
+            system, api_messages, tools=api_tools, tool_choice=tool_choice, temperature=temperature,
         )
 
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)

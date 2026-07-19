@@ -34,10 +34,11 @@ def create_token(
 ) -> str:
     """Create a JWT token for the given user."""
     now = datetime.datetime.now(datetime.timezone.utc)
+    now_ts = int(now.timestamp())
     payload = {
         "sub": user_id,
-        "iat": now,
-        "exp": now + datetime.timedelta(hours=expiry_hours),
+        "iat": now_ts,
+        "exp": now_ts + int(datetime.timedelta(hours=expiry_hours).total_seconds()),
         "jti": secrets.token_hex(8),
     }
     return jwt.encode(payload, secret, algorithm="HS256")

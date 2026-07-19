@@ -9,10 +9,10 @@ from typing import Any, Iterator, Protocol
 class LLMClient(Protocol):
     """Protocol for LLM provider clients."""
 
-    def complete(self, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         ...
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]]) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens one by one. Yields content chunks."""
         ...
 
@@ -22,6 +22,7 @@ class LLMClient(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tool_choice: str = "auto",
+        temperature: float | None = None,
     ) -> FunctionCallResult:
         """Call LLM with native function/tool calling support.
 

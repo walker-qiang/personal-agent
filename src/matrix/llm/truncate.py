@@ -77,8 +77,22 @@ def truncate_messages(
     result: list[dict[str, Any]] = []
     used = 0
 
+    # Always preserve the first user message (contains the original question)
+    first_user_idx = -1
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "user":
+            first_user_idx = i
+            break
+    first_user = messages[first_user_idx] if first_user_idx >= 0 else None
+    if first_user is not None:
+        first_user_tokens = _msg_tokens(first_user)
+        # Reserve space for the first user message
+        budget -= first_user_tokens
+
     # Always keep the last message (most recent user query)
     for msg in reversed(messages[:-1]):
+        if first_user is not None and msg is first_user:
+            continue  # Will be inserted at the start
         tokens = _msg_tokens(msg)
         if used + tokens > budget:
             break
@@ -86,8 +100,14 @@ def truncate_messages(
         result.insert(0, msg)
         used += tokens
 
+    # Insert first user message at the start if it was preserved
+    if first_user is not None and first_user not in result:
+        result.insert(0, first_user)
+
     # Append the last message unconditionally
-    result.append(messages[-1])
+    # Avoid duplicating if the first user IS the last message
+    if not result or result[-1] is not messages[-1]:
+        result.append(messages[-1])
 
     # Ensure we don't leave orphan tool messages at the start
     # (tool messages without their preceding assistant message)

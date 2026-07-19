@@ -282,6 +282,8 @@ class ChatService:
             emitted_tool_count = 0
             emitted_agent_count = 0
             classify_emitted = False
+            # Track tool calls emitted via queue to prevent double emission
+            _queue_emitted: set[tuple[str, str]] = set()
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
             logger.debug(
@@ -312,14 +314,14 @@ class ChatService:
                     config=graph_config,
                 ):
                     # Drain real-time events from the queue (tool calls from delegate node)
-                    yield from _drain_queue(graph_config["configurable"]["event_queue"])
+                    yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
                     if not isinstance(event, dict):
                         continue
                     final_state = event
 
                     # Emit classify event when delegation_plan is first set by commander_plan
                     delegation_plan = event.get("delegation_plan")
-                    if delegation_plan is not None and not classify_emitted:
+                    if delegation_plan is not None and len(delegation_plan) > 0 and not classify_emitted:
                         classify_emitted = True
                         # Determine intent: commander-only plan = simple, multi-agent = delegate
                         intent = "delegate" if len(delegation_plan) > 1 or (
@@ -345,13 +347,16 @@ class ChatService:
                             }
                         emitted_agent_count = len(agent_results)
 
-                    # Yield only NEW tool calls (skip duplicates)
+                    # Yield only NEW tool calls (skip duplicates, skip queue-emitted)
                     tool_results = event.get("tool_results", [])
                     new_count = len(tool_results)
                     if new_count > emitted_tool_count:
                         for i in range(emitted_tool_count, new_count):
                             tr = tool_results[i]
                             if tr.get("duplicate") or tr.get("name") == "_knowledge":
+                                continue
+                            tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
+                            if tr_key in _queue_emitted:
                                 continue
                             yield {
                                 "type": "tool_call",
@@ -457,6 +462,7 @@ class ChatService:
 
         emitted_tool_count = 0
         emitted_agent_count = 0
+        _queue_emitted: set[tuple[str, str]] = set()
         final_state: dict[str, Any] = {}
 
         try:
@@ -466,7 +472,7 @@ class ChatService:
                 config=graph_config,
             ):
                 # Drain real-time events from the queue
-                yield from _drain_queue(graph_config["configurable"]["event_queue"])
+                yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
                 if not isinstance(event, dict):
                     continue
                 final_state = event
@@ -485,13 +491,16 @@ class ChatService:
                         }
                     emitted_agent_count = len(agent_results)
 
-                # Yield tool calls
+                # Yield tool calls (skip queue-emitted)
                 tool_results = event.get("tool_results", [])
                 new_count = len(tool_results)
                 if new_count > emitted_tool_count:
                     for i in range(emitted_tool_count, new_count):
                         tr = tool_results[i]
                         if tr.get("duplicate") or tr.get("name") == "_knowledge":
+                            continue
+                        tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
+                        if tr_key in _queue_emitted:
                             continue
                         yield {
                             "type": "tool_call",
@@ -699,12 +708,20 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
     return registry
 
 
-def _drain_queue(q: queue.Queue) -> Iterator[dict[str, Any]]:
-    """Drain all pending events from the queue and yield SSE events."""
+def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) -> Iterator[dict[str, Any]]:
+    """Drain all pending events from the queue and yield SSE events.
+    
+    If tracked is provided, tool_call keys are added to prevent double emission
+    from the state-based path.
+    """
+    import json as _json
     while True:
         try:
             evt_type, evt_data = q.get_nowait()
             if evt_type == "tool_call":
+                if tracked is not None:
+                    args_key = _json.dumps(evt_data.get("args", {}), sort_keys=True)
+                    tracked.add((evt_data["name"], args_key))
                 yield {
                     "type": "tool_call",
                     "name": evt_data["name"],

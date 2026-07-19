@@ -19,6 +19,7 @@ from langgraph.types import RunnableConfig, interrupt
 from ..agent.registry import AgentRegistry
 from ..llm import LLMError, FunctionCallResult
 from ..tools import FinanceToolError, ToolRegistry
+from .anti_hallucination import verify_all_claims, build_verified_output, VerificationResult
 from .state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
@@ -31,8 +32,36 @@ MAX_SUBTASKS = 5             # Max subtasks in a decomposition
 MAX_PLAN_STEPS = 3
 MAX_CONSECUTIVE_FAILURES = 2      # Stop if N consecutive tool calls all fail
 MAX_CONSECUTIVE_NO_PROGRESS = 3   # Stop if N consecutive steps add no new info
-MAX_SAME_TOOL_CALLS = 5           # Stop if same tool+args called N+ times
+MAX_SAME_TOOL_CALLS = 2           # Stop if same tool called N+ times (same name, regardless of args)
+MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across all tools)
 EVALUATOR_INTERVAL = 3            # Run evaluator every N iterations
+
+# ── Query factuality classifier ──────────────────────────────────────────────
+
+_FACTUAL_PATTERNS = [
+    r"(多少|几|什么价格|股价|市值|市盈率|财报|营收|利润|增长率|涨跌|跌幅|涨幅)",
+    r"(搜索|查询|查找|最新|今日|昨天|本周|本月|今年|上个季度|最近)",
+    r"(新闻|报道|公告|发布|宣布|数据|统计|公布|披露)",
+    r"(how much|what is|search|latest|today|price|stock|news|revenue|earnings)",
+]
+
+
+def _classify_query_factuality(question: str) -> float:
+    """Classify query as factual vs creative; return recommended temperature.
+
+    Factual queries (data, news, prices) → low temperature to reduce hallucination.
+    Creative queries (image generation, writing) → normal temperature.
+    """
+    import re as _re
+    score = 0
+    for pat in _FACTUAL_PATTERNS:
+        if _re.search(pat, question, _re.IGNORECASE):
+            score += 1
+    if score >= 2:
+        return 0.1
+    elif score >= 1:
+        return 0.4
+    return 0.7
 
 # ---- Prompts ----
 
@@ -92,12 +121,28 @@ DOMAIN_AGENT_REACT_SYSTEM = """You are {agent_name}, a domain expert with tool a
 
 Current task: {task}
 
+## Honesty Rules — READ FIRST
+**You MUST NOT fabricate data.** If a tool result does not contain the specific information the user asked for, you MUST clearly state that you could not find it. Fabricating plausible-sounding details is the worst possible failure.
+
+Specifically:
+- NEVER invent dates, numbers, statistics, prices, model names, event details, or proper nouns
+- If a search result only shows analyst ratings, do NOT pretend it shows live stock prices
+- If you cannot find the answer, say "抱歉，搜索结果中未找到该信息" — do NOT make up an answer
+- Every factual claim MUST be traceable to a tool result you just received
+- If a tool returns a page that requires login/is geo-blocked/has no data, report that honestly
+
 ## Tool Usage Rules
+- **CRITICAL: Call exactly ONE tool per response. Never call the same tool twice in one step.**
+- **CRITICAL: After a tool returns results, use those results. Do NOT call the same tool again with a different query for the same information — the results will be nearly identical.**
+- **CRITICAL: STOP AND ANSWER when you have enough information. After each tool call, ask yourself: "Can I fully answer the user's question with the data I already have?" If YES, output the answer immediately.**
+- **TIME-SENSITIVE QUERIES: When the user asks for 最近/最新/今天/这次/近期, you MUST use `news_search` (NOT `web_search`). You MUST scan ALL returned results and pick the one with the LATEST date. The first result in the list is NOT necessarily the most recent. If the first result mentions 2025 but a later result mentions 2026-07-06, you MUST cite the 2026 one. Do NOT stop until you have found the most recent event.**
+- **KEYWORD HINT: "潜射导弹" IS a type of "洲际导弹" — treat them as the same concept. "潜射弹道导弹" = submarine-launched ballistic missile = 洲际弹道导弹.**
+- **CRITICAL: web_fetch only works with real article URLs. If a search result has no URL, use the snippet directly.**
 - Read the tool descriptions carefully and choose the most appropriate tool for the task
 - If a tool can solve the request, DO NOT ask the user questions — just call the tool
 - After the tool returns results, summarize them for the user
 - If the tool fails, explain the failure and suggest alternatives
-- DO NOT call the same tool with nearly identical queries — use the first result
+- If you need to search for multiple things, call ONE tool at a time, then decide based on the results
 
 ## Image & Video Generation Guidelines
 When calling `agnes.generate_image` or `agnes.generate_video`, follow these rules:
@@ -129,14 +174,36 @@ When calling `agnes.generate_image` or `agnes.generate_video`, follow these rule
 - After calling the tool, show the result with: ![描述](video_url)
 
 ## Output
+- Today is {today}. Never invent dates — only cite dates found in search results.
 - Use the same language as the user
+- **SOURCE CITATION: Every factual claim (number, date, price, event, quote) MUST be followed by a source tag in the format `[来源: tool_name]`. For example: "腾讯今日收盘价 380 港元 [来源: web_search]" or "据央行公告，利率下调 25 个基点 [来源: news_search]"**
+- **If you cannot find a source for a claim, do NOT make the claim. Instead say "搜索结果中未找到该信息"**
 - If the tool generated an image, show it using Markdown image syntax: ![描述](URL)
 - If the tool generated a video, show it using: ![描述](URL)
 - Never use plain text links [text](url) for images/videos — always use ![](url) format
 - Use Markdown formatting: **bold** for key figures, `code` for code, bullet lists for breakdowns
 - Do NOT include execution process review, agent status tables, or step-by-step workflow in your output
-- Money is CNY unless stated otherwise. Never fabricate data; if tool data is missing, say so.
-- Today is {today}. Never invent dates — only cite dates found in search results. If the user asks about recent events, use news_search."""
+- Money is CNY unless stated otherwise.
+
+## 结构化输出要求（反幻觉）
+
+在回答末尾，你必须附加一个验证块。格式如下：
+
+[VERIFICATION]
+[CLAIM] 具体的事实陈述1 [/CLAIM]
+[EVIDENCE] 工具返回中支持此陈述的原文 [/EVIDENCE]
+[SOURCE] tool_name [/SOURCE]
+
+[CLAIM] 具体的事实陈述2 [/CLAIM]
+[EVIDENCE] 工具返回中支持此陈述的原文 [/EVIDENCE]
+[SOURCE] tool_name [/SOURCE]
+[/VERIFICATION]
+
+规则：
+- 你的回答中每个事实性陈述（数字、日期、价格、人名、事件名、百分比）都必须对应一个 CLAIM 条目
+- EVIDENCE 必须是工具返回结果中的原文（可截取关键句），不得自行编写
+- 如果某个陈述无法在工具结果中找到原文支持，不要写 CLAIM，改为在回答中标注"该信息未在搜索结果中确认"
+- 主观判断、总结、建议不需要 CLAIM"""
 
 REFLECTION_PROMPT = """You are a quality reviewer. Check if the answer below is accurate and complete.
 
@@ -247,7 +314,8 @@ def _force_tool_call(
             tools,
             tool_choice="required",
         )
-    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+        logger.warning("RAG need detection LLM call failed: %s", type(e).__name__)
         return FunctionCallResult(content="", tool_calls=[])
 
 
@@ -307,7 +375,7 @@ Agent 当前回答：
 {llm_response[:500] if llm_response else "（尚未生成回答）"}"""
 
     try:
-        verdict = llm.complete(EVALUATOR_PROMPT, [{"role": "user", "content": eval_prompt}])
+        verdict = llm.complete(EVALUATOR_PROMPT, [{"role": "user", "content": eval_prompt}], temperature=0.1)
         verdict_clean = verdict.strip().upper()
         # Validate: must be a meaningful response
         if len(verdict_clean) < 5 or (
@@ -364,15 +432,19 @@ def _check_early_stop(
     if consecutive_no_progress >= MAX_CONSECUTIVE_NO_PROGRESS:
         return f"连续 {consecutive_no_progress} 步未收集到新信息"
 
-    # Check for excessive same-tool calls
+    # Check for excessive same-tool calls (by name, regardless of args)
     if tool_results:
         tool_counts: dict[str, int] = {}
         for tr in tool_results:
-            key = tr.get("name", "") + ":" + json.dumps(tr.get("arguments", {}), sort_keys=True)
-            tool_counts[key] = tool_counts.get(key, 0) + 1
-        for key, count in tool_counts.items():
+            name = tr.get("name", "")
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+        for name, count in tool_counts.items():
             if count >= MAX_SAME_TOOL_CALLS:
-                return f"同一工具调用 {count} 次: {key[:60]}"
+                return f"同一工具 {name} 调用 {count} 次，信息已足够"
+
+    # Check for excessive total tool calls (across all tools)
+    if len(tool_results) >= MAX_TOTAL_TOOL_CALLS:
+        return f"工具总调用 {len(tool_results)} 次已达上限，应已收集足够信息"
 
     return None
 
@@ -421,11 +493,13 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
         response = llm.complete(
             COMMANDER_PLAN_PROMPT.format(agents=agents_desc, question=user_msg, max_subtasks=MAX_SUBTASKS),
             [{"role": "user", "content": history_context + user_msg}],
+            temperature=0.1,  # Low temperature for structured planning
         )
         plan = _extract_json(response)
         if not isinstance(plan, list):
             plan = []
-    except (LLMError, json.JSONDecodeError, ValueError):
+    except (LLMError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("commander_plan LLM/parse failed: %s", type(e).__name__)
         plan = []
 
     # Filter out any steps that reference non-existent agents (e.g. LLM hallucination)
@@ -483,6 +557,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             need_rag_resp = llm.complete(
                 RAG_NEED_PROMPT.format(question=user_msg),
                 [{"role": "user", "content": user_msg}],
+                temperature=0.0,
             )
             need_rag = need_rag_resp.strip().upper().startswith("YES")
         except Exception:
@@ -644,6 +719,491 @@ def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> 
             pass
 
 
+# ---- Split ReAct nodes (top-level graph, single-step plans) ----
+
+def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Prepare the ReAct context for a single-step domain agent execution.
+
+    Sets up the react dict with system prompt, messages, tools, and
+    tracking variables.  Subsequent nodes (react_llm, react_tool,
+    react_evaluate) use this context to drive the ReAct loop with
+    per-node streaming yields.
+    """
+    cfg = _get_configurable(config)
+    agent_registry: AgentRegistry = cfg["agent_registry"]
+    full_tools: ToolRegistry = cfg["full_tools"]
+
+    plan = state.get("delegation_plan", [])
+    current_step = state.get("current_step", 0)
+    step = plan[current_step] if current_step < len(plan) else {}
+    agent_id = step.get("agent_id", "")
+    task = step.get("task", state["user_message"])
+
+    agent_def = agent_registry.get(agent_id)
+    if agent_def is None:
+        return {"error": f"Agent not found: {agent_id}"}
+
+    agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    llm_tools = _build_tools_for_llm(agent_tools)
+    history_context = _build_history_context(cfg.get("history", []))
+    task_content = history_context + f"请完成以下任务：{task}"
+
+    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
+        agent_name=agent_def.name,
+        persona=agent_def.persona,
+        task=task,
+        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    )
+
+    react = {
+        "messages": [{"role": "user", "content": task_content}],
+        "system": system_prompt,
+        "tools_json": llm_tools,
+        "question": state["user_message"],
+        "iteration": 0,
+        "consecutive_failures": 0,
+        "consecutive_no_progress": 0,
+        "prev_result_count": 0,
+        "agent_id": agent_id,
+        "agent_name": agent_def.name,
+        "answer": "",
+    }
+
+    _push_event(cfg, "progress", {"message": "Agent 开始分析任务，调用工具获取数据..."})
+
+    return {"react": react}
+
+
+def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Call the LLM with function calling to decide the next action.
+
+    Returns updated react context with the LLM response appended to messages.
+    If the LLM returns tool_calls, the route sends execution to react_tool_node.
+    If the LLM returns content without tool_calls, the route sends to
+    react_evaluate_node for sufficiency checking.
+    """
+    cfg = _get_configurable(config)
+    llm = cfg["llm"]
+    agent_registry: AgentRegistry = cfg["agent_registry"]
+    full_tools: ToolRegistry = cfg["full_tools"]
+
+    react = state.get("react", {})
+    if not react:
+        return {}
+
+    agent_id = react.get("agent_id", "")
+    agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    llm_tools = _build_tools_for_llm(agent_tools)
+
+    messages = react.get("messages", [])
+    system_prompt = react.get("system", "")
+    question = react.get("question", "")
+
+    try:
+        temp = _classify_query_factuality(question)
+        result: FunctionCallResult = llm.function_call(system_prompt, messages, llm_tools, temperature=temp)
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+        msg_len = sum(len(str(m.get("content", ""))) for m in messages)
+        logger.error("ReAct: LLM call failed in react_llm_node: %s: %s (msg_count=%d, total_chars=%d)", type(e).__name__, str(e)[:200], len(messages), msg_len)
+        _push_event(cfg, "progress", {"message": f"LLM 调用失败: {type(e).__name__}"})
+        return {
+            "react": {**react, "answer": f"无法完成任务，LLM 调用失败: {type(e).__name__}。请重试。", "error": f"LLM call failed: {type(e).__name__}"},
+            "error": f"LLM call failed: {type(e).__name__}",
+        }
+
+    # Push thinking event
+    if result.content:
+        _push_event(cfg, "thinking", {"content": result.content.strip()})
+    elif result.tool_calls:
+        tool_names = [tc.name for tc in result.tool_calls if tc.name in agent_tools.tool_names()]
+        if tool_names:
+            _push_event(cfg, "thinking", {"content": f"正在调用 {'、'.join(tool_names)} 获取数据..."})
+
+    # Append assistant message
+    assistant_msg: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
+    if result.tool_calls:
+        api_tool_calls = []
+        for tc in result.tool_calls:
+            api_tool_calls.append({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                },
+            })
+        assistant_msg["tool_calls"] = api_tool_calls
+
+    new_messages = list(messages) + [assistant_msg]
+    return {"react": {**react, "messages": new_messages}}
+
+
+def _route_after_react_llm(state: AgentState) -> str:
+    """Route after react_llm: tool calls → react_tool, otherwise → react_evaluate."""
+    react = state.get("react", {})
+    messages = react.get("messages", [])
+    if not messages:
+        return "react_evaluate"
+    last_msg = messages[-1]
+    if last_msg.get("tool_calls"):
+        return "react_tool"
+    return "react_evaluate"
+
+
+def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Execute tool calls from the latest assistant message.
+
+    For each tool call: checks guards (total calls, same-tool, dedup),
+    executes the tool, and appends the result as a tool message.
+    Returns updated tool_results and react context.
+    """
+    cfg = _get_configurable(config)
+    agent_registry: AgentRegistry = cfg["agent_registry"]
+    full_tools: ToolRegistry = cfg["full_tools"]
+
+    react = state.get("react", {})
+    if not react:
+        return {}
+
+    agent_id = react.get("agent_id", "")
+    agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+
+    messages = react.get("messages", [])
+    if not messages:
+        return {}
+
+    last_msg = messages[-1]
+    tool_calls_raw = last_msg.get("tool_calls", [])
+    if not tool_calls_raw:
+        return {}
+
+    logger.info("ReAct: react_tool_node batch_size=%d accumulated_before=%d", len(tool_calls_raw), len(state.get("tool_results", [])))
+
+    # Accumulated tool results for guard checks (reads from state, uses operator.add)
+    accumulated = list(state.get("tool_results", []))
+    # New tool results from this node invocation only (returned as delta)
+    new_tool_results: list[dict[str, Any]] = []
+    # Hard guard: never call the same (tool_name, args) twice in a single batch
+    _called_in_batch: set[tuple[str, str]] = set()
+
+    executed = 0
+    failed = 0
+    new_messages = list(messages)
+
+    for tc_raw in tool_calls_raw:
+        func = tc_raw.get("function", {})
+        name = func.get("name", "")
+        try:
+            arguments = json.loads(func.get("arguments", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            arguments = {}
+
+        if name not in agent_tools.tool_names():
+            continue
+
+        # Hard guard: skip duplicate (name, args) within the same batch
+        call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+        if call_key in _called_in_batch:
+            logger.info("ReAct: batch-dedup skip %s (same args in batch)", name)
+            _push_event(cfg, "progress", {"message": f"跳过重复调用 {name}（同批次内相同参数）"})
+            continue
+
+        # Total tool call guard (check accumulated)
+        total_calls = len(accumulated) + len(new_tool_results)
+        if total_calls >= MAX_TOTAL_TOOL_CALLS:
+            logger.info("ReAct: skipping %s (total %d >= %d)", name, total_calls, MAX_TOTAL_TOOL_CALLS)
+            _push_event(cfg, "progress", {"message": f"已收集 {total_calls} 条数据，跳过剩余工具调用"})
+            continue
+
+        # Same-tool guard (check accumulated + new)
+        same_tool_count = (
+            sum(1 for tr in accumulated if tr.get("name") == name)
+            + sum(1 for tr in new_tool_results if tr.get("name") == name)
+        )
+        if same_tool_count >= MAX_SAME_TOOL_CALLS:
+            logger.info("ReAct: skipping %s (%d >= %d)", name, same_tool_count, MAX_SAME_TOOL_CALLS)
+            _push_event(cfg, "progress", {"message": f"已调用 {name} {same_tool_count} 次，跳过重复调用"})
+            continue
+
+        # Dedup: check accumulated + new (args-level)
+        args_key = json.dumps(arguments, sort_keys=True)
+        dedup_match = False
+        for prev in accumulated + new_tool_results:
+            prev_name = prev.get("name", "")
+            prev_args = prev.get("arguments", {})
+            prev_args_key = json.dumps(prev_args, sort_keys=True)
+            if prev_name == name and prev_args_key == args_key:
+                dedup_match = True
+                break
+        if dedup_match:
+            logger.info("ReAct: dedup skip %s (same args key=%s...)", name, args_key[:80])
+            continue
+        else:
+            # Log accumulated keys for debugging
+            acc_keys = [json.dumps(p.get("arguments", {}), sort_keys=True)[:60] for p in accumulated]
+            logger.info("ReAct: dedup no-match for %s args_key=%s accumulated_keys=%s",
+                         name, args_key[:80], acc_keys)
+
+        _called_in_batch.add(call_key)
+
+        executed += 1
+        started = time.perf_counter()
+
+        try:
+            tool_result = agent_tools.call(name, arguments)
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "session_id": state.get("session_id", ""),
+                "event_type": "tool_call",
+                "node_name": "react_tool",
+                "agent_id": agent_id,
+                "ok": True, "tool_name": name, "arguments": arguments,
+                "result": str(tool_result)[:500],
+                "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+            })
+            new_tool_results.append({
+                "name": name, "arguments": arguments,
+                "result": tool_result, "elapsed_ms": elapsed_ms,
+            })
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps(tool_result, ensure_ascii=False),
+            })
+        except (FinanceToolError, TypeError) as err:
+            failed += 1
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "session_id": state.get("session_id", ""),
+                "event_type": "tool_call",
+                "node_name": "react_tool",
+                "agent_id": agent_id,
+                "ok": False, "tool_name": name, "arguments": arguments,
+                "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+            })
+            new_tool_results.append({
+                "name": name, "arguments": arguments,
+                "error": str(err), "elapsed_ms": elapsed_ms,
+            })
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps({"error": str(err)}, ensure_ascii=False),
+            })
+
+    # Update failure/progress tracking (based on accumulated + new)
+    total_after = len(accumulated) + len(new_tool_results)
+    prev_result_count = react.get("prev_result_count", 0)
+    consecutive_failures = react.get("consecutive_failures", 0)
+    consecutive_no_progress = react.get("consecutive_no_progress", 0)
+
+    if executed > 0 and failed >= executed:
+        consecutive_failures += 1
+    elif executed > 0:
+        consecutive_failures = 0
+
+    if len(new_tool_results) > 0:
+        consecutive_no_progress = 0
+        prev_result_count = total_after
+    else:
+        consecutive_no_progress += 1
+
+    if executed == 0:
+        # All tool calls were deduped — force the LLM to summarize from existing
+        # results without attempting more tool calls.  Without this flag the
+        # evaluate node would loop back to react_llm_node indefinitely because
+        # last_content is empty (the LLM only produced tool_calls, no text).
+        new_messages.append({
+            "role": "user",
+            "content": "所有工具调用均为重复，无需再调用工具。请直接基于以上已有的工具返回结果回答用户的问题。",
+        })
+
+    return {
+        "react": {
+            **react,
+            "messages": new_messages,
+            "consecutive_failures": consecutive_failures,
+            "consecutive_no_progress": consecutive_no_progress,
+            "prev_result_count": prev_result_count,
+            "force_summarize": executed == 0,
+        },
+        "tool_results": new_tool_results,
+        "tool_call_count": len(new_tool_results),
+    }
+
+
+def react_evaluate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Evaluate whether the current results are sufficient to answer.
+
+    Checks early stop conditions and runs the evaluator LLM.  If sufficient,
+    returns the final answer.  If insufficient, prompts the LLM to improve.
+    """
+    cfg = _get_configurable(config)
+    llm = cfg["llm"]
+
+    react = state.get("react", {})
+    if not react:
+        return {}
+
+    # If answer is already set (e.g. error from react_llm_node), route to aggregate
+    if react.get("answer"):
+        return _build_react_final_answer(react, state.get("tool_results", []), llm, react.get("iteration", 0))
+
+    tool_results = state.get("tool_results", [])
+    iteration = react.get("iteration", 0) + 1
+    question = react.get("question", "")
+    messages = react.get("messages", [])
+    consecutive_failures = react.get("consecutive_failures", 0)
+    consecutive_no_progress = react.get("consecutive_no_progress", 0)
+
+    # Early stop check
+    early_reason = _check_early_stop(
+        tool_results, iteration, consecutive_failures, consecutive_no_progress,
+    )
+    if early_reason:
+        logger.info("ReAct early stop at iteration %d: %s", iteration, early_reason)
+        return _build_react_final_answer(react, tool_results, llm, iteration)
+
+    # Get the latest LLM response
+    last_content = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant" and msg.get("content"):
+            last_content = msg["content"]
+            break
+
+    if not last_content:
+        # No text content yet — normally this loops back to react_llm_node.
+        # But if all tool calls were deduped (force_summarize), the LLM has
+        # nothing to act on and will loop forever.  Force final answer instead.
+        if react.get("force_summarize"):
+            return _build_react_final_answer(react, tool_results, llm, iteration)
+        return {"react": {**react, "iteration": iteration}}
+
+    # Refusal check
+    if _is_refusal(last_content) and tool_results:
+        new_messages = list(messages) + [{
+            "role": "user",
+            "content": "你刚才说无法提供数据，但实际上工具已经返回了结果。请基于以上工具返回的真实数据回答用户的问题。",
+        }]
+        return {
+            "react": {
+                **react,
+                "messages": new_messages,
+                "iteration": iteration,
+                "consecutive_no_progress": consecutive_no_progress + 1,
+            },
+        }
+
+    # Periodic evaluator — only runs every EVALUATOR_INTERVAL iterations.
+    # No always-run evaluator: calling a separate LLM per iteration to judge
+    # sufficiency introduces its own errors (false "insufficient" verdicts
+    # that trigger unnecessary loops, overriding correct answers).
+    if tool_results and iteration > 0 and iteration % EVALUATOR_INTERVAL == 0:
+        sufficient, reason = _evaluate_sufficiency(question, tool_results, last_content, llm)
+        if sufficient:
+            react["iteration"] = iteration
+            return _build_react_final_answer(react, tool_results, llm, iteration)
+
+    # Sufficient — build final answer
+    return _build_react_final_answer(react, tool_results, llm, iteration)
+
+
+def _llm_summarize_from_results(
+    question: str,
+    tool_results: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    llm,
+) -> str:
+    """Call the LLM to summarize from existing tool results.
+
+    Used when all tool calls were deduped and the LLM has no text content
+    (only tool_calls) — we need an explicit summarization call to get a
+    text answer the user can read.
+    """
+    # Build a compact summary of tool results
+    result_summary_parts = []
+    for i, tr in enumerate(tool_results):
+        name = tr.get("name", f"tool_{i}")
+        result = tr.get("result", "")
+        if result:
+            result_str = json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
+            # Truncate very long results
+            if len(result_str) > 2000:
+                result_str = result_str[:2000] + "..."
+            result_summary_parts.append(f"[{name} #{i+1}]\n{result_str}")
+
+    summary_text = "\n\n".join(result_summary_parts)
+
+    summary_msg = [
+        {"role": "system", "content": "你是一个有帮助的助手。请基于提供的工具搜索结果，直接回答用户的问题。不要调用工具，直接回答。使用中文。"},
+        {"role": "user", "content": f"用户问题：{question}\n\n以下是工具搜索结果：\n\n{summary_text}\n\n请基于以上结果回答用户的问题。"},
+    ]
+
+    try:
+        response = llm.invoke(summary_msg)
+        return response.content.strip() if hasattr(response, "content") else str(response)
+    except Exception:
+        logger.exception("_llm_summarize_from_results: LLM call failed")
+        return "抱歉，系统暂时无法处理您的问题。请稍后重试。"
+
+
+def _build_react_final_answer(
+    react: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+    llm,
+    iteration: int,
+) -> dict[str, Any]:
+    """Build the final agent result from the react context."""
+    agent_id = react.get("agent_id", "")
+    messages = react.get("messages", [])
+    question = react.get("question", "")
+
+    # Extract the last assistant content as answer; fall back to react["answer"]
+    # (which may be set directly by error paths in react_llm_node)
+    answer = react.get("answer", "")
+    if not answer:
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                answer = msg["content"]
+                break
+
+    # If still no answer but we have tool results, ask the LLM to summarize
+    if not answer and tool_results:
+        answer = _llm_summarize_from_results(question, tool_results, messages, llm)
+
+    answer = _fix_media_answer(answer, tool_results)
+
+    # ── Anti-hallucination verification ──
+    verification = verify_all_claims(answer, tool_results, llm)
+    if verification.total > 0:
+        answer = build_verified_output(answer, verification)
+
+    new_result = {
+        "agent_id": agent_id,
+        "task": question,
+        "result": answer,
+        "findings": [],
+        "tool_results": tool_results,
+        "error": "",
+    }
+
+    return {
+        "react": {**react, "iteration": iteration, "answer": answer},
+        "agent_results": [new_result],
+    }
+
+
+def _route_after_react_evaluate(state: AgentState) -> str:
+    """Route after react_evaluate: loop back to react_llm if not done, else aggregate."""
+    react = state.get("react", {})
+    if react.get("answer"):
+        return "aggregate"
+    return "react_llm"
+
+
+# ---- Subgraph ReAct (multi-step plans, compiled inside delegate_node) ----
+
+
 def _run_domain_agent_react(
     agent_def: Any,
     task: str,
@@ -708,10 +1268,13 @@ def _run_domain_agent_react(
         llm_tools = _build_tools_for_llm(tools)
 
         try:
+            temp = _classify_query_factuality(original_question)
             result: FunctionCallResult = llm.function_call(
-                system_prompt, messages, llm_tools,
+                system_prompt, messages, llm_tools, temperature=temp,
             )
-        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
+        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+            msg_len = sum(len(str(m.get("content", ""))) for m in messages)
+            logger.error("ReAct: LLM call failed in domain_agent_react: %s (msg_count=%d, total_chars=%d)", type(e).__name__, len(messages), msg_len)
             # Fallback to regex-based ReAct
             react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm)
             if react_result.get("answer"):
@@ -724,8 +1287,30 @@ def _run_domain_agent_react(
 
         if result.tool_calls:
             # Push thinking content (LLM reasoning before tool calls)
+            # Note: most LLMs return empty content when calling tools, so we
+            # use the LLM's content if available, otherwise generate a brief
+            # message from the tool actions.
             if result.content:
                 _push_event(cfg, "thinking", {"content": result.content.strip()})
+            else:
+                # Generate thinking message from tool calls
+                tool_names = []
+                for tc in result.tool_calls:
+                    if tc.name not in tools.tool_names():
+                        continue
+                    args_key = json.dumps(tc.arguments, sort_keys=True)
+                    if any(
+                        prev.get("name") == tc.name
+                        and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key
+                        for prev in tool_results
+                    ):
+                        continue
+                    tool_names.append(tc.name)
+                if tool_names:
+                    names_str = "、".join(tool_names)
+                    _push_event(cfg, "thinking", {
+                        "content": f"正在调用 {names_str} 获取数据...",
+                    })
 
             # Append assistant message with tool_calls (standard format)
             assistant_msg: dict[str, Any] = {
@@ -750,6 +1335,34 @@ def _run_domain_agent_react(
             failed = 0
             for tc in result.tool_calls:
                 if tc.name not in tools.tool_names():
+                    continue
+
+                # Total tool call guard: skip if we already have enough data
+                total_calls = len(tool_results)
+                if total_calls >= MAX_TOTAL_TOOL_CALLS:
+                    logger.info(
+                        "ReAct: skipping %s at iter %d (total %d >= %d)",
+                        tc.name, iteration, total_calls, MAX_TOTAL_TOOL_CALLS,
+                    )
+                    _push_event(cfg, "progress", {
+                        "message": f"已收集 {total_calls} 条数据，跳过剩余工具调用",
+                    })
+                    continue
+
+                # Same-tool guard: skip if this tool already called enough times
+                same_tool_count = sum(1 for tr in tool_results if tr.get("name") == tc.name)
+                logger.debug(
+                    "ReAct: same-tool guard tc=%s count=%d/%d",
+                    tc.name, same_tool_count, MAX_SAME_TOOL_CALLS,
+                )
+                if same_tool_count >= MAX_SAME_TOOL_CALLS:
+                    logger.info(
+                        "ReAct: skipping %s at iter %d (%d >= %d)",
+                        tc.name, iteration, same_tool_count, MAX_SAME_TOOL_CALLS,
+                    )
+                    _push_event(cfg, "progress", {
+                        "message": f"已调用 {tc.name} {same_tool_count} 次，跳过重复调用",
+                    })
                     continue
 
                 # Dedup check
@@ -838,7 +1451,8 @@ def _run_domain_agent_react(
                             "tool_results": tool_results,
                             "findings": [],
                         }
-                except (LLMError, ConnectionError, TimeoutError, ValueError, OSError):
+                except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+                    logger.error("ReAct: LLM call failed in domain_agent_react final: %s (msg_count=%d)", type(e).__name__, len(messages))
                     pass
                 return {
                     "answer": _fix_media_answer("工具调用已完成，但无法生成总结。", tool_results),
@@ -883,31 +1497,9 @@ def _run_domain_agent_react(
                     consecutive_no_progress += 1
                     continue
 
-            # ---- Goal-driven evaluator: is this answer sufficient? ----
-            content_stripped = result.content.strip()
-            if tool_results and iteration < max_iterations - 1:
-                sufficient, reason = _evaluate_sufficiency(
-                    original_question, tool_results, content_stripped, llm,
-                )
-                if not sufficient:
-                    logger.info(
-                        "ReAct: evaluator says insufficient at iter %d: %s — asking LLM to improve",
-                        iteration, reason,
-                    )
-                    _push_event(cfg, "progress", {
-                        "message": f"🔍 评估：回答不够充分 — {reason}，补充更多数据...",
-                        "iteration": iteration,
-                    })
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"你的回答不够充分。原因：{reason}。"
-                            "请基于已有工具结果，补充更多具体数据和细节，重新回答用户的问题。"
-                        ),
-                    })
-                    consecutive_no_progress += 1
-                    continue
-
+            # No always-run evaluator here: the periodic evaluator above already
+            # checks sufficiency. Calling an extra LLM per iteration to judge
+            # the answer creates false negatives that override correct answers.
             return {
                 "answer": _fix_media_answer(result.content.strip(), tool_results),
                 "tool_results": tool_results,
@@ -933,7 +1525,7 @@ def _run_domain_agent_react(
 {json.dumps(tool_results, ensure_ascii=False, indent=2)}
 
 请直接回答用户的问题，不要提及"步数"或"限制"。"""
-            partial = llm.complete("你是专业的回答助手，请基于已有数据回答。", [{"role": "user", "content": summary_prompt}])
+            partial = llm.complete("你是专业的回答助手，请基于已有数据回答。", [{"role": "user", "content": summary_prompt}], temperature=0.1)
             if partial and len(partial) > 10:
                 return {"answer": _fix_media_answer(partial, tool_results), "tool_results": tool_results, "findings": []}
         except Exception:
@@ -994,59 +1586,6 @@ def _fix_media_answer(answer: str, tool_results: list[dict]) -> str:
     return f"Done! Generated successfully.\n\n{media_urls}"
 
 
-def _run_tool_calls(
-    tool_calls: list,
-    tool_results: list[dict],
-    tools: ToolRegistry,
-    cfg: dict[str, Any],
-) -> int:
-    """Execute a batch of tool calls. Returns number of NEW calls executed."""
-    executed = 0
-    for tc in tool_calls:
-        name = getattr(tc, "name", "")
-        args = getattr(tc, "arguments", {})
-
-        if name not in tools.tool_names():
-            continue
-
-        # Deduplication
-        args_key = json.dumps(args, sort_keys=True)
-        dup = any(
-            prev.get("name") == name
-            and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key
-            for prev in tool_results
-        )
-        if dup:
-            continue
-
-        executed += 1
-        started = time.perf_counter()
-        logger.debug("tool_call: tool=%s args=%s", name, json.dumps(args, ensure_ascii=False)[:200])
-        try:
-            result = tools.call(name, args)
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-            _trace(cfg, {
-                "ok": True, "tool": name, "arguments": args,
-                "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-            })
-            tool_results.append({
-                "name": name, "arguments": args,
-                "result": result, "elapsed_ms": elapsed_ms,
-            })
-        except (FinanceToolError, TypeError) as err:
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-            _trace(cfg, {
-                "ok": False, "tool": name, "arguments": args,
-                "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-            })
-            tool_results.append({
-                "name": name, "arguments": args,
-                "error": str(err), "elapsed_ms": elapsed_ms,
-            })
-
-    return executed
-
-
 def _domain_react_fallback(
     agent_def: Any,
     task: str,
@@ -1088,8 +1627,9 @@ Strict rules:
     context += "Complete the task."
 
     try:
-        response = llm.complete(system_prompt, [{"role": "user", "content": context}])
-    except LLMError:
+        response = llm.complete(system_prompt, [{"role": "user", "content": context}], temperature=0.1)
+    except LLMError as e:
+        logger.error("domain_react_fallback LLM failed: %s", type(e).__name__)
         return {"answer": "LLM 调用失败。", "tool_results": tool_results, "findings": []}
 
     # Check for Final Answer
@@ -1203,9 +1743,22 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         response = llm.complete(
             system_prompt,
             [{"role": "user", "content": history_context + "请汇总回答。"}],
+            temperature=0.4,  # Low temperature for factual aggregation
         )
-        return {"final_answer": response.strip(), "needs_summary": False}
-    except LLMError:
+        final_answer = response.strip()
+
+        # ── Anti-hallucination verification ──
+        all_tool_results = []
+        for r in agent_results:
+            all_tool_results.extend(r.get("tool_results", []))
+        if all_tool_results:
+            verification = verify_all_claims(final_answer, all_tool_results, llm)
+            if verification.total > 0:
+                final_answer = build_verified_output(final_answer, verification)
+
+        return {"final_answer": final_answer, "needs_summary": False}
+    except LLMError as e:
+        logger.error("aggregate_node LLM failed: %s", type(e).__name__)
         # Fallback: concatenate results
         parts = []
         for r in agent_results:
@@ -1240,6 +1793,7 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         response = llm.complete(
             REFLECTION_PROMPT.format(question=user_msg, answer=answer),
             [{"role": "user", "content": history_context + "Evaluate the answer."}],
+            temperature=0.1,
         )
         data = _extract_json(response)
         if not isinstance(data, dict) or data.get("ok") is not False:
@@ -1257,11 +1811,13 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
                 issues="\n".join(f"- {i}" for i in issues),
             ),
             [{"role": "user", "content": "Rewrite the answer."}],
+            temperature=0.2,
         )
         revised = revise_response.strip()
         if revised and len(revised) > 10:
             return {"final_answer": revised}
-    except (LLMError, json.JSONDecodeError, ValueError):
+    except (LLMError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("reflection_node revise LLM failed: %s", type(e).__name__)
         pass
 
     return {}
