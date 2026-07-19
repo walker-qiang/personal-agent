@@ -850,12 +850,180 @@ def _route_after_react_llm(state: AgentState) -> str:
     return "react_evaluate"
 
 
+# ---- Shared tool execution (used by both ReAct paths) ----
+
+def _react_execute_tool_calls(
+    tool_calls_raw: list[dict],
+    agent_tools: ToolRegistry,
+    messages: list[dict],
+    accumulated: list[dict],
+    agent_id: str,
+    session_id: str,
+    cfg: dict,
+    node_name: str,
+    consecutive_failures: int,
+    consecutive_no_progress: int,
+    prev_result_count: int,
+    push_events: bool = False,
+) -> dict:
+    """Execute tool calls from LLM response with all guards.
+
+    Shared by both ReAct paths:
+    - Top-level: react_tool_node (push_events=False, SSE via state emission)
+    - Subgraph:   _run_domain_agent_react (push_events=True, direct SSE)
+
+    Guards applied in order:
+    1. Batch-dedup: same (name, args) within a single LLM response
+    2. Total-calls: MAX_TOTAL_TOOL_CALLS across all iterations
+    3. Same-tool:   MAX_SAME_TOOL_CALLS for the same tool name
+    4. Args-dedup:  same (name, args) across all accumulated results
+
+    Returns a dict with all updated state values.
+    """
+    new_tool_results: list[dict[str, Any]] = []
+    new_messages = list(messages)
+    _called_in_batch: set[tuple[str, str]] = set()
+
+    executed = 0
+    failed = 0
+
+    for tc_raw in tool_calls_raw:
+        func = tc_raw.get("function", {})
+        name = func.get("name", "")
+        try:
+            arguments = json.loads(func.get("arguments", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            arguments = {}
+
+        if name not in agent_tools.tool_names():
+            continue
+
+        # Guard 1: batch-dedup
+        call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+        if call_key in _called_in_batch:
+            logger.info("ReAct: batch-dedup skip %s (same args in batch)", name)
+            _push_event(cfg, "progress", {"message": f"跳过重复调用 {name}（同批次内相同参数）"})
+            continue
+
+        # Guard 2: total-calls
+        total_calls = len(accumulated) + len(new_tool_results)
+        if total_calls >= MAX_TOTAL_TOOL_CALLS:
+            logger.info("ReAct: skipping %s (total %d >= %d)", name, total_calls, MAX_TOTAL_TOOL_CALLS)
+            _push_event(cfg, "progress", {"message": f"已收集 {total_calls} 条数据，跳过剩余工具调用"})
+            continue
+
+        # Guard 3: same-tool
+        same_tool_count = (
+            sum(1 for tr in accumulated if tr.get("name") == name)
+            + sum(1 for tr in new_tool_results if tr.get("name") == name)
+        )
+        if same_tool_count >= MAX_SAME_TOOL_CALLS:
+            logger.info("ReAct: skipping %s (%d >= %d)", name, same_tool_count, MAX_SAME_TOOL_CALLS)
+            _push_event(cfg, "progress", {"message": f"已调用 {name} {same_tool_count} 次，跳过重复调用"})
+            continue
+
+        # Guard 4: args-dedup across accumulated + new
+        args_key = json.dumps(arguments, sort_keys=True)
+        dedup_match = False
+        for prev in accumulated + new_tool_results:
+            prev_name = prev.get("name", "")
+            prev_args = prev.get("arguments", {})
+            prev_args_key = json.dumps(prev_args, sort_keys=True)
+            if prev_name == name and prev_args_key == args_key:
+                dedup_match = True
+                break
+        if dedup_match:
+            logger.info("ReAct: dedup skip %s (same args key=%s...)", name, args_key[:80])
+            continue
+        else:
+            acc_keys = [json.dumps(p.get("arguments", {}), sort_keys=True)[:60] for p in accumulated]
+            logger.info("ReAct: dedup no-match for %s args_key=%s accumulated_keys=%s",
+                         name, args_key[:80], acc_keys)
+
+        _called_in_batch.add(call_key)
+
+        executed += 1
+        started = time.perf_counter()
+
+        if push_events:
+            _push_event(cfg, "tool_call", {"name": name, "args": arguments})
+
+        try:
+            tool_result = agent_tools.call(name, arguments)
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "session_id": session_id,
+                "event_type": "tool_call",
+                "node_name": node_name,
+                "agent_id": agent_id,
+                "ok": True, "tool_name": name, "arguments": arguments,
+                "result": str(tool_result)[:500],
+                "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+            })
+            new_tool_results.append({
+                "name": name, "arguments": arguments,
+                "result": tool_result, "elapsed_ms": elapsed_ms,
+            })
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps(tool_result, ensure_ascii=False),
+            })
+            if push_events:
+                _push_event(cfg, "tool_result", {"name": name, "result": tool_result})
+        except (FinanceToolError, TypeError) as err:
+            failed += 1
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            _trace(cfg, {
+                "session_id": session_id,
+                "event_type": "tool_call",
+                "node_name": node_name,
+                "agent_id": agent_id,
+                "ok": False, "tool_name": name, "arguments": arguments,
+                "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+            })
+            new_tool_results.append({
+                "name": name, "arguments": arguments,
+                "error": str(err), "elapsed_ms": elapsed_ms,
+            })
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps({"error": str(err)}, ensure_ascii=False),
+            })
+            if push_events:
+                _push_event(cfg, "tool_result", {"name": name, "error": str(err)[:200]})
+
+    # ---- Failure / progress tracking ----
+    if executed > 0 and failed >= executed:
+        consecutive_failures += 1
+    elif executed > 0:
+        consecutive_failures = 0
+
+    total_after = len(accumulated) + len(new_tool_results)
+    if len(new_tool_results) > 0:
+        consecutive_no_progress = 0
+        prev_result_count = total_after
+    else:
+        consecutive_no_progress += 1
+
+    return {
+        "messages": new_messages,
+        "new_tool_results": new_tool_results,
+        "executed": executed,
+        "failed": failed,
+        "consecutive_failures": consecutive_failures,
+        "consecutive_no_progress": consecutive_no_progress,
+        "prev_result_count": prev_result_count,
+        "force_summarize": executed == 0,
+    }
+
+
 def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Execute tool calls from the latest assistant message.
 
-    For each tool call: checks guards (total calls, same-tool, dedup),
-    executes the tool, and appends the result as a tool message.
-    Returns updated tool_results and react context.
+    Delegates to _react_execute_tool_calls (shared with subgraph path).
+    Adds force_summarize hint for the evaluate node when all calls are deduped.
     """
     cfg = _get_configurable(config)
     agent_registry: AgentRegistry = cfg["agent_registry"]
@@ -877,142 +1045,26 @@ def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
     if not tool_calls_raw:
         return {}
 
-    logger.info("ReAct: react_tool_node batch_size=%d accumulated_before=%d", len(tool_calls_raw), len(state.get("tool_results", [])))
-
-    # Accumulated tool results for guard checks (reads from state, uses operator.add)
     accumulated = list(state.get("tool_results", []))
-    # New tool results from this node invocation only (returned as delta)
-    new_tool_results: list[dict[str, Any]] = []
-    # Hard guard: never call the same (tool_name, args) twice in a single batch
-    _called_in_batch: set[tuple[str, str]] = set()
+    logger.info("ReAct: react_tool_node batch_size=%d accumulated_before=%d", len(tool_calls_raw), len(accumulated))
 
-    executed = 0
-    failed = 0
-    new_messages = list(messages)
+    result = _react_execute_tool_calls(
+        tool_calls_raw=tool_calls_raw,
+        agent_tools=agent_tools,
+        messages=messages,
+        accumulated=accumulated,
+        agent_id=agent_id,
+        session_id=state.get("session_id", ""),
+        cfg=cfg,
+        node_name="react_tool",
+        consecutive_failures=react.get("consecutive_failures", 0),
+        consecutive_no_progress=react.get("consecutive_no_progress", 0),
+        prev_result_count=react.get("prev_result_count", 0),
+        push_events=False,
+    )
 
-    for tc_raw in tool_calls_raw:
-        func = tc_raw.get("function", {})
-        name = func.get("name", "")
-        try:
-            arguments = json.loads(func.get("arguments", "{}"))
-        except (json.JSONDecodeError, TypeError):
-            arguments = {}
-
-        if name not in agent_tools.tool_names():
-            continue
-
-        # Hard guard: skip duplicate (name, args) within the same batch
-        call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
-        if call_key in _called_in_batch:
-            logger.info("ReAct: batch-dedup skip %s (same args in batch)", name)
-            _push_event(cfg, "progress", {"message": f"跳过重复调用 {name}（同批次内相同参数）"})
-            continue
-
-        # Total tool call guard (check accumulated)
-        total_calls = len(accumulated) + len(new_tool_results)
-        if total_calls >= MAX_TOTAL_TOOL_CALLS:
-            logger.info("ReAct: skipping %s (total %d >= %d)", name, total_calls, MAX_TOTAL_TOOL_CALLS)
-            _push_event(cfg, "progress", {"message": f"已收集 {total_calls} 条数据，跳过剩余工具调用"})
-            continue
-
-        # Same-tool guard (check accumulated + new)
-        same_tool_count = (
-            sum(1 for tr in accumulated if tr.get("name") == name)
-            + sum(1 for tr in new_tool_results if tr.get("name") == name)
-        )
-        if same_tool_count >= MAX_SAME_TOOL_CALLS:
-            logger.info("ReAct: skipping %s (%d >= %d)", name, same_tool_count, MAX_SAME_TOOL_CALLS)
-            _push_event(cfg, "progress", {"message": f"已调用 {name} {same_tool_count} 次，跳过重复调用"})
-            continue
-
-        # Dedup: check accumulated + new (args-level)
-        args_key = json.dumps(arguments, sort_keys=True)
-        dedup_match = False
-        for prev in accumulated + new_tool_results:
-            prev_name = prev.get("name", "")
-            prev_args = prev.get("arguments", {})
-            prev_args_key = json.dumps(prev_args, sort_keys=True)
-            if prev_name == name and prev_args_key == args_key:
-                dedup_match = True
-                break
-        if dedup_match:
-            logger.info("ReAct: dedup skip %s (same args key=%s...)", name, args_key[:80])
-            continue
-        else:
-            # Log accumulated keys for debugging
-            acc_keys = [json.dumps(p.get("arguments", {}), sort_keys=True)[:60] for p in accumulated]
-            logger.info("ReAct: dedup no-match for %s args_key=%s accumulated_keys=%s",
-                         name, args_key[:80], acc_keys)
-
-        _called_in_batch.add(call_key)
-
-        executed += 1
-        started = time.perf_counter()
-
-        try:
-            tool_result = agent_tools.call(name, arguments)
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-            _trace(cfg, {
-                "session_id": state.get("session_id", ""),
-                "event_type": "tool_call",
-                "node_name": "react_tool",
-                "agent_id": agent_id,
-                "ok": True, "tool_name": name, "arguments": arguments,
-                "result": str(tool_result)[:500],
-                "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-            })
-            new_tool_results.append({
-                "name": name, "arguments": arguments,
-                "result": tool_result, "elapsed_ms": elapsed_ms,
-            })
-            new_messages.append({
-                "role": "tool",
-                "tool_call_id": tc_raw.get("id", ""),
-                "content": json.dumps(tool_result, ensure_ascii=False),
-            })
-        except (FinanceToolError, TypeError) as err:
-            failed += 1
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-            _trace(cfg, {
-                "session_id": state.get("session_id", ""),
-                "event_type": "tool_call",
-                "node_name": "react_tool",
-                "agent_id": agent_id,
-                "ok": False, "tool_name": name, "arguments": arguments,
-                "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-            })
-            new_tool_results.append({
-                "name": name, "arguments": arguments,
-                "error": str(err), "elapsed_ms": elapsed_ms,
-            })
-            new_messages.append({
-                "role": "tool",
-                "tool_call_id": tc_raw.get("id", ""),
-                "content": json.dumps({"error": str(err)}, ensure_ascii=False),
-            })
-
-    # Update failure/progress tracking (based on accumulated + new)
-    total_after = len(accumulated) + len(new_tool_results)
-    prev_result_count = react.get("prev_result_count", 0)
-    consecutive_failures = react.get("consecutive_failures", 0)
-    consecutive_no_progress = react.get("consecutive_no_progress", 0)
-
-    if executed > 0 and failed >= executed:
-        consecutive_failures += 1
-    elif executed > 0:
-        consecutive_failures = 0
-
-    if len(new_tool_results) > 0:
-        consecutive_no_progress = 0
-        prev_result_count = total_after
-    else:
-        consecutive_no_progress += 1
-
-    if executed == 0:
-        # All tool calls were deduped — force the LLM to summarize from existing
-        # results without attempting more tool calls.  Without this flag the
-        # evaluate node would loop back to react_llm_node indefinitely because
-        # last_content is empty (the LLM only produced tool_calls, no text).
+    new_messages = result["messages"]
+    if result["force_summarize"]:
         new_messages.append({
             "role": "user",
             "content": "所有工具调用均为重复，无需再调用工具。请直接基于以上已有的工具返回结果回答用户的问题。",
@@ -1022,13 +1074,13 @@ def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         "react": {
             **react,
             "messages": new_messages,
-            "consecutive_failures": consecutive_failures,
-            "consecutive_no_progress": consecutive_no_progress,
-            "prev_result_count": prev_result_count,
-            "force_summarize": executed == 0,
+            "consecutive_failures": result["consecutive_failures"],
+            "consecutive_no_progress": result["consecutive_no_progress"],
+            "prev_result_count": result["prev_result_count"],
+            "force_summarize": result["force_summarize"],
         },
-        "tool_results": new_tool_results,
-        "tool_call_count": len(new_tool_results),
+        "tool_results": result["new_tool_results"],
+        "tool_call_count": len(result["new_tool_results"]),
     }
 
 
@@ -1330,114 +1382,29 @@ def _run_domain_agent_react(
             assistant_msg["tool_calls"] = api_tool_calls
             messages.append(assistant_msg)
 
-            # Execute tools and append tool messages with tool_call_id
-            executed = 0
-            failed = 0
-            for tc in result.tool_calls:
-                if tc.name not in tools.tool_names():
-                    continue
+            # Execute tools with shared guard logic (replaces inline loop)
+            exec_result = _react_execute_tool_calls(
+                tool_calls_raw=api_tool_calls,
+                agent_tools=tools,
+                messages=messages,
+                accumulated=tool_results,
+                agent_id=agent_id,
+                session_id=session_id,
+                cfg=cfg,
+                node_name="delegate",
+                consecutive_failures=consecutive_failures,
+                consecutive_no_progress=consecutive_no_progress,
+                prev_result_count=prev_result_count,
+                push_events=True,
+            )
 
-                # Total tool call guard: skip if we already have enough data
-                total_calls = len(tool_results)
-                if total_calls >= MAX_TOTAL_TOOL_CALLS:
-                    logger.info(
-                        "ReAct: skipping %s at iter %d (total %d >= %d)",
-                        tc.name, iteration, total_calls, MAX_TOTAL_TOOL_CALLS,
-                    )
-                    _push_event(cfg, "progress", {
-                        "message": f"已收集 {total_calls} 条数据，跳过剩余工具调用",
-                    })
-                    continue
+            messages = exec_result["messages"]
+            tool_results.extend(exec_result["new_tool_results"])
+            consecutive_failures = exec_result["consecutive_failures"]
+            consecutive_no_progress = exec_result["consecutive_no_progress"]
+            prev_result_count = exec_result["prev_result_count"]
 
-                # Same-tool guard: skip if this tool already called enough times
-                same_tool_count = sum(1 for tr in tool_results if tr.get("name") == tc.name)
-                logger.debug(
-                    "ReAct: same-tool guard tc=%s count=%d/%d",
-                    tc.name, same_tool_count, MAX_SAME_TOOL_CALLS,
-                )
-                if same_tool_count >= MAX_SAME_TOOL_CALLS:
-                    logger.info(
-                        "ReAct: skipping %s at iter %d (%d >= %d)",
-                        tc.name, iteration, same_tool_count, MAX_SAME_TOOL_CALLS,
-                    )
-                    _push_event(cfg, "progress", {
-                        "message": f"已调用 {tc.name} {same_tool_count} 次，跳过重复调用",
-                    })
-                    continue
-
-                # Dedup check
-                args_key = json.dumps(tc.arguments, sort_keys=True)
-                if any(
-                    prev.get("name") == tc.name
-                    and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key
-                    for prev in tool_results
-                ):
-                    continue
-
-                executed += 1
-                started = time.perf_counter()
-                _push_event(cfg, "tool_call", {"name": tc.name, "args": tc.arguments})
-                logger.debug(
-                    "tool_call: tool=%s args=%s",
-                    tc.name, json.dumps(tc.arguments, ensure_ascii=False)[:200],
-                )
-                try:
-                    tool_result = tools.call(tc.name, tc.arguments)
-                    elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-                    _trace(cfg, {
-                        "session_id": session_id,
-                        "event_type": "tool_call",
-                        "node_name": "delegate",
-                        "agent_id": agent_id,
-                        "ok": True, "tool_name": tc.name, "arguments": tc.arguments,
-                        "result": str(tool_result)[:500],
-                        "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-                    })
-                    tool_results.append({
-                        "name": tc.name, "arguments": tc.arguments,
-                        "result": tool_result, "elapsed_ms": elapsed_ms,
-                    })
-                    # Append tool message (standard format)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(tool_result, ensure_ascii=False),
-                    })
-                    _push_event(cfg, "tool_result", {
-                        "name": tc.name, "result": tool_result,
-                    })
-                except (FinanceToolError, TypeError) as err:
-                    failed += 1
-                    elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-                    _trace(cfg, {
-                        "session_id": session_id,
-                        "event_type": "tool_call",
-                        "node_name": "delegate",
-                        "agent_id": agent_id,
-                        "ok": False, "tool_name": tc.name, "arguments": tc.arguments,
-                        "error": str(err), "elapsed_ms": elapsed_ms, "ts": _now_ts(),
-                    })
-                    tool_results.append({
-                        "name": tc.name, "arguments": tc.arguments,
-                        "error": str(err), "elapsed_ms": elapsed_ms,
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps({"error": str(err)}, ensure_ascii=False),
-                    })
-                    _push_event(cfg, "tool_result", {
-                        "name": tc.name, "error": str(err)[:200],
-                    })
-
-            # ---- Failure tracking ----
-            # Only count as "consecutive failure" if all attempted calls failed
-            if executed > 0 and failed >= executed:
-                consecutive_failures += 1
-            elif executed > 0:
-                consecutive_failures = 0
-
-            if executed == 0:
+            if exec_result["force_summarize"]:
                 # All duplicates — ask LLM to summarize from existing messages
                 messages.append({
                     "role": "user",
@@ -1459,15 +1426,6 @@ def _run_domain_agent_react(
                     "tool_results": tool_results,
                     "findings": [],
                 }
-
-            # ---- Progress tracking ----
-            new_results = len(tool_results) - prev_result_count
-            if new_results > 0:
-                consecutive_no_progress = 0
-                consecutive_failures = 0
-                prev_result_count = len(tool_results)
-            else:
-                consecutive_no_progress += 1
 
             # ---- Periodic evaluator ----
             if iteration > 0 and iteration % EVALUATOR_INTERVAL == 0 and tool_results:
