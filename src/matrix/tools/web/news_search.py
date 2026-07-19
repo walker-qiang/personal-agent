@@ -1,4 +1,4 @@
-"""news_search — news-only search using 360 News.
+"""news_search — news search using Bing News (primary) with 360 News fallback.
 
 For general web search, use web_search instead.
 """
@@ -39,6 +39,7 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+_BING_NEWS_URL = "https://www.bing.com/news/search"
 _SO360_NEWS_URL = "https://news.so.com/ns"
 
 _STRIP_HTML = re.compile(r"<[^>]+>")
@@ -62,7 +63,71 @@ def _fetch(url: str, timeout_sec: float) -> str | None:
         return None
 
 
+# ---- Bing News parser ----
+
+# Bing News renders titles inside news-card divs, but snippets and source/date
+# are in separate sibling elements outside the card.  We parse them independently
+# and pair by order.
+
+_BING_NEWS_TITLE_RE = re.compile(
+    r'<a[^>]*class="[^"]*title[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+    re.DOTALL,
+)
+
+_BING_NEWS_SNIPPET_RE = re.compile(
+    r'<div[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+    re.DOTALL,
+)
+
+
+def _parse_bing_news(html: str, limit: int) -> list[dict[str, str]]:
+    """Parse Bing News search results page."""
+    results: list[dict[str, str]] = []
+
+    # Extract titles + URLs from news-card divs
+    cards = re.findall(
+        r'<div[^>]*class="[^"]*news-card[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+        html, re.DOTALL,
+    )
+    if not cards:
+        cards = re.findall(
+            r'<div[^>]*class="[^"]*card[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+            html, re.DOTALL,
+        )
+
+    for card in cards:
+        if len(results) >= limit:
+            break
+        title_match = _BING_NEWS_TITLE_RE.search(card)
+        if not title_match:
+            title_match = re.search(
+                r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                card, re.DOTALL,
+            )
+        if not title_match:
+            continue
+        url = title_match.group(1)
+        title = _clean_html(title_match.group(2))
+        if not title:
+            continue
+        results.append({"title": title, "url": url, "snippet": ""})
+
+    # Extract snippets from the full page (they are siblings of news-card, not nested)
+    snippets = _BING_NEWS_SNIPPET_RE.findall(html)
+    for i, snippet_html in enumerate(snippets):
+        if i < len(results):
+            results[i]["snippet"] = _clean_html(snippet_html)
+
+    return results
+
+
+# ---- 360 News parser (fallback) ----
+
+_SKIP_TITLES = {"其他人还搜了", "最新相关消息", "相关搜索", "最新相关信息"}
+
+
 def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
+    """Parse 360 News search results page."""
     results: list[dict[str, str]] = []
     all_h3 = re.findall(r"<h3[^>]*>(.*?)</h3>", html, re.DOTALL)
 
@@ -70,7 +135,7 @@ def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
         if len(results) >= limit:
             break
         title = _clean_html(h3_content)
-        if not title:
+        if not title or title in _SKIP_TITLES:
             continue
         link_match = re.search(r'href="([^"]+)"', h3_content)
         url = link_match.group(1) if link_match else ""
@@ -91,14 +156,13 @@ def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
     return results
 
 
-# ---- URL filter: strip search-engine redirect links ----
+# ---- URL filter ----
 
 # 360 redirect URLs (so.com/link?m=...) are not real web pages
 _REDIRECT_URL_RE = re.compile(r"^https?://(?:www\.)?so\.com/link\?", re.IGNORECASE)
 
 
 def _filter_redirect_urls(results: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Replace redirect/synthetic URLs with empty string so LLM won't try to web_fetch them."""
     for r in results:
         url = r.get("url", "")
         if url and _REDIRECT_URL_RE.search(url):
@@ -106,56 +170,18 @@ def _filter_redirect_urls(results: list[dict[str, str]]) -> list[dict[str, str]]
     return results
 
 
-# Time-sensitive keywords that indicate the query needs the current year
+# ---- Query preprocessing ----
+
 _TIME_SENSITIVE_RE = re.compile(
     r"最近|最新|今天|今日|近期|当前|现在|近日|今年|本(?:周|月|年)",
 )
 
-# Multi-year patterns that dilute search results (e.g. "2025 2026" → "2026")
 _MULTI_YEAR_RE = re.compile(r"\b(?:20\d{2}[-\s]*)+20\d{2}\b|\b20\d{2}\s+20\d{2}\b")
 
-# Query expansion: when a query contains a key term but not its synonym,
-# append the synonym to improve recall.  360 search often returns poor
-# results for "洲际导弹" alone (biased toward old land-based articles)
-# while the latest events use "潜射导弹" in headlines.
-_EXPAND_KEYWORDS: dict[str, str] = {
-    "洲际导弹": "潜射",
-    "洲际弹道": "潜射",
-    "战略导弹": "潜射",
-}
-
-
-def _expand_query(query: str) -> str:
-    """Append missing synonyms to improve search recall."""
-    for key, synonym in _EXPAND_KEYWORDS.items():
-        if key in query and synonym not in query:
-            return f"{query} {synonym}"
-    return query
-
-
-def _inject_current_year(query: str) -> str:
-    """If the query is time-sensitive, always strip time-sensitive words (they bias
-    search engines toward old articles), and append the current year if missing.
-    Multi-year queries like "2025 2026" are also cleaned to just the current year."""
-    if not _TIME_SENSITIVE_RE.search(query) and not _MULTI_YEAR_RE.search(query):
-        return query
-    current_year = str(datetime.now(timezone.utc).year)
-    # Always strip time-sensitive keywords
-    cleaned = _TIME_SENSITIVE_RE.sub("", query)
-    # Normalize multi-year patterns: "2025 2026" → "2026", "2024-2026" → "2026"
-    cleaned = _MULTI_YEAR_RE.sub(current_year, cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if current_year not in cleaned:
-        cleaned = f"{cleaned} {current_year}"
-    return cleaned
-
-
-# Year extraction from snippet text (same as search.py)
 _YEAR_IN_SNIPPET_RE = re.compile(r"\b(20\d{2})\b")
 
 
 def _result_year_score(snippet: str, current_year: int) -> int:
-    """Score a result by recency: current year = 100, each year older = -100."""
     years = _YEAR_IN_SNIPPET_RE.findall(snippet)
     if not years:
         return 0
@@ -164,21 +190,48 @@ def _result_year_score(snippet: str, current_year: int) -> int:
 
 
 def _boost_recent_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Reorder results so current-year results appear first."""
+    """Reorder results so current-year results appear first (360 fallback only)."""
     current_year = datetime.now(timezone.utc).year
     scored = [(r, _result_year_score(r.get("snippet", ""), current_year)) for r in results]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [r for r, _ in scored]
 
 
+def _inject_current_year(query: str) -> str:
+    """If the query is time-sensitive, strip time-sensitive words and append
+    the current year if missing."""
+    if not _TIME_SENSITIVE_RE.search(query) and not _MULTI_YEAR_RE.search(query):
+        return query
+    current_year = str(datetime.now(timezone.utc).year)
+    cleaned = _TIME_SENSITIVE_RE.sub("", query)
+    cleaned = _MULTI_YEAR_RE.sub(current_year, cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if current_year not in cleaned:
+        cleaned = f"{cleaned} {current_year}"
+    return cleaned
+
+
+# ---- public API ----
+
 def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
-    """Search news using 360 News."""
+    """Search news: Bing News (primary) → 360 News (fallback)."""
     max_results = min(max(max_results, 1), 10)
     original_query = query
     query = _inject_current_year(query)
-    query = _expand_query(query)
     is_time_sensitive = _TIME_SENSITIVE_RE.search(original_query) is not None
 
+    # Engine 1: Bing News
+    bing_url = _BING_NEWS_URL + "?" + urllib.parse.urlencode({
+        "q": query,
+        "setlang": "zh-cn" if any("\u4e00" <= c <= "\u9fff" for c in query) else "en",
+    })
+    html = _fetch(bing_url, timeout_sec=10)
+    if html:
+        results = _parse_bing_news(html, max_results)
+        if results:
+            return {"results": results, "query": query, "engine": "bing-news"}
+
+    # Engine 2: 360 News (fallback)
     news_url = _SO360_NEWS_URL + "?" + urllib.parse.urlencode({"q": query})
     html = _fetch(news_url, timeout_sec=10)
     if html:
