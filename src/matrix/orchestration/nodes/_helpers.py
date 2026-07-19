@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from langgraph.types import RunnableConfig
+
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
@@ -259,7 +261,7 @@ def _extract_json(text: str) -> Any:
 
 
 
-def _get_configurable(config: dict[str, Any]) -> dict[str, Any]:
+def _get_configurable(config: RunnableConfig) -> dict[str, Any]:
     return config.get("configurable", {})
 
 

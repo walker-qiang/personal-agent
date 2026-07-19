@@ -9,6 +9,8 @@ import json
 import logging
 from typing import Any
 
+from langgraph.types import RunnableConfig
+
 from ...llm import LLMError, LLMClient
 from ...agent.registry import AgentRegistry
 
@@ -31,7 +33,7 @@ from ..state import AgentState
 logger = logging.getLogger("matrix.orchestration")
 
 
-def commander_plan_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
+def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Commander plans the delegation strategy. Entry node of the graph.
 
     This is the ONLY node that calls the LLM for intent classification.
@@ -121,7 +123,7 @@ def commander_plan_node(state: AgentState, *, config: dict[str, Any]) -> dict[st
     }
 
 
-def aggregate_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
+def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Commander reviews all agent results and aggregates them into a final answer."""
     cfg = _get_configurable(config)
     llm = cfg["llm"]
@@ -194,7 +196,7 @@ def aggregate_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, An
         return {"final_answer": "\n\n".join(parts) if parts else "无法汇总结果。", "needs_summary": False}
 
 
-def reflection_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
+def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Internal quality check: verify → revise if needed → output clean answer."""
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])

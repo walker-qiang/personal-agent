@@ -17,7 +17,7 @@ from ..agent.domain_agents import INVESTMENT_ANALYST, MEDIA_GENERATOR
 from ..config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from ..llm import LLMClient, LLMError, build_llm_client
 from ..llm.http import set_rate_limiter
-from ..orchestration.graph import run_agent
+from ..orchestration import build_graph
 from ..orchestration.state import AgentState
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
@@ -94,8 +94,9 @@ class ChatService:
         if config.rate_limit_per_sec > 0:
             set_rate_limiter(TokenBucketRateLimiter(config.rate_limit_per_sec))
 
-        # Pre-build the agent pipeline runner
-        self._run_agent = run_agent
+        # Pre-build and compile the LangGraph graph once
+        self._graph = build_graph()
+        self._compiled_graph = self._graph.compile()
 
     def __enter__(self) -> "ChatService":
         return self
@@ -279,8 +280,9 @@ class ChatService:
             }
 
             try:
-                for event in self._run_agent(
+                for event in self._compiled_graph.stream(
                     initial_state,
+                    stream_mode="values",
                     config=graph_config,
                 ):
                     # Drain real-time events from the queue (tool calls from delegate node)

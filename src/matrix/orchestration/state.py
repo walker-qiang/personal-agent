@@ -1,6 +1,7 @@
-"""Agent state for orchestration.
+"""Agent state for LangGraph orchestration.
 
-Uses Pydantic BaseModel for runtime validation, default values, and serialization.
+Uses Pydantic BaseModel for runtime validation, default values, and
+serialization — the recommended approach for LangGraph production deployments.
 """
 
 from __future__ import annotations
@@ -8,22 +9,29 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any
 
+from langgraph.graph import add_messages
 from pydantic import BaseModel, Field
 
 
 class AgentState(BaseModel):
-    """State flowing through the orchestration pipeline.
+    """State flowing through the LangGraph orchestration graph.
 
-    Flow: commander_plan → react_prepare → react_llm ⇄ react_tool → react_evaluate → aggregate → reflection
+    Flow: commander_plan → react_prepare → react_llm ⇄ react_tool → react_evaluate → aggregate → reflection → END
+
+    Pydantic provides:
+    - Runtime type validation on every state transition
+    - Automatic default values (no missing-key errors)
+    - JSON serialization for tracing and debugging
 
     Dict-like access (__getitem__, get, __contains__) is provided for
-    backward compatibility with existing node code.
+    backward compatibility with existing node code that uses state["key"]
+    and state.get("key") patterns.
     """
 
     model_config = {"extra": "allow"}
 
     # Core conversation fields
-    messages: Annotated[list, operator.add] = Field(default_factory=list)
+    messages: Annotated[list, add_messages] = Field(default_factory=list)
     user_message: str = ""
     session_id: str = ""
 
