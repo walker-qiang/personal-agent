@@ -114,6 +114,24 @@ _TIME_SENSITIVE_RE = re.compile(
 # Multi-year patterns that dilute search results (e.g. "2025 2026" → "2026")
 _MULTI_YEAR_RE = re.compile(r"\b(?:20\d{2}[-\s]*)+20\d{2}\b|\b20\d{2}\s+20\d{2}\b")
 
+# Query expansion: when a query contains a key term but not its synonym,
+# append the synonym to improve recall.  360 search often returns poor
+# results for "洲际导弹" alone (biased toward old land-based articles)
+# while the latest events use "潜射导弹" in headlines.
+_EXPAND_KEYWORDS: dict[str, str] = {
+    "洲际导弹": "潜射",
+    "洲际弹道": "潜射",
+    "战略导弹": "潜射",
+}
+
+
+def _expand_query(query: str) -> str:
+    """Append missing synonyms to improve search recall."""
+    for key, synonym in _EXPAND_KEYWORDS.items():
+        if key in query and synonym not in query:
+            return f"{query} {synonym}"
+    return query
+
 
 def _inject_current_year(query: str) -> str:
     """If the query is time-sensitive, always strip time-sensitive words (they bias
@@ -158,6 +176,7 @@ def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
     max_results = min(max(max_results, 1), 10)
     original_query = query
     query = _inject_current_year(query)
+    query = _expand_query(query)
     is_time_sensitive = _TIME_SENSITIVE_RE.search(original_query) is not None
 
     news_url = _SO360_NEWS_URL + "?" + urllib.parse.urlencode({"q": query})
