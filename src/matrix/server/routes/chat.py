@@ -76,6 +76,60 @@ async def chat_stream(
     return sse_response(iter_events())
 
 
+@router.post("/chat/confirm")
+async def chat_confirm(request: Request):
+    """Resume a paused chat after user confirms or skips high-risk actions."""
+    chat_service: ChatService = request.app.state.chat
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise FinanceToolError("request body must be an object")
+        session_id = str(payload.get("session_id", "")).strip()
+        if not session_id:
+            return JSONResponse(
+                {"error": "session_id is required"}, status_code=400
+            )
+        decision = str(payload.get("decision", "approve")).strip()
+        if decision not in ("approve", "skip"):
+            decision = "approve"
+    except (FinanceToolError, json.JSONDecodeError) as err:
+        return JSONResponse(
+            {"error": f"invalid confirm request: {err}"}, status_code=400
+        )
+
+    def iter_events():
+        for event in chat_service.resume_chat(session_id, decision):
+            event_type = str(event.get("type", "message"))
+            payload_data = {key: value for key, value in event.items() if key != "type"}
+            yield sse_event(event_type, payload_data)
+
+    return sse_response(iter_events())
+
+
+@router.get("/chat/confirm")
+async def chat_confirm_get(
+    request: Request,
+    session_id: str = Query(..., description="Session ID"),
+    decision: str = Query(default="approve", description="approve or skip"),
+):
+    """GET version of confirm for EventSource clients."""
+    chat_service: ChatService = request.app.state.chat
+    session_id = session_id.strip()
+    if not session_id:
+        return JSONResponse({"error": "session_id is required"}, status_code=400)
+    decision = decision.strip()
+    if decision not in ("approve", "skip"):
+        decision = "approve"
+
+    def iter_events():
+        for event in chat_service.resume_chat(session_id, decision):
+            event_type = str(event.get("type", "message"))
+            payload_data = {key: value for key, value in event.items() if key != "type"}
+            yield sse_event(event_type, payload_data)
+
+    return sse_response(iter_events())
+
+
 @router.get("/reset")
 async def reset_get(
     request: Request,

@@ -20,7 +20,7 @@ from ._helpers import (
     _force_tool_call,
     _get_configurable,
     _is_hallucination,
-    
+    _is_high_risk,
     _is_refusal,
     _llm_summarize_from_results,
     _now_ts,
@@ -54,8 +54,12 @@ from .react import (
 )
 
 from .commander import (
+    _domain_react_fallback,
+    _run_domain_agent_react,
     aggregate_node,
     commander_plan_node,
+    confirm_node,
+    delegate_node,
     reflection_node,
 )
 
@@ -74,6 +78,7 @@ __all__ = [
     "_force_tool_call",
     "_get_configurable",
     "_is_hallucination",
+    "_is_high_risk",
     "_is_refusal",
     "_llm_summarize_from_results",
     "_now_ts",
@@ -89,8 +94,12 @@ __all__ = [
     "react_prepare_node",
     "react_tool_node",
     # Commander
+    "_domain_react_fallback",
+    "_run_domain_agent_react",
     "aggregate_node",
     "commander_plan_node",
+    "confirm_node",
+    "delegate_node",
     "reflection_node",
     # Constants
     "COMMANDER_AGGREGATE_PROMPT",

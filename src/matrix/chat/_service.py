@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterator, Protocol
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 
 from ..agent import AgentRegistry
 from ..agent.commander import COMMANDER
@@ -96,7 +101,16 @@ class ChatService:
 
         # Pre-build and compile the LangGraph graph once
         self._graph = build_graph()
-        self._compiled_graph = self._graph.compile()
+        self._checkpoint_conn = sqlite3.connect(
+            config.checkpoint_path,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._checkpointer = SqliteSaver(self._checkpoint_conn)
+        self._compiled_graph = self._graph.compile(checkpointer=self._checkpointer)
+
+        # Store pending confirmations for HITL resume
+        self._pending_confirms: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> "ChatService":
         return self
@@ -105,7 +119,9 @@ class ChatService:
         self.close()
 
     def close(self) -> None:
-        """Close resources: session store."""
+        """Close resources: checkpoint database connection and session store."""
+        if hasattr(self, "_checkpoint_conn") and self._checkpoint_conn:
+            self._checkpoint_conn.close()
         if hasattr(self, "store") and self.store:
             self.store.close()
 
@@ -251,6 +267,7 @@ class ChatService:
             session_id=sid,
         )
 
+        interrupted = False
         try:
             emitted_tool_count = 0
             emitted_agent_count = 0
@@ -367,13 +384,201 @@ class ChatService:
                         yield {"type": "token", "content": final_answer}
                         self._remember(sid, text, final_answer, user_id=user_id)
 
-            except Exception as err:
-                yield {"type": "error", "message": f"agent error: {err}"}
+            except GraphInterrupt as gi:
+                # HITL: graph paused at confirm_node, waiting for user input
+                interrupted = True
+                interrupt_value = gi.args[0] if gi.args else {}
+                pending_actions = interrupt_value.get("actions", [])
+                logger.info(
+                    "hitl: confirm_required session=%s actions=%d",
+                    sid, len(pending_actions),
+                )
+                # Store config for later resume
+                self._pending_confirms[sid] = {
+                    "config": graph_config,
+                    "session_llm": session_llm,
+                    "user_id": user_id,
+                }
+                # Keep the latest checkpoint (paused state) for HITL resume
+                self._prune_checkpoints(sid, keep_latest=True)
+                yield {
+                    "type": "confirm_required",
+                    "actions": pending_actions,
+                    "session_id": sid,
+                }
+                # Don't yield "done" — the stream is paused
+                return
+
+        except Exception as err:
+            yield {"type": "error", "message": f"agent error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
+            if not interrupted:
+                # Normal completion: delete all checkpoints so stale state
+                # (agent_results, tool_results, tool_call_count) doesn't
+                # leak into the next call via operator.add reducers.
+                self._prune_checkpoints(sid, keep_latest=False)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
+    def resume_chat(self, session_id: str, decision: str = "approve") -> Iterator[dict[str, Any]]:
+        """Resume a paused graph after user confirmation.
+
+        Args:
+            session_id: The session ID of the paused graph.
+            decision: User's decision: 'approve' or 'skip'.
+
+        Yields:
+            SSE events from the resumed graph execution.
+        """
+        started = time.perf_counter()
+        pending = self._pending_confirms.pop(session_id, None)
+        if not pending:
+            yield {"type": "error", "message": "no pending confirmation for this session"}
+            yield {"type": "done", "session_id": session_id, "duration_ms": 0}
+            return
+
+        graph_config = pending["config"]
+        # Ensure the resumed graph has an event queue for real-time streaming
+        if "event_queue" not in graph_config.get("configurable", {}):
+            graph_config.setdefault("configurable", {})["event_queue"] = queue.Queue()
+        session_llm = pending["session_llm"]
+        user_id = pending["user_id"]
+
+        logger.info(
+            "hitl: resuming session=%s decision=%s",
+            session_id, decision,
+        )
+
+        emitted_tool_count = 0
+        emitted_agent_count = 0
+        _queue_emitted: set[tuple[str, str]] = set()
+        final_state: dict[str, Any] = {}
+
+        try:
+            for event in self._compiled_graph.stream(
+                Command(resume=decision),
+                stream_mode="values",
+                config=graph_config,
+            ):
+                # Drain real-time events from the queue
+                yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
+                if not isinstance(event, dict):
+                    continue
+                final_state = event
+
+                # Emit agent delegation events
+                agent_results = event.get("agent_results", [])
+                if len(agent_results) > emitted_agent_count:
+                    for i in range(emitted_agent_count, len(agent_results)):
+                        ar = agent_results[i]
+                        yield {
+                            "type": "agent_result",
+                            "agent_id": ar.get("agent_id", ""),
+                            "task": ar.get("task", ""),
+                            "result": ar.get("result", "")[:500],
+                            "error": ar.get("error", ""),
+                        }
+                    emitted_agent_count = len(agent_results)
+
+                # Yield tool calls (skip queue-emitted)
+                tool_results = event.get("tool_results", [])
+                new_count = len(tool_results)
+                if new_count > emitted_tool_count:
+                    for i in range(emitted_tool_count, new_count):
+                        tr = tool_results[i]
+                        if tr.get("duplicate") or tr.get("name") == "_knowledge":
+                            continue
+                        tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
+                        if tr_key in _queue_emitted:
+                            continue
+                        yield {
+                            "type": "tool_call",
+                            "name": tr.get("name", ""),
+                            "args": tr.get("arguments", {}),
+                        }
+                        yield {
+                            "type": "tool_result",
+                            "name": tr.get("name", ""),
+                            "preview": preview_json(
+                                tr.get("error", tr.get("result", {})),
+                                limit=2000,
+                            ),
+                        }
+                    emitted_tool_count = new_count
+
+                # Yield error
+                error = event.get("error", "")
+                if error:
+                    yield {"type": "error", "message": error}
+
+            # Yield final answer
+            final_answer = final_state.get("final_answer", "")
+            if final_answer and not final_answer.startswith("所有领域专家"):
+                yield {"type": "token", "content": final_answer}
+
+        except GraphInterrupt:
+            # Another confirmation needed (unlikely but handle gracefully)
+            yield {"type": "error", "message": "additional confirmation required"}
+        except Exception as err:
+            yield {"type": "error", "message": f"resume error: {err}"}
+        finally:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            # Resume completed: delete all checkpoints to prevent stale state
+            # from leaking into the next call.
+            self._prune_checkpoints(session_id, keep_latest=False)
+            yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
+
     # ---- Internal ----
+
+    def _prune_checkpoints(self, thread_id: str, keep_latest: bool = True) -> None:
+        """Clean up checkpoints per thread to prevent unbounded growth.
+
+        LangGraph's SqliteSaver writes a checkpoint after every node execution.
+        Each user question generates 5-6 checkpoints. Over time this accumulates
+        useless history.
+
+        Two modes:
+        - keep_latest=True (default): keeps only the latest checkpoint, used for
+          HITL (interrupt/resume) where the paused state must be preserved.
+        - keep_latest=False: deletes ALL checkpoints for this thread, used for
+          normal call completion. This is critical because operator.add reducers
+          on AgentState fields (agent_results, tool_results, tool_call_count)
+          would otherwise merge stale checkpointed state into the next call,
+          causing duplicate results and incorrect routing.
+        """
+        try:
+            conn = self._checkpoint_conn
+            if conn is None:
+                return
+            if keep_latest:
+                # Delete all but the latest checkpoint for this thread
+                conn.execute(
+                    """DELETE FROM checkpoints
+                       WHERE (thread_id, checkpoint_ns, checkpoint_id) IN (
+                         SELECT thread_id, checkpoint_ns, checkpoint_id
+                         FROM checkpoints
+                         WHERE thread_id = ?
+                         ORDER BY checkpoint_id DESC
+                         LIMIT -1 OFFSET 1
+                       )""",
+                    (thread_id,),
+                )
+            else:
+                # Delete all checkpoints for this thread
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?",
+                    (thread_id,),
+                )
+            # Clean orphaned writes (no matching checkpoint)
+            conn.execute(
+                """DELETE FROM writes
+                   WHERE (thread_id, checkpoint_ns, checkpoint_id) NOT IN (
+                     SELECT thread_id, checkpoint_ns, checkpoint_id FROM checkpoints
+                   )""",
+            )
+            conn.execute("PRAGMA optimize")
+        except Exception:
+            pass  # Pruning is best-effort; never fail the chat for it
 
     def reload_skills(self) -> None:
         """Reload skills from disk (after CRUD)."""

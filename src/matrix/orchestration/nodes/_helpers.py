@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from langgraph.types import RunnableConfig
+from langgraph.types import RunnableConfig, interrupt
 
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
@@ -697,6 +697,17 @@ def _fix_media_answer(answer: str, tool_results: list[dict]) -> str:
 
 
 
+_HIGH_RISK_PATTERNS = [
+    "snapshot.create", "snapshot.update", "snapshot.delete",
+    "asset.create", "asset.update", "asset.delete",
+    "write", "save", "delete", "create", "update",
+    "execute", "run", "deploy",
+]
 
+
+
+def _is_high_risk(tool_name: str) -> bool:
+    """Check if a tool call is high-risk based on its name."""
+    return any(pattern in tool_name.lower() for pattern in _HIGH_RISK_PATTERNS)
 
 

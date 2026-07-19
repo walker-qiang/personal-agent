@@ -1,4 +1,4 @@
-"""Agent state for LangGraph orchestration.
+"""Agent state for multi-agent LangGraph orchestration.
 
 Uses Pydantic BaseModel for runtime validation, default values, and
 serialization — the recommended approach for LangGraph production deployments.
@@ -14,9 +14,13 @@ from pydantic import BaseModel, Field
 
 
 class AgentState(BaseModel):
-    """State flowing through the LangGraph orchestration graph.
+    """State flowing through the multi-agent LangGraph orchestration graph.
 
-    Flow: commander_plan → react_prepare → react_llm ⇄ react_tool → react_evaluate → aggregate → reflection → END
+    Flow: commander_plan → delegate → aggregate → reflection
+
+    Fields annotated with ``operator.add`` use list concatenation / integer
+    addition as state reducers, enabling parallel agent execution via
+    LangGraph Send API fan-out → fan-in without data loss.
 
     Pydantic provides:
     - Runtime type validation on every state transition
@@ -35,6 +39,9 @@ class AgentState(BaseModel):
     user_message: str = ""
     session_id: str = ""
 
+    # Classification
+    intent: str = ""  # "simple" (direct answer) or "delegate" (multi-agent)
+
     # Commander planning
     delegation_plan: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -42,7 +49,7 @@ class AgentState(BaseModel):
     )
     current_step: int = 0  # index into delegation_plan
 
-    # Agent execution results
+    # Agent execution results — operator.add concatenates results from parallel branches
     agent_results: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
 
     # Tool results (accumulated from all domain agents)
@@ -65,8 +72,10 @@ class AgentState(BaseModel):
     # Error
     error: str = ""
 
-    # Plan type
-    plan_type: str = "agent"
+    # HITL (Human-in-the-Loop)
+    needs_confirmation: bool = False
+    confirmed: bool = False
+    pending_actions: list[dict[str, Any]] = Field(default_factory=list)
 
     # ---- Dict-like access for backward compatibility ----
 
