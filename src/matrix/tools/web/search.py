@@ -16,7 +16,7 @@ from ..base import ToolDefinition
 
 tool_definition = ToolDefinition(
     name="web_search",
-    description="搜索互联网，返回网页标题、摘要和链接。用于事实核查、知识查询。如需最新新闻请用 news_search。",
+    description="搜索互联网，返回网页标题、摘要和链接。用于：事实核查、概念解释、历史事件、知识查询等非时效性搜索。⚠️ 不要用于搜最新新闻，搜新闻必须用 news_search。",
     input_schema={
         "type": "object",
         "properties": {

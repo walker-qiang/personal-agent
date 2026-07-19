@@ -11,7 +11,7 @@ from ..base import ToolDefinition
 
 tool_definition = ToolDefinition(
     name="weather",
-    description="查询指定城市的实时天气状况和未来几天预报。用于回答天气相关问题。",
+    description="查询指定城市天气（实时 + 未来几天预报）。用于：用户问「今天天气」「明天会下雨吗」「某地多少度」等。城市名支持中英文。",
     input_schema={
         "type": "object",
         "properties": {

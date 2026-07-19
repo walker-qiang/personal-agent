@@ -15,7 +15,7 @@ from ..base import ToolDefinition
 
 tool_definition = ToolDefinition(
     name="news_search",
-    description='搜索新闻，返回最新新闻的标题、摘要和链接。当用户问「最近/最新/今天」发生的事时必须用此工具。',
+    description='搜索新闻，返回最新新闻的标题、摘要和链接。用于：时效性事件、最新动态、当天新闻、近期热点。⚠️ 当用户问「最近/最新/今天/这周/本月」时必须用此工具。不要用于搜概念解释或历史知识，那些用 web_search。',
     input_schema={
         "type": "object",
         "properties": {

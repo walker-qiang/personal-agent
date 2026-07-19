@@ -13,7 +13,7 @@ from ..base import ToolDefinition
 
 tool_definition = ToolDefinition(
     name="web_fetch",
-    description="获取指定网页的文本内容。用于阅读文章、获取详细信息、或验证搜索结果的准确性。",
+    description="获取指定网页的完整文本内容。用于：阅读搜索结果中的文章全文、获取详细信息、验证引用来源。⚠️ 需先通过 web_search 或 news_search 获取 URL，不要直接猜测 URL。",
     input_schema={
         "type": "object",
         "properties": {
