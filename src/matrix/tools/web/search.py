@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from ..base import ToolDefinition
@@ -168,12 +169,85 @@ def _parse_ddg(html: str, limit: int) -> list[dict[str, str]]:
     return results
 
 
+# ---- URL filter: strip search-engine redirect links ----
+
+# 360 redirect URLs (so.com/link?m=...) and AI search result pages (ai.so.com/search/...)
+# These are not real web pages — LLM should not attempt web_fetch on them
+_SEARCH_ENGINE_REDIRECT_RE = re.compile(
+    r"^https?://(?:www\.)?so\.com/link\?|"
+    r"^https?://ai\.so\.com/search/",
+    re.IGNORECASE,
+)
+
+
+def _filter_redirect_urls(results: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Replace redirect/synthetic URLs with empty string so LLM won't try to web_fetch them."""
+    for r in results:
+        url = r.get("url", "")
+        if url and _SEARCH_ENGINE_REDIRECT_RE.search(url):
+            r["url"] = ""
+    return results
+
+
 # ---- public API ----
+
+# Time-sensitive keywords that indicate the query needs the current year
+_TIME_SENSITIVE_RE = re.compile(
+    r"最近|最新|今天|今日|近期|当前|现在|近日|今年|本(?:周|月|年)",
+)
+
+# Multi-year patterns that dilute search results (e.g. "2025 2026" → "2026")
+_MULTI_YEAR_RE = re.compile(r"\b(?:20\d{2}[-\s]*)+20\d{2}\b|\b20\d{2}\s+20\d{2}\b")
+
+
+def _inject_current_year(query: str) -> str:
+    """If the query is time-sensitive, always strip time-sensitive words (they bias
+    search engines toward old articles), and append the current year if missing.
+    Multi-year queries like "2025 2026" are also cleaned to just the current year."""
+    if not _TIME_SENSITIVE_RE.search(query) and not _MULTI_YEAR_RE.search(query):
+        return query
+    current_year = str(datetime.now(timezone.utc).year)
+    # Always strip time-sensitive keywords
+    cleaned = _TIME_SENSITIVE_RE.sub("", query)
+    # Normalize multi-year patterns: "2025 2026" → "2026", "2024-2026" → "2026"
+    cleaned = _MULTI_YEAR_RE.sub(current_year, cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if current_year not in cleaned:
+        cleaned = f"{cleaned} {current_year}"
+    return cleaned
+
+
+# Year extraction from snippet text
+_YEAR_IN_SNIPPET_RE = re.compile(r"\b(20\d{2})\b")
+
+
+def _result_year_score(snippet: str, current_year: int) -> int:
+    """Score a result by recency: current year = 100, each year older = -100.
+    No year found = 0 (neutral)."""
+    years = _YEAR_IN_SNIPPET_RE.findall(snippet)
+    if not years:
+        return 0
+    best = max(int(y) for y in years)
+    return 100 - (current_year - best) * 100
+
+
+def _boost_recent_results(results: list[dict[str, str]], is_time_sensitive: bool) -> list[dict[str, str]]:
+    """If time-sensitive, reorder results so recent-year results appear first.
+    Old-year results are demoted to the bottom."""
+    if not is_time_sensitive or len(results) <= 1:
+        return results
+    current_year = datetime.now(timezone.utc).year
+    scored = [(r, _result_year_score(r.get("snippet", ""), current_year)) for r in results]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [r for r, _ in scored]
 
 
 def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     """General web search. For news, use news_search."""
     max_results = min(max(max_results, 1), 10)
+    original_query = query
+    query = _inject_current_year(query)
+    is_time_sensitive = _TIME_SENSITIVE_RE.search(original_query) is not None
 
     # Engine 1: 360
     so360_url = _SO360_URL + "?" + urllib.parse.urlencode({"q": query})
@@ -181,7 +255,7 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     if html:
         results = _parse_so360(html, max_results)
         if results:
-            return {"results": results, "query": query, "engine": "so360"}
+            return {"results": _boost_recent_results(_filter_redirect_urls(results), is_time_sensitive), "query": query, "engine": "so360"}
 
     # Engine 2: Bing
     bing_url = _BING_URL + "?" + urllib.parse.urlencode({
@@ -192,7 +266,7 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     if html:
         results = _parse_bing(html, max_results)
         if results:
-            return {"results": results, "query": query, "engine": "bing"}
+            return {"results": _boost_recent_results(_filter_redirect_urls(results), is_time_sensitive), "query": query, "engine": "bing"}
 
     # Engine 3: DuckDuckGo
     ddg_data = urllib.parse.urlencode({"q": query}).encode("utf-8")
@@ -209,6 +283,6 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     if html:
         results = _parse_ddg(html, max_results)
         if results:
-            return {"results": results, "query": query, "engine": "duckduckgo"}
+            return {"results": _boost_recent_results(results, is_time_sensitive), "query": query, "engine": "duckduckgo"}
 
     return {"results": [], "message": "未找到相关结果，请尝试其他关键词"}

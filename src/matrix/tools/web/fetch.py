@@ -40,9 +40,23 @@ _SPACE_RE = re.compile(r"\s+")
 _META_RE = re.compile(r'<meta[^>]*name="description"[^>]*content="([^"]*)"', re.IGNORECASE)
 
 
+# Search engine redirect URLs that should not be fetched
+_REDIRECT_URL_RE = re.compile(
+    r"^https?://(?:www\.)?so\.com/link\?|"
+    r"^https?://ai\.so\.com/search/",
+    re.IGNORECASE,
+)
+
+
 def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
     """Fetch a web page and extract its text content."""
     max_chars = min(max(max_chars, 500), 20000)
+
+    # Reject empty or search-engine redirect URLs early
+    if not url or not url.strip():
+        return {"error": "URL 为空，无法获取。请使用搜索结果的摘要信息直接回答，或搜索其他关键词。", "text": ""}
+    if _REDIRECT_URL_RE.search(url):
+        return {"error": "该 URL 是搜索引擎跳转链接，无法直接获取。请使用搜索结果的摘要信息，或搜索其他来源。", "text": ""}
 
     req = urllib.request.Request(
         url,
