@@ -31,8 +31,9 @@ class TraceStore:
             conn.execute(
                 """INSERT INTO trace_events
                    (session_id, event_type, node_name, agent_id, tool_name,
-                    ok, elapsed_ms, arguments, result_preview, error, ts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ok, elapsed_ms, arguments, result_preview, error,
+                    span_id, parent_span_id, ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event.get("session_id", ""),
                     event.get("event_type", "unknown"),
@@ -44,6 +45,8 @@ class TraceStore:
                     _json_dump(event.get("arguments")),
                     _truncate(event.get("result")),
                     event.get("error"),
+                    event.get("span_id"),
+                    event.get("parent_span_id"),
                     event.get("ts", _now_ts()),
                 ),
             )
@@ -141,9 +144,14 @@ class TraceStore:
             arguments TEXT,
             result_preview TEXT,
             error TEXT,
+            span_id TEXT,
+            parent_span_id TEXT,
             ts TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
         )""")
+        # Migrate: add span_id column if missing (pre-existing DBs)
+        _add_column_if_missing(conn, "trace_events", "span_id", "TEXT")
+        _add_column_if_missing(conn, "trace_events", "parent_span_id", "TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trace_session ON trace_events(session_id)"
         )
@@ -152,6 +160,9 @@ class TraceStore:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trace_type ON trace_events(event_type)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trace_span ON trace_events(span_id)"
         )
         conn.commit()
 
@@ -217,3 +228,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
             except (json.JSONDecodeError, TypeError):
                 pass
     return d
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    """Add a column if it doesn't exist (safe migration for pre-existing DBs)."""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")

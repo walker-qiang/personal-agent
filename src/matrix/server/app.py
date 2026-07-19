@@ -21,6 +21,7 @@ from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
+from ..tools.rag import register_all as register_rag_tools
 from .routes import auth, chat, health, provider, sessions, tools, trace, upload
 from .middleware import AuthMiddleware
 
@@ -94,7 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 embedder=embedder,
                 persist_dir=config.rag_persist_dir,
             )
-            app.state.chat.retriever = app.state.retriever
+            register_rag_tools(tools_registry, retriever=app.state.retriever)
             logger.info("rag: retriever ready")
         except Exception as exc:
             logger.warning("rag: initialization failed (will run without RAG): %s", exc)

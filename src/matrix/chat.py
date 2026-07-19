@@ -62,12 +62,10 @@ class ChatService:
         trace: TraceSink | None = None,
         llm: LLMClient | None = None,
         agent_registry: AgentRegistry | None = None,
-        retriever: Any = None,
     ):
         self.config = config
         self.tools = tools
         self.trace = trace
-        self.retriever = retriever
         self._default_llm = llm or build_llm_client(
             provider=config.agent_provider,
             deepseek_api_key=config.deepseek_api_key,
@@ -301,7 +299,6 @@ class ChatService:
                     "full_tools": self.tools,
                     "trace": self.trace,
                     "history": history,
-                    "retriever": self.retriever,
                     "event_queue": queue.Queue(),
                 },
                 "thread_id": sid,
