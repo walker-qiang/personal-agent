@@ -1,0 +1,713 @@
+"""Shared helpers, constants, and prompts for orchestration nodes."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import queue
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from langgraph.types import RunnableConfig, interrupt
+
+from ...llm import LLMError, LLMClient, FunctionCallResult
+from ...tools import FinanceToolError, ToolRegistry
+from ...agent.registry import AgentRegistry
+from ..anti_hallucination import verify_all_claims, build_verified_output, VerificationResult
+from ..state import AgentState
+
+logger = logging.getLogger("matrix.orchestration")
+
+MAX_REACT_ITERATIONS = 20  # Hard safety net; goal-driven stopping should trigger earlier
+
+MAX_SUBTASK_ITERATIONS = 10  # Per-subtask ReAct limit
+
+MAX_SUBTASKS = 5             # Max subtasks in a decomposition
+
+MAX_PLAN_STEPS = 3
+
+MAX_CONSECUTIVE_FAILURES = 2      # Stop if N consecutive tool calls all fail
+
+MAX_CONSECUTIVE_NO_PROGRESS = 3   # Stop if N consecutive steps add no new info
+
+MAX_SAME_TOOL_CALLS = 2           # Stop if same tool called N+ times (same name, regardless of args)
+
+MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across all tools)
+
+EVALUATOR_INTERVAL = 3            # Run evaluator every N iterations
+
+# ── Query factuality classifier ──────────────────────────────────────────────
+
+
+_FACTUAL_PATTERNS = [
+    r"(多少|几|什么价格|股价|市值|市盈率|财报|营收|利润|增长率|涨跌|跌幅|涨幅)",
+    r"(搜索|查询|查找|最新|今日|昨天|本周|本月|今年|上个季度|最近)",
+    r"(新闻|报道|公告|发布|宣布|数据|统计|公布|披露)",
+    r"(how much|what is|search|latest|today|price|stock|news|revenue|earnings)",
+]
+
+
+
+def _classify_query_factuality(question: str) -> float:
+    """Classify query as factual vs creative; return recommended temperature.
+
+    Factual queries (data, news, prices) → low temperature to reduce hallucination.
+    Creative queries (image generation, writing) → normal temperature.
+    """
+    import re as _re
+    score = 0
+    for pat in _FACTUAL_PATTERNS:
+        if _re.search(pat, question, _re.IGNORECASE):
+            score += 1
+    if score >= 2:
+        return 0.1
+    elif score >= 1:
+        return 0.4
+    return 0.7
+
+# ---- Prompts ----
+
+
+COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回答用户的问题。
+
+可用的领域专家：
+{agents}
+
+用户问题：{question}
+
+请制定执行计划，以 JSON 数组格式返回。每个步骤：
+{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "skill_name": "", "purpose": "为什么需要这个专家"}}
+
+规则：
+- 简单问题（单步即可回答）返回空数组 []，由指挥官直接处理
+- 复杂问题（需要多个独立数据源、多步推理、对比分析）拆分为子任务数组，每个子任务独立运行
+  - 例如"对比A和B的财报"拆为：查A财报、查B财报、查股价、汇总分析
+  - 每个子任务的 task 必须具体、可独立执行，指定要查什么数据
+  - 子任务之间尽量独立无依赖，可并行执行
+  - 最多 {max_subtasks} 个子任务
+- 投资/金融/持仓/配置分析类问题委派给 investment-analyst
+- 图片生成、视频生成、图像创作类问题委派给 media-generator
+- 跨领域问题：投资部分委派给 investment-analyst，媒体生成委派给 media-generator，其余指挥官自己处理
+- 每个专家只委派一次，合并相似任务
+- 如果问题匹配某个专家的技能，填写 skill_name 字段
+
+只返回 JSON 数组，不要其他文字。"""
+
+
+COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家的执行结果，汇总回答用户的问题。
+
+用户问题：{question}
+
+专家执行结果：
+{results}
+
+请用清晰、结构化的方式汇总回答。要求：
+1. 直接回答用户的问题，不要展示执行过程、步骤回顾、专家状态表格
+2. 引用专家的关键发现，但不要列出"执行专家""任务目标""执行状态"等元信息
+3. 如果某个专家结果不完整或有错误，用一句话说明即可
+4. 使用与用户相同的语言
+5. 使用 Markdown 格式化：**加粗**关键数字，列表展示要点
+6. 如果结果中包含图片 URL，使用 ![描述](URL) 格式展示图片
+
+重要：你的输出是给最终用户看的，不是内部日志。不要包含执行过程回顾。"""
+
+
+DOMAIN_AGENT_REACT_SYSTEM = """You are {agent_name}, a domain expert with tool access.
+
+{persona}
+
+Current task: {task}
+
+## Honesty Rules — READ FIRST
+**You MUST NOT fabricate data.** If a tool result does not contain the specific information the user asked for, you MUST clearly state that you could not find it. Fabricating plausible-sounding details is the worst possible failure.
+
+Specifically:
+- NEVER invent dates, numbers, statistics, prices, model names, event details, or proper nouns
+- If a search result only shows analyst ratings, do NOT pretend it shows live stock prices
+- If you cannot find the answer, say "抱歉，搜索结果中未找到该信息" — do NOT make up an answer
+- Every factual claim MUST be traceable to a tool result you just received
+- If a tool returns a page that requires login/is geo-blocked/has no data, report that honestly
+
+## Tool Usage Rules
+- **CRITICAL: Call exactly ONE tool per response. Never call the same tool twice in one step.**
+- **CRITICAL: After a tool returns results, use those results. Do NOT call the same tool again with a different query for the same information — the results will be nearly identical.**
+- **CRITICAL: STOP AND ANSWER when you have enough information. After each tool call, ask yourself: "Can I fully answer the user's question with the data I already have?" If YES, output the answer immediately.**
+- **TIME-SENSITIVE QUERIES: When the user asks for 最近/最新/今天/这次/近期, you MUST use `news_search` (NOT `web_search`). You MUST scan ALL returned results and pick the one with the LATEST date. The first result in the list is NOT necessarily the most recent. If the first result mentions 2025 but a later result mentions 2026-07-06, you MUST cite the 2026 one. Do NOT stop until you have found the most recent event.**
+- **KEYWORD HINT: "潜射导弹" IS a type of "洲际导弹" — treat them as the same concept. "潜射弹道导弹" = submarine-launched ballistic missile = 洲际弹道导弹.**
+- **CRITICAL: web_fetch only works with real article URLs. If a search result has no URL, use the snippet directly.**
+- Read the tool descriptions carefully and choose the most appropriate tool for the task
+- If a tool can solve the request, DO NOT ask the user questions — just call the tool
+- After the tool returns results, summarize them for the user
+- If the tool fails, explain the failure and suggest alternatives
+- If you need to search for multiple things, call ONE tool at a time, then decide based on the results
+
+## Image & Video Generation Guidelines
+When calling `agnes.generate_image` or `agnes.generate_video`, follow these rules:
+
+**What you do (creative description):**
+- Translate the user's intent to English
+- Describe the visual content: subject, scene, action, pose, expression, environment
+- Describe the composition: camera angle, framing, depth of field, lighting
+- Describe the mood and atmosphere: warm/cold, tense/calm, bright/dark
+- Be specific and concrete — avoid vague terms like "beautiful" or "nice"
+- Keep the prompt under 150 words, focused on visual elements
+
+**What the code handles automatically (do NOT include):**
+- Quality keywords: photorealistic, 8k, highly detailed, professional photography
+- Negative prompts: no text, no watermark, no distortion, no extra limbs
+- Technical specs: resolution, format, rendering engine
+
+**Example:**
+- User says "一只猫" → your prompt: "A fluffy orange tabby cat sitting on a wooden windowsill, soft morning light streaming through lace curtains, shallow depth of field focusing on the cat's green eyes, warm cozy atmosphere, dust particles dancing in the light"
+- User says "老虎捕猎北极熊" → your prompt: "A Siberian tiger in mid-pounce, muscles tensed, mouth open showing sharp teeth, targeting a polar bear on a snowy Arctic ice field, dramatic overcast sky, snow particles in the air, low camera angle, intense action shot, cold blue-white color palette"
+
+**Style guidance:**
+- If the user asks for a specific style (artistic, anime, oil-painting, sketch, 3d-render, watercolor), describe it in the prompt — e.g., "anime style illustration of..."
+- Default is photorealistic — no need to mention it explicitly
+- For videos, use the default settings (1152x768, 121 frames, 24fps ≈ 5 seconds). Only change if the user asks for specific duration or quality.
+
+**Video generation note:**
+- Video generation is asynchronous and takes 2-3 minutes. The tool will wait for completion automatically.
+- After calling the tool, show the result with: ![描述](video_url)
+
+## Output
+- Today is {today}. Never invent dates — only cite dates found in search results.
+- Use the same language as the user
+- **SOURCE CITATION: Every factual claim (number, date, price, event, quote) MUST be followed by a source tag in the format `[来源: tool_name]`. For example: "腾讯今日收盘价 380 港元 [来源: web_search]" or "据央行公告，利率下调 25 个基点 [来源: news_search]"**
+- **If you cannot find a source for a claim, do NOT make the claim. Instead say "搜索结果中未找到该信息"**
+- If the tool generated an image, show it using Markdown image syntax: ![描述](URL)
+- If the tool generated a video, show it using: ![描述](URL)
+- Never use plain text links [text](url) for images/videos — always use ![](url) format
+- Use Markdown formatting: **bold** for key figures, `code` for code, bullet lists for breakdowns
+- Do NOT include execution process review, agent status tables, or step-by-step workflow in your output
+- Money is CNY unless stated otherwise.
+
+## 结构化输出要求（反幻觉）
+
+在回答末尾，你必须附加一个验证块。格式如下：
+
+[VERIFICATION]
+[CLAIM] 具体的事实陈述1 [/CLAIM]
+[EVIDENCE] 工具返回中支持此陈述的原文 [/EVIDENCE]
+[SOURCE] tool_name [/SOURCE]
+
+[CLAIM] 具体的事实陈述2 [/CLAIM]
+[EVIDENCE] 工具返回中支持此陈述的原文 [/EVIDENCE]
+[SOURCE] tool_name [/SOURCE]
+[/VERIFICATION]
+
+规则：
+- 你的回答中每个事实性陈述（数字、日期、价格、人名、事件名、百分比）都必须对应一个 CLAIM 条目
+- EVIDENCE 必须是工具返回结果中的原文（可截取关键句），不得自行编写
+- 如果某个陈述无法在工具结果中找到原文支持，不要写 CLAIM，改为在回答中标注"该信息未在搜索结果中确认"
+- 主观判断、总结、建议不需要 CLAIM"""
+
+
+REFLECTION_PROMPT = """You are a quality reviewer. Check if the answer below is accurate and complete.
+
+Context: The agent has access to tools including web_search, web_fetch, finance.*, agnes.generate_image (AI image generation), and agnes.generate_video (AI video generation). If the answer mentions generating an image/video with a URL link, that is a REAL tool result — do NOT flag it as hallucination.
+
+User question: {question}
+Answer to review: {answer}
+
+Check:
+1. Does the answer directly address the question?
+2. Are all claims supported by the data (no fabrication)?
+3. Is the answer complete (no missing key info)?
+4. Is the answer concise and free of hallucination?
+
+Return ONLY a JSON object:
+{{"ok": true}} — if the answer is good
+{{"ok": false, "issues": ["issue 1", "issue 2"]}} — if there are problems
+
+Do NOT rewrite the answer. Just evaluate."""
+
+
+REVISE_PROMPT = """You are a helpful AI assistant. Your previous answer had the following issues:
+
+{issues}
+
+Original question: {question}
+Original answer: {answer}
+
+Please rewrite the answer to fix these issues. Keep the same language and formatting style.
+Return ONLY the corrected answer, no explanations."""
+
+
+# ---- Helpers ----
+
+
+def _extract_json(text: str) -> Any:
+    """Extract a JSON object or array from text, handling markdown fences."""
+    cleaned = text.strip()
+    fence = re.search(
+        r"```(?:json)?\s*([\[{].*?[\]}])\s*```", cleaned, flags=re.DOTALL
+    )
+    if fence:
+        cleaned = fence.group(1)
+    elif not (cleaned.startswith("{") or cleaned.startswith("[")):
+        brace = cleaned.find("{")
+        bracket = cleaned.find("[")
+        candidates = [i for i in (brace, bracket) if i >= 0]
+        start = min(candidates) if candidates else -1
+        end = max(cleaned.rfind("}"), cleaned.rfind("]"))
+        if start >= 0 and end > start:
+            cleaned = cleaned[start : end + 1]
+    return json.loads(cleaned)
+
+
+
+def _get_configurable(config: RunnableConfig) -> dict[str, Any]:
+    return config.get("configurable", {})
+
+
+
+def _trace(cfg: dict[str, Any], event: dict[str, Any]) -> None:
+    sink = cfg.get("trace")
+    if sink is not None:
+        sink.record(event)
+
+
+@contextlib.contextmanager
+
+def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
+    """Record a span: start and end events with latency.
+
+    Usage:
+        with _trace_span(cfg, "react_llm", session_id=..., agent_id=...,
+                         parent_span_id=...) as span_id:
+            ... do work ...
+    # span_start and span_end events are automatically recorded.
+    """
+    span_id = uuid.uuid4().hex[:12]
+    parent_span_id = kwargs.get("parent_span_id")
+    session_id = kwargs.get("session_id", "")
+    agent_id = kwargs.get("agent_id", "")
+    iteration = kwargs.get("iteration", 0)
+
+    _trace(cfg, {
+        "session_id": session_id,
+        "event_type": "span_start",
+        "node_name": name,
+        "agent_id": agent_id,
+        "span_id": span_id,
+        "parent_span_id": parent_span_id,
+        "ts": _now_ts(),
+        "arguments": {"iteration": iteration},
+    })
+
+    started = time.perf_counter()
+    try:
+        yield span_id
+    finally:
+        elapsed = round((time.perf_counter() - started) * 1000, 3)
+        _trace(cfg, {
+            "session_id": session_id,
+            "event_type": "span_end",
+            "node_name": name,
+            "agent_id": agent_id,
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "elapsed_ms": elapsed,
+            "ts": _now_ts(),
+        })
+
+
+
+def _now_ts() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+
+def _is_refusal(content: str) -> bool:
+    """Check if the LLM content is a refusal to use tools."""
+    lowered = content.lower()
+    refusal_patterns = [
+        r"抱歉", r"不能", r"无法", r"做不到", r"目前不",
+        r"sorry", r"cannot", r"unable", r"can't", r"don't have",
+        r"i apologize", r"i am not able",
+    ]
+    return any(re.search(pat, lowered) for pat in refusal_patterns)
+
+
+
+def _is_hallucination(content: str) -> bool:
+    """Check if the LLM is pretending to have completed a task without actually calling tools.
+
+    Detects patterns like '已为您生成', '生成结果如下', etc. where the LLM
+    describes a non-existent output as if it were real.
+    """
+    return bool(re.search(
+        r"已(为您|经)?(生成|创建|制作|完成)|生成结果如下|具体效果如下|"
+        r"Here is the (generated|created) |I have (generated|created) ",
+        content,
+    ))
+
+
+
+def _force_tool_call(
+    llm,
+    system_prompt: str,
+    task: str,
+    tools: list[dict[str, Any]],
+) -> FunctionCallResult:
+    """Retry with tool_choice='required' and a stronger system prompt."""
+    forced_system = (
+        system_prompt
+        + "\n\nCRITICAL: You MUST call a tool to complete this task. "
+        "Do NOT say you cannot do it — call the appropriate tool. "
+        "Do NOT return text without calling a tool first."
+    )
+    try:
+        return llm.function_call(
+            forced_system,
+            [{"role": "user", "content": f"Task: {task}\n\nCall a tool to complete this task."}],
+            tools,
+            tool_choice="required",
+        )
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+        logger.warning("RAG need detection LLM call failed: %s", type(e).__name__)
+        return FunctionCallResult(content="", tool_calls=[])
+
+
+
+def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) -> str:
+    """Build compact conversation history context for injection into LLM prompts."""
+    if not history:
+        return ""
+    recent = history[-(max_turns * 2):]  # each turn = user + assistant
+    lines = []
+    for h in recent:
+        role_label = "用户" if h["role"] == "user" else "助手"
+        lines.append(f"[{role_label}]: {h['content'][:300]}")
+    return "对话历史：\n" + "\n".join(lines) + "\n\n"
+
+
+# ---- Goal-driven Evaluator ----
+
+
+EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的信息是否已经足够回答用户的问题。
+
+评估标准：
+- SUFFICIENT（充分）：所有回答问题的关键数据已获取，agent 的回答直接针对用户问题，不需要更多工具调用
+- INSUFFICIENT（不充分）：关键数据缺失、agent 拒绝回答、答案含糊其辞、或重要事实陈述缺乏工具结果支撑
+
+请只输出一个词：SUFFICIENT 或 INSUFFICIENT，然后输出一行简短原因（中文）。"""
+
+
+
+def _evaluate_sufficiency(
+    question: str,
+    tool_results: list[dict[str, Any]],
+    llm_response: str,
+    llm: Any,
+) -> tuple[bool, str]:
+    """Evaluate whether current results are sufficient to answer the question.
+
+    Returns: (is_sufficient: bool, reason: str)
+    """
+    if not tool_results and not llm_response:
+        return False, "无工具结果且无LLM输出"
+
+    # Build a compact summary of tool results
+    tool_summary = []
+    for tr in tool_results[-8:]:  # Last 8 results to keep prompt short
+        name = tr.get("name", "unknown")
+        if "error" in tr:
+            tool_summary.append(f"  [{name}] 失败: {str(tr['error'])[:100]}")
+        else:
+            result = tr.get("result", "")
+            tool_summary.append(f"  [{name}] 结果: {str(result)[:200]}")
+    tool_text = "\n".join(tool_summary) if tool_summary else "（无工具结果）"
+
+    eval_prompt = f"""用户问题：{question}
+
+已收集的工具结果：
+{tool_text}
+
+Agent 当前回答：
+{llm_response[:500] if llm_response else "（尚未生成回答）"}"""
+
+    try:
+        verdict = llm.complete(EVALUATOR_PROMPT, [{"role": "user", "content": eval_prompt}], temperature=0.1)
+        verdict_clean = verdict.strip().upper()
+        # Validate: must be a meaningful response
+        if len(verdict_clean) < 5 or (
+            "SUFFICIENT" not in verdict_clean and "INSUFFICIENT" not in verdict_clean
+        ):
+            logger.warning("Evaluator returned invalid verdict: %s", verdict[:100])
+            return _evaluate_heuristic(tool_results, llm_response)
+        is_sufficient = verdict_clean.startswith("SUFFICIENT")
+        # Extract reason (after the keyword)
+        reason = verdict.strip()
+        if "\n" in reason:
+            reason = reason.split("\n", 1)[-1].strip()
+        else:
+            # Remove the keyword prefix
+            for prefix in ("SUFFICIENT", "INSUFFICIENT"):
+                if reason.upper().startswith(prefix):
+                    reason = reason[len(prefix):].strip(" ,，:：")
+                    break
+        return is_sufficient, reason
+    except Exception as e:
+        # Evaluator call failed — fall back to heuristic
+        logger.warning("Evaluator call failed: %s, falling back to heuristic", e)
+        return _evaluate_heuristic(tool_results, llm_response)
+
+
+
+def _evaluate_heuristic(
+    tool_results: list[dict[str, Any]],
+    llm_response: str,
+) -> tuple[bool, str]:
+    """Heuristic fallback when evaluator LLM call fails."""
+    if not llm_response:
+        return False, "无LLM回答"
+    if len(llm_response) < 10:
+        return False, "回答过短"
+    if _is_refusal(llm_response):
+        return False, "回答为拒绝"
+    if _is_hallucination(llm_response):
+        return False, "回答疑似幻觉"
+    if not tool_results:
+        return False, "无工具调用结果"
+    return True, "启发式判定充分"
+
+
+
+def _check_early_stop(
+    tool_results: list[dict[str, Any]],
+    iteration: int,
+    consecutive_failures: int,
+    consecutive_no_progress: int,
+) -> str | None:
+    """Check early stopping signals. Returns reason string if should stop, None otherwise."""
+    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+        return f"连续 {consecutive_failures} 次工具调用全部失败"
+
+    if consecutive_no_progress >= MAX_CONSECUTIVE_NO_PROGRESS:
+        return f"连续 {consecutive_no_progress} 步未收集到新信息"
+
+    # Check for excessive same-tool calls (by name, regardless of args)
+    if tool_results:
+        tool_counts: dict[str, int] = {}
+        for tr in tool_results:
+            name = tr.get("name", "")
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+        for name, count in tool_counts.items():
+            if count >= MAX_SAME_TOOL_CALLS:
+                return f"同一工具 {name} 调用 {count} 次，信息已足够"
+
+    # Check for excessive total tool calls (across all tools)
+    if len(tool_results) >= MAX_TOTAL_TOOL_CALLS:
+        return f"工具总调用 {len(tool_results)} 次已达上限，应已收集足够信息"
+
+    return None
+
+
+
+def _build_tools_for_llm(tools: ToolRegistry) -> list[dict[str, Any]]:
+    """Build tool definitions list for LLM function calling."""
+    return tools.list_tools()
+
+
+# ---- Nodes ----
+
+
+
+def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> None:
+    """Push a real-time event to the SSE queue if available."""
+    q = cfg.get("event_queue")
+    if q is not None:
+        try:
+            q.put_nowait((evt_type, payload))
+        except queue.Full:
+            pass
+
+
+# ---- Split ReAct nodes (top-level graph, single-step plans) ----
+
+
+def _route_after_react_llm(state: AgentState) -> str:
+    """Route after react_llm: tool calls → react_tool, otherwise → react_evaluate."""
+    react = state.get("react", {})
+    messages = react.get("messages", [])
+    if not messages:
+        return "react_evaluate"
+    last_msg = messages[-1]
+    if last_msg.get("tool_calls"):
+        return "react_tool"
+    return "react_evaluate"
+
+
+# ---- Shared tool execution (used by both ReAct paths) ----
+
+
+def _llm_summarize_from_results(
+    question: str,
+    tool_results: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    llm,
+) -> str:
+    """Call the LLM to summarize from existing tool results.
+
+    Used when all tool calls were deduped and the LLM has no text content
+    (only tool_calls) — we need an explicit summarization call to get a
+    text answer the user can read.
+    """
+    # Build a compact summary of tool results
+    result_summary_parts = []
+    for i, tr in enumerate(tool_results):
+        name = tr.get("name", f"tool_{i}")
+        result = tr.get("result", "")
+        if result:
+            result_str = json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
+            # Truncate very long results
+            if len(result_str) > 2000:
+                result_str = result_str[:2000] + "..."
+            result_summary_parts.append(f"[{name} #{i+1}]\n{result_str}")
+
+    summary_text = "\n\n".join(result_summary_parts)
+
+    summary_msg = [
+        {"role": "system", "content": "你是一个有帮助的助手。请基于提供的工具搜索结果，直接回答用户的问题。不要调用工具，直接回答。使用中文。"},
+        {"role": "user", "content": f"用户问题：{question}\n\n以下是工具搜索结果：\n\n{summary_text}\n\n请基于以上结果回答用户的问题。"},
+    ]
+
+    try:
+        response = llm.invoke(summary_msg)
+        return response.content.strip() if hasattr(response, "content") else str(response)
+    except Exception:
+        logger.exception("_llm_summarize_from_results: LLM call failed")
+        return "抱歉，系统暂时无法处理您的问题。请稍后重试。"
+
+
+
+def _build_react_final_answer(
+    react: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+    llm,
+    iteration: int,
+) -> dict[str, Any]:
+    """Build the final agent result from the react context."""
+    agent_id = react.get("agent_id", "")
+    messages = react.get("messages", [])
+    question = react.get("question", "")
+
+    # Extract the last assistant content as answer; fall back to react["answer"]
+    # (which may be set directly by error paths in react_llm_node)
+    answer = react.get("answer", "")
+    if not answer:
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                answer = msg["content"]
+                break
+
+    # If still no answer but we have tool results, ask the LLM to summarize
+    if not answer and tool_results:
+        answer = _llm_summarize_from_results(question, tool_results, messages, llm)
+
+    answer = _fix_media_answer(answer, tool_results)
+
+    # ── Anti-hallucination verification ──
+    verification = verify_all_claims(answer, tool_results, llm)
+    if verification.total > 0:
+        answer = build_verified_output(answer, verification)
+
+    new_result = {
+        "agent_id": agent_id,
+        "task": question,
+        "result": answer,
+        "findings": [],
+        "tool_results": tool_results,
+        "error": "",
+    }
+
+    return {
+        "react": {**react, "iteration": iteration, "answer": answer},
+        "agent_results": [new_result],
+    }
+
+
+
+def _route_after_react_evaluate(state: AgentState) -> str:
+    """Route after react_evaluate: loop back to react_llm if not done, else aggregate."""
+    react = state.get("react", {})
+    if react.get("answer"):
+        return "aggregate"
+    return "react_llm"
+
+
+# ---- Subgraph ReAct (multi-step plans, compiled inside delegate_node) ----
+
+
+
+def _extract_media_urls(tool_results: list[dict]) -> str:
+    """Extract image/video URLs from tool results as Markdown."""
+    lines = []
+    for tr in tool_results:
+        name = tr.get("name", "")
+        result = tr.get("result", {})
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(result, dict):
+            continue
+        if name == "agnes.generate_image" and result.get("images"):
+            for img in result["images"]:
+                url = img.get("url", "")
+                if url:
+                    desc = result.get("prompt", "生成的图片")[:50]
+                    lines.append(f"![{desc}]({url})")
+        elif name == "agnes.generate_video" and result.get("videos"):
+            for vid in result["videos"]:
+                url = vid.get("url", "")
+                if url:
+                    desc = result.get("prompt", "生成的视频")[:50]
+                    lines.append(f"![{desc}]({url})")
+    return "\n".join(lines)
+
+
+
+def _fix_media_answer(answer: str, tool_results: list[dict]) -> str:
+    """If the model hallucinates 'can't generate' but tools actually succeeded,
+    replace the answer with the actual media results."""
+    if not tool_results or not answer:
+        return answer
+    # Detect "can't do" / "unable" / "sorry" type responses
+    negative = ["无法", "不能", "can't", "cannot", "can not", "抱歉", "sorry", "unable", "无法直接"]
+    is_negative = any(phrase in answer.lower() for phrase in negative)
+    if not is_negative:
+        return answer
+    # Check if any generation tool actually succeeded
+    media_urls = _extract_media_urls(tool_results)
+    if not media_urls:
+        return answer
+    # Replace with positive answer showing the actual results
+    lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in answer) else "en"
+    if lang == "zh":
+        return f"好的，已成功生成！\n\n{media_urls}"
+    return f"Done! Generated successfully.\n\n{media_urls}"
+
+
+
+_HIGH_RISK_PATTERNS = [
+    "snapshot.create", "snapshot.update", "snapshot.delete",
+    "asset.create", "asset.update", "asset.delete",
+    "write", "save", "delete", "create", "update",
+    "execute", "run", "deploy",
+]
+
+
+
+def _is_high_risk(tool_name: str) -> bool:
+    """Check if a tool call is high-risk based on its name."""
+    return any(pattern in tool_name.lower() for pattern in _HIGH_RISK_PATTERNS)
+
+
