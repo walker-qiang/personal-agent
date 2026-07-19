@@ -12,8 +12,6 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from langgraph.types import RunnableConfig
-
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
@@ -40,7 +38,7 @@ from ..state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
 
-def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+def react_prepare_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
     """Prepare the ReAct context for a single-step domain agent execution.
 
     Sets up the react dict with system prompt, messages, tools, and
@@ -94,7 +92,7 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
 
 
 
-def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+def react_llm_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
     """Call the LLM with function calling to decide the next action.
 
     Returns updated react context with the LLM response appended to messages.
@@ -333,7 +331,7 @@ def _react_execute_tool_calls(
 
 
 
-def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+def react_tool_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
     """Execute tool calls from the latest assistant message.
 
     Delegates to _react_execute_tool_calls (shared with subgraph path).
@@ -402,7 +400,7 @@ def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
 
 
-def react_evaluate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+def react_evaluate_node(state: AgentState, *, config: dict[str, Any]) -> dict[str, Any]:
     """Evaluate whether the current results are sufficient to answer.
 
     Checks early stop conditions and runs the evaluator LLM.  If sufficient,

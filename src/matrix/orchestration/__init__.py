@@ -1,15 +1,14 @@
-"""Multi-agent LangGraph orchestration for the Matrix Agent.
+"""Agent orchestration pipeline.
 
-Commander + Domain Agents architecture:
-  classify → commander_plan → delegate → aggregate → reflection
+Commander plans → ReAct loop → aggregate → reflection.
 """
 
 from __future__ import annotations
 
-from .graph import build_graph
+from .graph import run_agent
 from .state import AgentState
 
 __all__ = [
     "AgentState",
-    "build_graph",
+    "run_agent",
 ]
