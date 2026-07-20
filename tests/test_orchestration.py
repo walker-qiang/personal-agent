@@ -33,19 +33,19 @@ class FakeLLM:
         self.calls: list[tuple[str, list]] = []
         self._stream_idx = 0
 
-    def complete(self, system: str, messages: list) -> str:
+    def complete(self, system: str, messages: list, **kwargs) -> str:
         self.calls.append(("complete", messages))
         if not self.responses:
             return "{}"
         return self.responses.pop(0)
 
-    def stream_complete(self, system: str, messages: list):
+    def stream_complete(self, system: str, messages: list, **kwargs):
         self.calls.append(("stream", messages))
         text = self.responses.pop(0) if self.responses else ""
         for ch in text:
             yield ch
 
-    def function_call(self, system, messages, tools, tool_choice="auto"):
+    def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
         self.calls.append(("function_call", messages))
         text = self.responses.pop(0) if self.responses else ""
         return FunctionCallResult(content=text, tool_calls=[])
@@ -163,7 +163,7 @@ class TestDelegateNode:
                 super().__init__(responses)
                 self._fc_count = 0
 
-            def function_call(self, system, messages, tools, tool_choice="auto"):
+            def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
                 self.calls.append(("function_call", messages))
                 self._fc_count += 1
                 if self._fc_count == 1:
@@ -200,7 +200,7 @@ class TestDelegateNode:
         from matrix.llm import FunctionCallResult, ToolCall
 
         class ToolCallLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto"):
+            def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
                 self.calls.append(("function_call", messages))
                 if not self.responses:
                     return FunctionCallResult(content="", tool_calls=[])

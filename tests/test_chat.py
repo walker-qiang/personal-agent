@@ -19,20 +19,20 @@ class FakeLLM:
         self.responses = responses
         self.calls: list[tuple[str, list[dict]]] = []
 
-    def complete(self, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, system: str, messages: list[dict[str, str]], **kwargs) -> str:
         self.calls.append(("complete", messages))
         if not self.responses:
             raise AssertionError("no fake LLM responses left")
         return self.responses.pop(0)
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]]):
+    def stream_complete(self, system: str, messages: list[dict[str, str]], **kwargs):
         """Fake streaming: yield the next response character by character."""
         self.calls.append(("stream", messages))
         text = self.responses.pop(0) if self.responses else ""
         for ch in text:
             yield ch
 
-    def function_call(self, system, messages, tools, tool_choice="auto"):
+    def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
         """Fake function calling: returns a FunctionCallResult with no tool calls."""
         from matrix.llm import FunctionCallResult
         self.calls.append(("function_call", messages))
@@ -180,7 +180,7 @@ class TestChatService:
                 super().__init__(responses)
                 self._fc_count = 0
 
-            def function_call(self, system, messages, tools, tool_choice="auto"):
+            def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
                 self.calls.append(("function_call", messages))
                 self._fc_count += 1
                 if self._fc_count == 1:

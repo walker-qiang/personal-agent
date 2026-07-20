@@ -17,7 +17,10 @@ from langgraph.types import RunnableConfig, interrupt
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
-from ..anti_hallucination import verify_all_claims, build_verified_output, VerificationResult
+from ..anti_hallucination import (
+    verify_all_claims, build_verified_output, VerificationResult,
+    _VERIF_BLOCK_RE,
+)
 from ..state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
@@ -529,21 +532,6 @@ def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> 
             pass
 
 
-# ---- Split ReAct nodes (top-level graph, single-step plans) ----
-
-
-def _route_after_react_llm(state: AgentState) -> str:
-    """Route after react_llm: tool calls → react_tool, otherwise → react_evaluate."""
-    react = state.get("react", {})
-    messages = react.get("messages", [])
-    if not messages:
-        return "react_evaluate"
-    last_msg = messages[-1]
-    if last_msg.get("tool_calls"):
-        return "react_tool"
-    return "react_evaluate"
-
-
 # ---- Shared tool execution (used by both ReAct paths) ----
 
 
@@ -617,6 +605,10 @@ def _build_react_final_answer(
     verification = verify_all_claims(answer, tool_results, llm)
     if verification.total > 0:
         answer = build_verified_output(answer, verification)
+    else:
+        # Always strip [VERIFICATION] block from user-facing output,
+        # even when parsing found no claims (e.g. LLM formatted it incorrectly).
+        answer = _VERIF_BLOCK_RE.sub("", answer).strip()
 
     new_result = {
         "agent_id": agent_id,
@@ -632,14 +624,6 @@ def _build_react_final_answer(
         "agent_results": [new_result],
     }
 
-
-
-def _route_after_react_evaluate(state: AgentState) -> str:
-    """Route after react_evaluate: loop back to react_llm if not done, else aggregate."""
-    react = state.get("react", {})
-    if react.get("answer"):
-        return "aggregate"
-    return "react_llm"
 
 
 # ---- Subgraph ReAct (multi-step plans, compiled inside delegate_node) ----

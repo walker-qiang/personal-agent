@@ -8,6 +8,7 @@ import queue
 import sqlite3
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Any, Iterator, Protocol
@@ -262,17 +263,13 @@ class ChatService:
 
         # Load conversation history for context injection into LLM calls
         history = self._get_history(sid, user_id)
-        initial_state = AgentState(
-            user_message=text,
-            session_id=sid,
-        )
+        initial_state = AgentState(user_message=text, session_id=sid)
 
         interrupted = False
         try:
             emitted_tool_count = 0
             emitted_agent_count = 0
             classify_emitted = False
-            # Track tool calls emitted via queue to prevent double emission
             _queue_emitted: set[tuple[str, str]] = set()
             final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
@@ -283,140 +280,58 @@ class ChatService:
                 len(text),
             )
 
-            graph_config = {
-                "configurable": {
-                    "llm": session_llm,
-                    "pipeline_llm": self._pipeline_llm,
-                    "agent_registry": self.agent_registry,
-                    "full_tools": self.tools,
-                    "trace": self.trace,
-                    "history": history,
-                    "event_queue": queue.Queue(),
-                },
-                "thread_id": sid,
-            }
+            graph_config = self._build_graph_config(sid, session_llm, history)
 
             try:
                 for event in self._compiled_graph.stream(
-                    initial_state,
-                    stream_mode="values",
-                    config=graph_config,
+                    initial_state, stream_mode="values", config=graph_config,
                 ):
-                    # Drain real-time events from the queue (tool calls from delegate node)
                     yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
                     if not isinstance(event, dict):
                         continue
                     final_state = event
 
-                    # Emit classify event when delegation_plan is first set by commander_plan
+                    # Emit classify event
                     delegation_plan = event.get("delegation_plan")
-                    if delegation_plan is not None and len(delegation_plan) > 0 and not classify_emitted:
+                    if delegation_plan and len(delegation_plan) > 0 and not classify_emitted:
                         classify_emitted = True
-                        # Determine intent: commander-only plan = simple, multi-agent = delegate
                         intent = "delegate" if len(delegation_plan) > 1 or (
                             delegation_plan and delegation_plan[0].get("agent_id") != "commander"
                         ) else "simple"
-                        yield {
-                            "type": "classify",
-                            "intent": intent,
-                            "delegation_plan": delegation_plan,
-                        }
+                        yield {"type": "classify", "intent": intent, "delegation_plan": delegation_plan}
 
-                    # Emit agent delegation events
+                    # Emit agent events
                     agent_results = event.get("agent_results", [])
                     if len(agent_results) > emitted_agent_count:
-                        for i in range(emitted_agent_count, len(agent_results)):
-                            ar = agent_results[i]
-                            yield {
-                                "type": "agent_result",
-                                "agent_id": ar.get("agent_id", ""),
-                                "task": ar.get("task", ""),
-                                "result": ar.get("result", "")[:500],
-                                "error": ar.get("error", ""),
-                            }
-                        emitted_agent_count = len(agent_results)
+                        emitted_agent_count = yield from self._emit_agent_events(
+                            agent_results, emitted_agent_count,
+                        )
 
-                    # Yield only NEW tool calls (skip duplicates, skip queue-emitted)
+                    # Emit tool events
                     tool_results = event.get("tool_results", [])
-                    new_count = len(tool_results)
-                    if new_count > emitted_tool_count:
-                        for i in range(emitted_tool_count, new_count):
-                            tr = tool_results[i]
-                            if tr.get("duplicate") or tr.get("name") == "_knowledge":
-                                continue
-                            tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
-                            if tr_key in _queue_emitted:
-                                continue
-                            yield {
-                                "type": "tool_call",
-                                "name": tr.get("name", ""),
-                                "args": tr.get("arguments", {}),
-                            }
-                            yield {
-                                "type": "tool_result",
-                                "name": tr.get("name", ""),
-                                "preview": preview_json(
-                                    tr.get("error", tr.get("result", {})),
-                                    limit=2000,
-                                ),
-                            }
-                        emitted_tool_count = new_count
+                    if len(tool_results) > emitted_tool_count:
+                        emitted_tool_count = yield from self._emit_tool_events(
+                            tool_results, emitted_tool_count, _queue_emitted,
+                        )
 
-                    # Yield error
+                    # Emit error
                     error = event.get("error", "")
                     if error:
                         yield {"type": "error", "message": error}
 
-                # Streaming summarization
-                if final_state.get("needs_summary"):
-                    answer_parts: list[str] = []
-                    for event in self._stream_summarize(final_state, sid, text, session_llm, history):
-                        yield event
-                        if event["type"] == "token":
-                            answer_parts.append(event["content"])
-                    answer = "".join(answer_parts)
-                    if answer:
-                        self._remember(sid, text, answer, user_id=user_id)
-                else:
-                    # Non-streaming path: yield once after reflection, then save
-                    final_answer = final_state.get("final_answer", "")
-                    if final_answer and not final_answer.startswith("所有领域专家"):
-                        yield {"type": "token", "content": final_answer}
-                        self._remember(sid, text, final_answer, user_id=user_id)
+                yield from self._finalize_stream(final_state, sid, text, session_llm, history, user_id)
 
             except GraphInterrupt as gi:
-                # HITL: graph paused at confirm_node, waiting for user input
                 interrupted = True
-                interrupt_value = gi.args[0] if gi.args else {}
-                pending_actions = interrupt_value.get("actions", [])
-                logger.info(
-                    "hitl: confirm_required session=%s actions=%d",
-                    sid, len(pending_actions),
-                )
-                # Store config for later resume
-                self._pending_confirms[sid] = {
-                    "config": graph_config,
-                    "session_llm": session_llm,
-                    "user_id": user_id,
-                }
-                # Keep the latest checkpoint (paused state) for HITL resume
-                self._prune_checkpoints(sid, keep_latest=True)
-                yield {
-                    "type": "confirm_required",
-                    "actions": pending_actions,
-                    "session_id": sid,
-                }
-                # Don't yield "done" — the stream is paused
+                yield from self._handle_hitl_interrupt(gi, sid, graph_config, session_llm, user_id)
                 return
 
         except Exception as err:
+            logger.error("stream_chat error: %s\n%s", err, traceback.format_exc())
             yield {"type": "error", "message": f"agent error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
             if not interrupted:
-                # Normal completion: delete all checkpoints so stale state
-                # (agent_results, tool_results, tool_call_count) doesn't
-                # leak into the next call via operator.add reducers.
                 self._prune_checkpoints(sid, keep_latest=False)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
@@ -444,10 +359,7 @@ class ChatService:
         session_llm = pending["session_llm"]
         user_id = pending["user_id"]
 
-        logger.info(
-            "hitl: resuming session=%s decision=%s",
-            session_id, decision,
-        )
+        logger.info("hitl: resuming session=%s decision=%s", session_id, decision)
 
         emitted_tool_count = 0
         emitted_agent_count = 0
@@ -456,57 +368,25 @@ class ChatService:
 
         try:
             for event in self._compiled_graph.stream(
-                Command(resume=decision),
-                stream_mode="values",
-                config=graph_config,
+                Command(resume=decision), stream_mode="values", config=graph_config,
             ):
-                # Drain real-time events from the queue
                 yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
                 if not isinstance(event, dict):
                     continue
                 final_state = event
 
-                # Emit agent delegation events
                 agent_results = event.get("agent_results", [])
                 if len(agent_results) > emitted_agent_count:
-                    for i in range(emitted_agent_count, len(agent_results)):
-                        ar = agent_results[i]
-                        yield {
-                            "type": "agent_result",
-                            "agent_id": ar.get("agent_id", ""),
-                            "task": ar.get("task", ""),
-                            "result": ar.get("result", "")[:500],
-                            "error": ar.get("error", ""),
-                        }
-                    emitted_agent_count = len(agent_results)
+                    emitted_agent_count = yield from self._emit_agent_events(
+                        agent_results, emitted_agent_count,
+                    )
 
-                # Yield tool calls (skip queue-emitted)
                 tool_results = event.get("tool_results", [])
-                new_count = len(tool_results)
-                if new_count > emitted_tool_count:
-                    for i in range(emitted_tool_count, new_count):
-                        tr = tool_results[i]
-                        if tr.get("duplicate") or tr.get("name") == "_knowledge":
-                            continue
-                        tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
-                        if tr_key in _queue_emitted:
-                            continue
-                        yield {
-                            "type": "tool_call",
-                            "name": tr.get("name", ""),
-                            "args": tr.get("arguments", {}),
-                        }
-                        yield {
-                            "type": "tool_result",
-                            "name": tr.get("name", ""),
-                            "preview": preview_json(
-                                tr.get("error", tr.get("result", {})),
-                                limit=2000,
-                            ),
-                        }
-                    emitted_tool_count = new_count
+                if len(tool_results) > emitted_tool_count:
+                    emitted_tool_count = yield from self._emit_tool_events(
+                        tool_results, emitted_tool_count, _queue_emitted,
+                    )
 
-                # Yield error
                 error = event.get("error", "")
                 if error:
                     yield {"type": "error", "message": error}
@@ -523,8 +403,6 @@ class ChatService:
             yield {"type": "error", "message": f"resume error: {err}"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
-            # Resume completed: delete all checkpoints to prevent stale state
-            # from leaking into the next call.
             self._prune_checkpoints(session_id, keep_latest=False)
             yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
 
@@ -579,6 +457,114 @@ class ChatService:
             conn.execute("PRAGMA optimize")
         except Exception:
             pass  # Pruning is best-effort; never fail the chat for it
+
+    # ---- Stream event helpers (shared between stream_chat and resume_chat) ----
+
+    def _emit_agent_events(
+        self, agent_results: list[dict], emitted_agent_count: int,
+    ) -> int:
+        """Yield agent_result events for newly emitted agents. Returns new count."""
+        new_count = emitted_agent_count
+        for i in range(emitted_agent_count, len(agent_results)):
+            ar = agent_results[i]
+            yield {
+                "type": "agent_result",
+                "agent_id": ar.get("agent_id", ""),
+                "task": ar.get("task", ""),
+                "result": ar.get("result", "")[:500],
+                "error": ar.get("error", ""),
+            }
+            new_count += 1
+        return new_count
+
+    def _emit_tool_events(
+        self, tool_results: list[dict], emitted_tool_count: int,
+        queue_emitted: set[tuple[str, str]],
+    ) -> int:
+        """Yield tool_call + tool_result events for new tools. Returns new count."""
+        new_count = emitted_tool_count
+        for i in range(emitted_tool_count, len(tool_results)):
+            tr = tool_results[i]
+            if tr.get("duplicate") or tr.get("name") == "_knowledge":
+                continue
+            tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
+            if tr_key in queue_emitted:
+                continue
+            yield {
+                "type": "tool_call",
+                "name": tr.get("name", ""),
+                "args": tr.get("arguments", {}),
+            }
+            yield {
+                "type": "tool_result",
+                "name": tr.get("name", ""),
+                "preview": preview_json(
+                    tr.get("error", tr.get("result", {})),
+                    limit=2000,
+                ),
+            }
+            new_count += 1
+        return new_count
+
+    def _build_graph_config(
+        self, sid: str, session_llm: LLMClient, history: list[dict],
+    ) -> dict[str, Any]:
+        """Build the LangGraph config dict for a streaming session."""
+        return {
+            "configurable": {
+                "llm": session_llm,
+                "pipeline_llm": self._pipeline_llm,
+                "agent_registry": self.agent_registry,
+                "full_tools": self.tools,
+                "trace": self.trace,
+                "history": history,
+                "event_queue": queue.Queue(),
+            },
+            "thread_id": sid,
+        }
+
+    def _finalize_stream(
+        self, final_state: dict[str, Any], sid: str, text: str,
+        session_llm: LLMClient, history: list[dict], user_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Handle output after graph streaming completes: summarize or direct answer."""
+        if final_state.get("needs_summary"):
+            answer_parts: list[str] = []
+            for event in self._stream_summarize(final_state, sid, text, session_llm, history):
+                yield event
+                if event["type"] == "token":
+                    answer_parts.append(event["content"])
+            answer = "".join(answer_parts)
+            if answer:
+                self._remember(sid, text, answer, user_id=user_id)
+        else:
+            final_answer = final_state.get("final_answer", "")
+            if final_answer and not final_answer.startswith("所有领域专家"):
+                yield {"type": "token", "content": final_answer}
+                self._remember(sid, text, final_answer, user_id=user_id)
+
+    def _handle_hitl_interrupt(
+        self, gi: Any, sid: str, graph_config: dict[str, Any],
+        session_llm: LLMClient, user_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Handle GraphInterrupt: store pending state and yield HITL events."""
+        interrupt_value = gi.args[0] if gi.args else {}
+        pending_actions = interrupt_value.get("actions", [])
+        logger.info(
+            "hitl: confirm_required session=%s actions=%d",
+            sid, len(pending_actions),
+        )
+        self._pending_confirms[sid] = {
+            "config": graph_config,
+            "session_llm": session_llm,
+            "user_id": user_id,
+        }
+        self._prune_checkpoints(sid, keep_latest=True)
+        yield {
+            "type": "confirm_required",
+            "actions": pending_actions,
+            "session_id": sid,
+        }
 
     def reload_skills(self) -> None:
         """Reload skills from disk (after CRUD)."""

@@ -16,7 +16,7 @@ import pytest
 from matrix.orchestration.nodes import (
     _is_hallucination,
     _force_tool_call,
-    _run_tool_calls,
+    _react_execute_tool_calls,
     _build_tools_for_llm,
 )
 from matrix.tools import ToolRegistry, ToolDefinition, FinanceToolError
@@ -136,13 +136,24 @@ class TestRunToolCalls:
                 handler=lambda msg="": {"echo": msg},
             )
         )
-        tool_calls = [ToolCall(name="test.echo", arguments={"msg": "hello"})]
-        results = []
-        count = _run_tool_calls(tool_calls, results, reg, {})
-        assert count == 1
-        assert len(results) == 1
-        assert results[0]["name"] == "test.echo"
-        assert results[0]["result"]["echo"] == "hello"
+        tc_raw = [{"function": {"name": "test.echo", "arguments": json.dumps({"msg": "hello"})}}]
+        result = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw,
+            agent_tools=reg,
+            messages=[],
+            accumulated=[],
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result["executed"] == 1
+        assert len(result["new_tool_results"]) == 1
+        assert result["new_tool_results"][0]["name"] == "test.echo"
+        assert result["new_tool_results"][0]["result"]["echo"] == "hello"
 
     def test_deduplicates_same_tool_and_args(self):
         reg = ToolRegistry()
@@ -154,20 +165,43 @@ class TestRunToolCalls:
                 handler=lambda msg="": {"echo": msg},
             )
         )
-        # Pre-populate results with existing call
+        # Pre-populate accumulated with existing call
         existing = [{"name": "test.echo", "arguments": {"msg": "hello"}, "result": {"echo": "hello"}}]
-        tool_calls = [ToolCall(name="test.echo", arguments={"msg": "hello"})]
-        count = _run_tool_calls(tool_calls, existing, reg, {})
-        assert count == 0  # Deduplicated
-        assert len(existing) == 1  # No new result added
+        tc_raw = [{"function": {"name": "test.echo", "arguments": json.dumps({"msg": "hello"})}}]
+        result = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw,
+            agent_tools=reg,
+            messages=[],
+            accumulated=existing,
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result["executed"] == 0  # Deduplicated
+        assert len(result["new_tool_results"]) == 0  # No new result
 
     def test_unknown_tool_skipped(self):
         reg = ToolRegistry()
-        tool_calls = [ToolCall(name="nonexistent.tool", arguments={})]
-        results = []
-        count = _run_tool_calls(tool_calls, results, reg, {})
-        assert count == 0
-        assert len(results) == 0
+        tc_raw = [{"function": {"name": "nonexistent.tool", "arguments": "{}"}}]
+        result = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw,
+            agent_tools=reg,
+            messages=[],
+            accumulated=[],
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result["executed"] == 0
+        assert len(result["new_tool_results"]) == 0
 
     def test_tool_error_captured(self):
         reg = ToolRegistry()
@@ -179,13 +213,24 @@ class TestRunToolCalls:
                 handler=lambda **kw: (_ for _ in ()).throw(FinanceToolError("deliberate test failure")),
             )
         )
-        tool_calls = [ToolCall(name="test.fail", arguments={})]
-        results = []
-        count = _run_tool_calls(tool_calls, results, reg, {})
-        assert count == 1
-        assert len(results) == 1
-        assert "error" in results[0]
-        assert "deliberate test failure" in results[0]["error"]
+        tc_raw = [{"function": {"name": "test.fail", "arguments": "{}"}}]
+        result = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw,
+            agent_tools=reg,
+            messages=[],
+            accumulated=[],
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result["executed"] == 1
+        assert len(result["new_tool_results"]) == 1
+        assert "error" in result["new_tool_results"][0]
+        assert "deliberate test failure" in result["new_tool_results"][0]["error"]
 
     def test_tool_arg_order_independent_dedup(self):
         reg = ToolRegistry()
@@ -198,12 +243,38 @@ class TestRunToolCalls:
             )
         )
         # First call
-        results = []
-        count1 = _run_tool_calls([ToolCall(name="test.args", arguments={"a": "x", "b": "y"})], results, reg, {})
-        assert count1 == 1
+        tc_raw1 = [{"function": {"name": "test.args", "arguments": json.dumps({"a": "x", "b": "y"})}}]
+        result1 = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw1,
+            agent_tools=reg,
+            messages=[],
+            accumulated=[],
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result1["executed"] == 1
         # Second call with same args different order
-        count2 = _run_tool_calls([ToolCall(name="test.args", arguments={"b": "y", "a": "x"})], results, reg, {})
-        assert count2 == 0  # Deduplicated despite different key order
+        accumulated = list(result1["new_tool_results"])
+        tc_raw2 = [{"function": {"name": "test.args", "arguments": json.dumps({"b": "y", "a": "x"})}}]
+        result2 = _react_execute_tool_calls(
+            tool_calls_raw=tc_raw2,
+            agent_tools=reg,
+            messages=[],
+            accumulated=accumulated,
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+        assert result2["executed"] == 0  # Deduplicated despite different key order
 
 
 # ---- Skill Matching ----

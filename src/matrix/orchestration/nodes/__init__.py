@@ -25,8 +25,6 @@ from ._helpers import (
     _llm_summarize_from_results,
     _now_ts,
     _push_event,
-    _route_after_react_evaluate,
-    _route_after_react_llm,
     _trace,
     _trace_span,
     COMMANDER_AGGREGATE_PROMPT,
@@ -47,6 +45,8 @@ from ._helpers import (
 
 from .react import (
     _react_execute_tool_calls,
+    _route_after_react_evaluate,
+    _route_after_react_llm,
     react_evaluate_node,
     react_llm_node,
     react_prepare_node,
