@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -338,6 +339,9 @@ def verify_claims_with_llm(
     """Level 2: Use LLM to verify claims that failed string matching.
 
     Modifies claims in-place (sets confidence and matched_evidence).
+
+    All claims are verified in parallel via ThreadPoolExecutor,
+    since each LLM call is an independent I/O-bound HTTP request.
     """
     if not unverified or not tool_results:
         return
@@ -347,14 +351,24 @@ def verify_claims_with_llm(
     if len(results_text) > 4000:
         results_text = results_text[:4000] + "\n...[truncated]"
 
-    for claim in unverified:
+    def _verify_one(claim: Claim) -> tuple[Claim, str]:
+        """Verify a single claim, returning (claim, verdict)."""
         try:
             prompt = _LLM_VERIFY_PROMPT.format(
                 claim=claim.text,
                 tool_results=results_text,
             )
             verdict = llm.complete("", [{"role": "user", "content": prompt}], temperature=0.0).strip().upper()
+            return (claim, verdict)
+        except Exception as e:
+            logger.warning("LLM claim verification failed for '%s': %s", claim.text[:80], e)
+            return (claim, "ERROR")
 
+    max_workers = min(len(unverified), 5)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_verify_one, claim): claim for claim in unverified}
+        for future in as_completed(futures):
+            claim, verdict = future.result()
             if "SUPPORTED" in verdict:
                 claim.confidence = "verified"
                 claim.verified = True
@@ -364,9 +378,6 @@ def verify_claims_with_llm(
                 claim.confidence = "contradicted"
             else:
                 claim.confidence = "unverified"
-        except Exception as e:
-            logger.warning("LLM claim verification failed: %s", e)
-            claim.confidence = "unverified"
 
 
 # ── Step 5: Main verification entry point ────────────────────────────────────
