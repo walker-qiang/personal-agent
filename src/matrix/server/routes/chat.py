@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from urllib.parse import unquote_plus
 
@@ -13,12 +14,33 @@ from ...chat import ChatService
 from ...tools import FinanceToolError
 from .sse import sse_event, sse_response
 
+logger = logging.getLogger("matrix.chat")
 router = APIRouter()
 
 
 def _get_user_id(request: Request) -> str:
     """Extract user_id from request state (set by AuthMiddleware)."""
     return getattr(request.state, "user_id", "default")
+
+
+def _check_input_guard(request: Request, message: str) -> bool:
+    """Returns True if the message passes the input guard, False if blocked."""
+    guardrails = getattr(request.app.state, "guardrails", None)
+    if guardrails is None or guardrails.input is None:
+        return True
+    result = guardrails.input.check(message, user_id=_get_user_id(request))
+    if result.flags:
+        logger.warning(
+            "input_guard_flags: flags=%s message_len=%d",
+            result.flags, len(message),
+        )
+    if not result.allowed:
+        logger.warning(
+            "input_guard_blocked: reason=%s flags=%s",
+            result.reason, result.flags,
+        )
+        return False
+    return True
 
 
 @router.post("/chat")
@@ -40,6 +62,14 @@ async def chat(request: Request):
         )
 
     user_id = _get_user_id(request)
+
+    # ---- INPUT GUARD ----
+    if not _check_input_guard(request, message):
+        def iter_events():
+            yield {"type": "error", "message": "请求被安全策略拦截"}
+            yield {"type": "done", "session_id": session_id or "unknown", "duration_ms": 0}
+        return sse_response(iter_events())
+    # ---- END INPUT GUARD ----
 
     def iter_events():
         for event in chat_service.stream_chat(message, session_id, user_id=user_id, file_id=file_id):
@@ -66,6 +96,14 @@ async def chat_stream(
         return JSONResponse({"error": "message is required"}, status_code=400)
 
     user_id = _get_user_id(request)
+
+    # ---- INPUT GUARD ----
+    if not _check_input_guard(request, message):
+        def iter_events():
+            yield {"type": "error", "message": "请求被安全策略拦截"}
+            yield {"type": "done", "session_id": session_id or "unknown", "duration_ms": 0}
+        return sse_response(iter_events())
+    # ---- END INPUT GUARD ----
 
     def iter_events():
         for event in chat_service.stream_chat(message, session_id, user_id=user_id, file_id=file_id):

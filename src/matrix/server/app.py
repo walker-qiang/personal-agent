@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..chat import ChatService
 from ..config import AgentConfig, load_config
+from ..guardrails import GuardrailPipeline, GuardConfig
 from ..logging_config import RequestIdFilter, get_logger, setup_logging
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
@@ -42,10 +43,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_finance_tools(tools_registry, config.cache_path)
     register_web_tools(tools_registry)
     register_agnes_tools(tools_registry)
-    trace = TraceLogger(config.trace_path)
+
+    # ---- GUARDRAILS ----
+    guard_config = GuardConfig.from_env()
+    guardrails = GuardrailPipeline(guard_config)
+    # Wire TraceSanitizer to TraceLogger
+    trace = TraceLogger(config.trace_path, sanitizer=guardrails.privacy)
+    # Wire ToolGuard to ToolRegistry
+    if guardrails.tool:
+        tools_registry.set_guard(guardrails.tool)
+    # ---- END GUARDRAILS ----
+
     app.state.tools = tools_registry
     app.state.trace = trace
-    app.state.chat = ChatService(config, tools_registry, trace)
+    app.state.guardrails = guardrails
+    app.state.chat = ChatService(
+        config, tools_registry, trace,
+        output_guard=guardrails.output,
+    )
     # Bootstrap admin user on first run (no users in DB yet)
     if config.admin_password_hash:
         if app.state.chat.store.user_count() == 0:

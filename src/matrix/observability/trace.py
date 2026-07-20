@@ -17,9 +17,10 @@ from typing import Any
 class TraceStore:
     """SQLite-backed trace event store. Thread-safe, WAL mode."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, sanitizer: object | None = None):
         self.db_path = db_path
         self._lock = threading.Lock()
+        self._sanitizer = sanitizer  # TraceSanitizer or None
         self._init_db()
 
     # ---- public API ----
@@ -27,6 +28,11 @@ class TraceStore:
     def record(self, event: dict[str, Any]) -> None:
         """Record a trace event. Thread-safe, fast append."""
         with self._lock:
+            # ---- TRACE PRIVACY ----
+            if self._sanitizer:
+                event["arguments"] = self._sanitizer.sanitize(event.get("arguments"))
+                event["result"] = self._sanitizer.sanitize(event.get("result"))
+            # ---- END TRACE PRIVACY ----
             conn = self._get_conn()
             conn.execute(
                 """INSERT INTO trace_events
@@ -182,10 +188,10 @@ class TraceLogger(TraceStore):
     TraceLogger continues to work without changes.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, sanitizer: object | None = None):
         # Convert trace.jsonl path to trace.db path
         db_path = path.with_suffix(".db")
-        super().__init__(db_path)
+        super().__init__(db_path, sanitizer=sanitizer)
 
 
 # ---- helpers ----

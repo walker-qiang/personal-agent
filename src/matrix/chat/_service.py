@@ -55,10 +55,12 @@ class ChatService:
         trace: TraceSink | None = None,
         llm: LLMClient | None = None,
         agent_registry: AgentRegistry | None = None,
+        output_guard: object | None = None,
     ):
         self.config = config
         self.tools = tools
         self.trace = trace
+        self._output_guard = output_guard  # OutputGuard or None
         self._default_llm = llm or build_llm_client(
             provider=config.agent_provider,
             deepseek_api_key=config.deepseek_api_key,
@@ -534,10 +536,24 @@ class ChatService:
                 if event["type"] == "token":
                     answer_parts.append(event["content"])
             answer = "".join(answer_parts)
+            # ---- OUTPUT GUARD ----
+            if answer and self._output_guard:
+                result = self._output_guard.check(answer, user_id=user_id)
+                if result.had_pii:
+                    logger.warning("output_pii_detected: flags=%s session=%s", result.flags, sid)
+                answer = result.sanitized
+            # ---- END OUTPUT GUARD ----
             if answer:
                 self._remember(sid, text, answer, user_id=user_id)
         else:
             final_answer = final_state.get("final_answer", "")
+            # ---- OUTPUT GUARD ----
+            if final_answer and self._output_guard:
+                result = self._output_guard.check(final_answer, user_id=user_id)
+                if result.had_pii:
+                    logger.warning("output_pii_detected: flags=%s session=%s", result.flags, sid)
+                final_answer = result.sanitized
+            # ---- END OUTPUT GUARD ----
             if final_answer and not final_answer.startswith("所有领域专家"):
                 yield {"type": "token", "content": final_answer}
                 self._remember(sid, text, final_answer, user_id=user_id)
