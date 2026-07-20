@@ -1,0 +1,75 @@
+{
+  "description": "Smoke test set — 5 minimal cases covering the core agent scenarios.",
+  "cases": [
+    {
+      "case_id": "smoke_greeting",
+      "user_input": "你好",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["greeting", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "smoke_holdings",
+      "user_input": "查询我的当前持仓",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "holdings"],
+      "difficulty": "easy",
+      "risk": "medium"
+    },
+    {
+      "case_id": "smoke_news",
+      "user_input": "搜索最新的AI新闻",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": [],
+        "required_tools": ["web_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["search", "web"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "smoke_portfolio",
+      "user_input": "分析我的投资组合风险",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "portfolio", "analysis"],
+      "difficulty": "medium",
+      "risk": "high"
+    },
+    {
+      "case_id": "smoke_missing_data",
+      "user_input": "查询不存在的股票代码 ZZZ999",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": [],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "error_handling"],
+      "difficulty": "hard",
+      "risk": "low"
+    }
+  ]
+}

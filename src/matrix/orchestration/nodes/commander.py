@@ -271,6 +271,22 @@ def _run_domain_agent_react(
         task=task,
         today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
+
+    # Pinned working memory: inject user's original request
+    wm = cfg.get("working_memory", {})
+    pinned = wm.get("pinned", "")
+    if not pinned:
+        user_msgs = [m for m in cfg.get("history", []) if m.get("role") == "user"]
+        if user_msgs:
+            pinned = str(user_msgs[0].get("content", ""))[:2000]
+    if pinned:
+        system_prompt = f"**Pinned Goal (your anchor):** {pinned}\n\n" + system_prompt
+
+    # Inject active insights
+    insights = wm.get("insights", [])
+    if insights:
+        insight_block = "\n".join(f"- {i}" for i in insights[:5])
+        system_prompt += f"\n\n## Key Insights (from previous steps)\n{insight_block}"
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
     ]
@@ -395,6 +411,7 @@ def _react_handle_tool_calls(
         consecutive_no_progress=consecutive_no_progress,
         prev_result_count=prev_result_count,
         push_events=True,
+        ref_store=cfg.get("ref_store"),
     )
 
     messages = exec_result["messages"]

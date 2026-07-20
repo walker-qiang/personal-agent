@@ -27,7 +27,8 @@ from ..orchestration import build_graph
 from ..orchestration.state import AgentState
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
-from ..tools import FinanceToolError, ToolRegistry
+from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
+from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ._utils import (
     MEMORY_EXTRACTION_PROMPT,
     _drain_queue,
@@ -98,6 +99,56 @@ class ChatService:
         self.store = SessionStore(config.store_path)
         self.store.backfill_titles()
 
+        # L1: ToolResultRefStore for externalizing large tool results
+        ref_store_path = config.root_path / "var" / "agent" / "tool_results.db"
+        self._ref_store = ToolResultRefStore(ref_store_path)
+        # Register get_stored_data tool for LLM retrieval of externalized data
+        self.tools.register(ToolDefinition(
+            name="get_stored_data",
+            description=(
+                "Retrieve full data that was externalized from context. "
+                "Use when you see a __refId reference and need the complete data. "
+                "Pass the refId from the __refId field."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "refId": {
+                        "type": "string",
+                        "description": "The reference ID from a __refId field",
+                    },
+                },
+                "required": ["refId"],
+            },
+            handler=make_get_stored_data_tool(self._ref_store),
+        ))
+        # Working memory tool: LLM can record key insights
+        self._wm_insights: list[str] = []  # shared across agents in same session
+        self.tools.register(ToolDefinition(
+            name="working_memory",
+            description=(
+                "Record a key insight or finding that should survive context compression. "
+                "Use this when you discover a critical piece of information (value, ID, "
+                "constraint, decision) that future steps need to know."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add_insight"],
+                        "description": "Always 'add_insight' to record a finding",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The insight to record. Be specific: include values, IDs, names.",
+                    },
+                },
+                "required": ["action", "content"],
+            },
+            handler=self._handle_working_memory,
+        ))
+
         # Configure rate limiter for LLM API calls
         if config.rate_limit_per_sec > 0:
             set_rate_limiter(TokenBucketRateLimiter(config.rate_limit_per_sec))
@@ -127,6 +178,8 @@ class ChatService:
             self._checkpoint_conn.close()
         if hasattr(self, "store") and self.store:
             self.store.close()
+        if hasattr(self, "_ref_store") and self._ref_store:
+            self._ref_store.close()
 
     # ---- Public API ----
 
@@ -265,7 +318,12 @@ class ChatService:
 
         # Load conversation history for context injection into LLM calls
         history = self._get_history(sid, user_id)
-        initial_state = AgentState(user_message=text, session_id=sid)
+        call_id = str(uuid.uuid4())
+
+        # Clean up stale checkpoint from previous call (P0-4: prevents reducer merge)
+        self._cleanup_stale_checkpoint(sid, call_id)
+
+        initial_state = AgentState(user_message=text, session_id=sid, call_id=call_id)
 
         interrupted = False
         try:
@@ -277,7 +335,7 @@ class ChatService:
                 len(text),
             )
 
-            graph_config = self._build_graph_config(sid, session_llm, history)
+            graph_config = self._build_graph_config(sid, session_llm, history, text)
 
             try:
                 final_state = yield from self._stream_graph_events(
@@ -296,7 +354,8 @@ class ChatService:
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
             if not interrupted:
-                self._prune_checkpoints(sid, keep_latest=False)
+                # Keep latest checkpoint for recovery (P0-4: 断点恢复)
+                self._prune_checkpoints(sid, keep_latest=True)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
     def resume_chat(self, session_id: str, decision: str = "approve") -> Iterator[dict[str, Any]]:
@@ -346,6 +405,43 @@ class ChatService:
             yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
 
     # ---- Internal ----
+
+    def _handle_working_memory(self, action: str, content: str) -> dict:
+        """Handle working_memory tool calls from the LLM.
+
+        Used by the LLM to record key insights that survive context compression.
+        """
+        if action == "add_insight" and content:
+            self._wm_insights.insert(0, content)
+            self._wm_insights = self._wm_insights[:20]  # cap at 20 insights
+            return {"ok": True, "recorded": content, "total_insights": len(self._wm_insights)}
+        return {"ok": False, "error": f"Unknown action: {action}"}
+
+    def _cleanup_stale_checkpoint(self, thread_id: str, call_id: str) -> None:
+        """Delete stale checkpoints from a previous call to prevent reducer merge.
+
+        If any checkpoint exists from a previous call with the same thread_id,
+        we delete it. The call_id check ensures we only clean up when starting
+        a genuinely new call (not when resuming an interrupted one).
+        """
+        try:
+            conn = self._checkpoint_conn
+            if conn is None:
+                return
+            row = conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+            if row and row[0] > 0:
+                logger.info(
+                    "cleanup_stale_checkpoint: removing %d stale checkpoints "
+                    "thread_id=%s call_id=%s",
+                    row[0], thread_id, call_id,
+                )
+                self._prune_checkpoints(thread_id, keep_latest=False)
+        except Exception:
+            # Best-effort cleanup; if it fails, the graph will still run
+            pass
 
     def _prune_checkpoints(self, thread_id: str, keep_latest: bool = True) -> None:
         """Clean up checkpoints per thread to prevent unbounded growth.
@@ -509,6 +605,7 @@ class ChatService:
 
     def _build_graph_config(
         self, sid: str, session_llm: LLMClient, history: list[dict],
+        user_message: str = "",
     ) -> dict[str, Any]:
         """Build the LangGraph config dict for a streaming session."""
         return {
@@ -520,6 +617,11 @@ class ChatService:
                 "trace": self.trace,
                 "history": history,
                 "event_queue": queue.Queue(),
+                "ref_store": self._ref_store,
+                "working_memory": {
+                    "pinned": user_message,
+                    "insights": list(self._wm_insights),
+                },
             },
             "thread_id": sid,
         }

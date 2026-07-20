@@ -7,6 +7,8 @@ serialization — the recommended approach for LangGraph production deployments.
 from __future__ import annotations
 
 import operator
+import uuid
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from langgraph.graph import add_messages
@@ -38,6 +40,7 @@ class AgentState(BaseModel):
     messages: Annotated[list, add_messages] = Field(default_factory=list)
     user_message: str = ""
     session_id: str = ""
+    call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
     # Classification
     intent: str = ""  # "simple" (direct answer) or "delegate" (multi-agent)
@@ -78,6 +81,13 @@ class AgentState(BaseModel):
     confirmed: bool = False
     pending_actions: list[dict[str, Any]] = Field(default_factory=list)
 
+    # Working memory: pinned goal + rolling insights
+    working_memory: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "pinned": "",          # user's original request — never moves
+            "insights": [],        # key findings, newest first, auto-evict
+        }
+    )
     # ---- Dict-like access for backward compatibility ----
 
     def __getitem__(self, key: str) -> Any:

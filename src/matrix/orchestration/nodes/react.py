@@ -17,6 +17,7 @@ from langgraph.types import RunnableConfig
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
+from ...context import ToolResultRefStore
 
 from ._helpers import (
     DOMAIN_AGENT_REACT_SYSTEM,
@@ -70,6 +71,24 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         task=task,
         today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
+
+    # Pinned working memory: inject user's original request
+    wm = state.get("working_memory", {})
+    pinned = wm.get("pinned", "")
+    if not pinned:
+        # Initialize pinned from user's first message
+        user_msgs = [m for m in state.get("messages", []) if m.get("role") == "user"]
+        if user_msgs:
+            pinned = str(user_msgs[0].get("content", ""))[:2000]
+            wm["pinned"] = pinned
+    if pinned:
+        system_prompt = f"**Pinned Goal (your anchor):** {pinned}\n\n" + system_prompt
+
+    # Inject active insights (newest first, max 5)
+    insights = wm.get("insights", [])
+    if insights:
+        insight_block = "\n".join(f"- {i}" for i in insights[:5])
+        system_prompt += f"\n\n## Key Insights (from previous steps)\n{insight_block}"
 
     react = {
         "messages": [{"role": "user", "content": task_content}],
@@ -172,6 +191,7 @@ def _react_execute_tool_calls(
     prev_result_count: int,
     push_events: bool = False,
     span_id: str = "",
+    ref_store: ToolResultRefStore | None = None,
 ) -> dict:
     """Execute tool calls from LLM response with all guards.
 
@@ -212,7 +232,7 @@ def _react_execute_tool_calls(
 
         ok, tr = _execute_single_tool(
             name, arguments, tc_raw, agent_tools, agent_id, session_id,
-            cfg, node_name, span_id, push_events,
+            cfg, node_name, span_id, push_events, ref_store=ref_store,
         )
         new_tool_results.append(tr)
         new_messages.append({
@@ -305,8 +325,14 @@ def _execute_single_tool(
     node_name: str,
     span_id: str,
     push_events: bool,
+    ref_store: ToolResultRefStore | None = None,
 ) -> tuple[bool, dict]:
-    """Execute a single tool call and return (ok, tool_result_dict)."""
+    """Execute a single tool call and return (ok, tool_result_dict).
+
+    If ref_store is provided and the result exceeds thresholds, the raw
+    result is externalized and a reference object is returned instead.
+    This keeps the LLM context lean while preserving full data for retrieval.
+    """
     started = time.perf_counter()
 
     if push_events:
@@ -315,6 +341,39 @@ def _execute_single_tool(
     try:
         tool_result = agent_tools.call(name, arguments)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+
+        # L1: ToolResultRefStore — externalize large results
+        if ref_store is not None and ref_store.should_store(tool_result):
+            stored = ref_store.store(name, tool_result)
+            ref_obj = ref_store.build_ref_object(stored)
+            logger.info(
+                "ReAct: externalized tool result: tool=%s ref_id=%s orig_len=%d",
+                name, stored.ref_id, stored.original_length,
+            )
+            _trace(cfg, {
+                "session_id": session_id,
+                "event_type": "tool_call",
+                "node_name": node_name,
+                "agent_id": agent_id,
+                "ok": True, "tool_name": name, "arguments": arguments,
+                "result": f"[EXTERNALIZED] refId={stored.ref_id} summary={stored.summary}",
+                "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+                "parent_span_id": span_id,
+            })
+            if push_events:
+                _push_event(cfg, "tool_result", {
+                    "name": name,
+                    "result": ref_obj,
+                    "externalized": True,
+                    "refId": stored.ref_id,
+                })
+            return True, {
+                "name": name, "arguments": arguments,
+                "result": ref_obj, "elapsed_ms": elapsed_ms,
+                "externalized": True, "refId": stored.ref_id,
+            }
+        # end L1
+
         _trace(cfg, {
             "session_id": session_id,
             "event_type": "tool_call",
@@ -424,6 +483,7 @@ def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
             prev_result_count=react.get("prev_result_count", 0),
             push_events=False,
             span_id=span_id,
+            ref_store=cfg.get("ref_store"),
         )
 
     new_messages = exec_result["messages"]

@@ -31,6 +31,8 @@ class SkillDefinition:
     output_format: str = ""
     knowledge_files: list[str] = field(default_factory=list)
     script_files: list[str] = field(default_factory=list)
+    parameter_bindings: list[dict[str, str]] = field(default_factory=list)
+    # Each binding: {"from": "step_1", "field": "output.items", "to": "step_2", "param": "items"}
 
     @classmethod
     def from_dir(cls, skill_dir: Path) -> "SkillDefinition":
@@ -59,6 +61,7 @@ class SkillDefinition:
             output_format=output_format.strip(),
             knowledge_files=knowledge_files,
             script_files=script_files,
+            parameter_bindings=frontmatter.get("parameterBindings", []),
         )
 
     # Chinese negation words that indicate the user does NOT want this skill
@@ -192,22 +195,30 @@ def load_skills(skills_dir: Path) -> list[SkillDefinition]:
 
 def render_skill(skill: SkillDefinition) -> str:
     """Serialize a skill's SKILL.md back to Markdown with YAML frontmatter."""
-    return "\n".join([
+    lines = [
         "---",
         f"name: {skill.name}",
         f"title: {skill.title}",
         f"description: {skill.description}",
-        "---",
-        "",
-        f"# {skill.title}",
-        "",
-        "## 工作流",
-        render_workflow(skill.workflow) or "",
-        "",
-        "## 输出格式",
-        skill.output_format,
-        "",
-    ])
+    ]
+    if skill.parameter_bindings:
+        lines.append("parameterBindings:")
+        for b in skill.parameter_bindings:
+            lines.append(f"  - from: {b.get('from', '')}")
+            lines.append(f"    field: {b.get('field', '')}")
+            lines.append(f"    to: {b.get('to', '')}")
+            lines.append(f"    param: {b.get('param', '')}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {skill.title}")
+    lines.append("")
+    lines.append("## 工作流")
+    lines.append(render_workflow(skill.workflow) or "")
+    lines.append("")
+    lines.append("## 输出格式")
+    lines.append(skill.output_format)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def render_workflow(workflow: list[dict[str, Any]]) -> str:
