@@ -59,8 +59,8 @@ async def get_messages(request: Request, session_id: str):
 
 # ---- Skills CRUD (adapts to multi-agent skills structure) ----
 
-def _get_skills_dir(request: Request, domain: str = "investment") -> Path:
-    """Get the skills directory for a domain."""
+def _get_skills_domain_dir(request: Request, domain: str = "investment") -> Path:
+    """Get the skills directory for a domain (e.g. skills_base_dir / investment)."""
     from pathlib import Path
     from ...chat import ChatService
     chat: ChatService = request.app.state.chat
@@ -127,7 +127,7 @@ async def create_skill(request: Request):
     if not safe_name:
         return {"error": "invalid name"}, 400
 
-    skills_dir = _get_skills_dir(request, domain)
+    skills_dir = _get_skills_domain_dir(request, domain)
     skill_dir = skills_dir / safe_name
     if skill_dir.exists():
         return {"error": "skill already exists"}, 409
@@ -155,7 +155,7 @@ async def update_skill(request: Request, skill_name: str):
     description = str(payload.get("description", "")).strip()
     domain = str(payload.get("domain", "investment")).strip() or "investment"
 
-    skills_dir = _get_skills_dir(request, domain)
+    skills_dir = _get_skills_domain_dir(request, domain)
     if not (skills_dir / skill_name).is_dir():
         return {"error": "skill not found"}, 404
 
@@ -178,7 +178,7 @@ async def delete_skill(request: Request, skill_name: str):
 
     chat: ChatService = request.app.state.chat
     domain = str(request.query_params.get("domain", "investment")).strip() or "investment"
-    skills_dir = _get_skills_dir(request, domain)
+    skills_dir = _get_skills_domain_dir(request, domain)
     if not (skills_dir / skill_name).is_dir():
         return {"error": "skill not found"}, 404
     delete_skill_dir(skills_dir, skill_name)

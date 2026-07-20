@@ -322,7 +322,7 @@ def _run_domain_agent_react(
         tool_results = content_result["tool_results"]
         consecutive_no_progress = content_result["consecutive_no_progress"]
 
-    return _react_generate_partial_answer(tool_results, llm, cfg)
+    return _react_generate_partial_answer(tool_results, llm)
 
 
 # ── ReAct helpers ────────────────────────────────────────────────────────────
@@ -518,7 +518,7 @@ def _react_handle_content(
 
 
 def _react_generate_partial_answer(
-    tool_results: list, llm, cfg: dict,
+    tool_results: list, llm,
 ) -> dict[str, Any]:
     """Generate a partial answer when max iterations reached."""
     if tool_results:

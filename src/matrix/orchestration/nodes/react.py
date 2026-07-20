@@ -34,6 +34,7 @@ from ._helpers import (
     _trace_span,
     MAX_SAME_TOOL_CALLS,
     MAX_TOTAL_TOOL_CALLS,
+    MAX_TOPLEVEL_REACT_ITERATIONS,
     EVALUATOR_INTERVAL,
 )
 from ..state import AgentState
@@ -373,7 +374,7 @@ def _route_after_react_evaluate(state: AgentState) -> str:
         return "aggregate"
 
     iteration = react.get("iteration", 0)
-    if iteration >= MAX_TOTAL_TOOL_CALLS:
+    if iteration >= MAX_TOPLEVEL_REACT_ITERATIONS:
         return "aggregate"
 
     return "react_llm"
@@ -495,7 +496,7 @@ def react_evaluate_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             return _build_react_final_answer(react, tool_results, llm, iteration)
 
     # Iteration limit
-    if iteration >= MAX_TOTAL_TOOL_CALLS:
+    if iteration >= MAX_TOPLEVEL_REACT_ITERATIONS:
         return _build_react_final_answer(react, tool_results, llm, iteration)
 
     # Content without tool calls — we're done

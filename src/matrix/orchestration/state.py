@@ -43,6 +43,7 @@ class AgentState(BaseModel):
     intent: str = ""  # "simple" (direct answer) or "delegate" (multi-agent)
 
     # Commander planning
+    plan_type: str = "agent"  # "agent" (domain agent) or "subtask" (broken into subtasks)
     delegation_plan: list[dict[str, Any]] = Field(
         default_factory=list,
         description="[{step, agent_id, task, skill_name, purpose}]",

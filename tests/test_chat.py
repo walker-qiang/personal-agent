@@ -18,6 +18,8 @@ class FakeLLM:
     def __init__(self, responses: list[str]):
         self.responses = responses
         self.calls: list[tuple[str, list[dict]]] = []
+        self.provider = "test"
+        self.model = "test-model"
 
     def complete(self, system: str, messages: list[dict[str, str]], **kwargs) -> str:
         self.calls.append(("complete", messages))
@@ -48,7 +50,6 @@ def chat_service(tmp_cache_path: Path) -> ChatService:
         trace_path=tmp_cache_path.parent / "trace.jsonl",
         store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
         checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
-        skills_dir=tmp_cache_path.parent / "skills" / "investment",
         skills_base_dir=tmp_cache_path.parent / "skills",
         host="127.0.0.1",
         port=0,
@@ -93,7 +94,6 @@ class TestChatService:
             trace_path=tmp_cache_path.parent / "trace.jsonl",
             store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
             checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
-            skills_dir=tmp_cache_path.parent / "skills" / "investment",
             skills_base_dir=tmp_cache_path.parent / "skills",
             host="127.0.0.1",
             port=0,
@@ -111,7 +111,6 @@ class TestChatService:
             "当前持仓健康。",
         ])
         chat_service._pipeline_llm = FakeLLM(["[]"])
-        chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         types = [e["type"] for e in events]
         assert "done" in types
@@ -122,7 +121,6 @@ class TestChatService:
             "当前持仓健康。",
         ])
         chat_service._pipeline_llm = FakeLLM(["[]"])
-        chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]
         assert len(tokens) >= 1, f"events={[(e['type'], e.get('content','')[:60]) for e in events]}"
@@ -133,7 +131,6 @@ class TestChatService:
             "仍然健康。",
         ])
         chat_service._pipeline_llm = FakeLLM(["[]", "[]"])
-        chat_service.skills = []
         sid = "mem-test"
         list(chat_service.stream_chat("当前持仓怎么样？", sid))
         events = list(chat_service.stream_chat("还有变化吗？", sid))
@@ -145,7 +142,6 @@ class TestChatService:
             "ok.",
         ])
         chat_service._pipeline_llm = FakeLLM(["[]"])
-        chat_service.skills = []
         sid = "reset-test"
         list(chat_service.stream_chat("test", sid))
         chat_service.reset(sid)
@@ -156,17 +152,6 @@ class TestChatService:
             "技能执行完成，共2个持仓。",
         ])
         chat_service._pipeline_llm = FakeLLM(["[]"])
-        from matrix.skills import SkillDefinition
-        chat_service.skills = [
-            SkillDefinition(
-                name="test-skill",
-                title="测试技能",
-                description="跑测试技能",
-                workflow=[
-                    {"step": 1, "tool": "finance.holdings_summary", "arguments": {}},
-                ],
-            ),
-        ]
         events = list(chat_service.stream_chat("跑测试技能"))
         tokens = [e for e in events if e["type"] == "token"]
         assert len(tokens) >= 1
@@ -203,7 +188,6 @@ class TestChatService:
         chat_service._pipeline_llm = FakeLLM([
             '[{"agent_id": "commander", "task": "查询当前持仓", "step": 1}]',
         ])
-        chat_service.skills = []
         events = list(chat_service.stream_chat("当前持仓怎么样？"))
         tokens = [e for e in events if e["type"] == "token"]
         tool_calls = [e for e in events if e["type"] == "tool_call"]

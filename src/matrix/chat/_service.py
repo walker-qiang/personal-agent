@@ -267,11 +267,6 @@ class ChatService:
 
         interrupted = False
         try:
-            emitted_tool_count = 0
-            emitted_agent_count = 0
-            classify_emitted = False
-            _queue_emitted: set[tuple[str, str]] = set()
-            final_state: dict[str, Any] = {}
             session_llm = self._get_llm(sid)
             logger.debug(
                 "llm_request: provider=%s model=%s message_len=%d",
@@ -283,42 +278,9 @@ class ChatService:
             graph_config = self._build_graph_config(sid, session_llm, history)
 
             try:
-                for event in self._compiled_graph.stream(
-                    initial_state, stream_mode="values", config=graph_config,
-                ):
-                    yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
-                    if not isinstance(event, dict):
-                        continue
-                    final_state = event
-
-                    # Emit classify event
-                    delegation_plan = event.get("delegation_plan")
-                    if delegation_plan and len(delegation_plan) > 0 and not classify_emitted:
-                        classify_emitted = True
-                        intent = "delegate" if len(delegation_plan) > 1 or (
-                            delegation_plan and delegation_plan[0].get("agent_id") != "commander"
-                        ) else "simple"
-                        yield {"type": "classify", "intent": intent, "delegation_plan": delegation_plan}
-
-                    # Emit agent events
-                    agent_results = event.get("agent_results", [])
-                    if len(agent_results) > emitted_agent_count:
-                        emitted_agent_count = yield from self._emit_agent_events(
-                            agent_results, emitted_agent_count,
-                        )
-
-                    # Emit tool events
-                    tool_results = event.get("tool_results", [])
-                    if len(tool_results) > emitted_tool_count:
-                        emitted_tool_count = yield from self._emit_tool_events(
-                            tool_results, emitted_tool_count, _queue_emitted,
-                        )
-
-                    # Emit error
-                    error = event.get("error", "")
-                    if error:
-                        yield {"type": "error", "message": error}
-
+                final_state = yield from self._stream_graph_events(
+                    initial_state, graph_config, emit_classify=True,
+                )
                 yield from self._finalize_stream(final_state, sid, text, session_llm, history, user_id)
 
             except GraphInterrupt as gi:
@@ -361,35 +323,10 @@ class ChatService:
 
         logger.info("hitl: resuming session=%s decision=%s", session_id, decision)
 
-        emitted_tool_count = 0
-        emitted_agent_count = 0
-        _queue_emitted: set[tuple[str, str]] = set()
-        final_state: dict[str, Any] = {}
-
         try:
-            for event in self._compiled_graph.stream(
-                Command(resume=decision), stream_mode="values", config=graph_config,
-            ):
-                yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
-                if not isinstance(event, dict):
-                    continue
-                final_state = event
-
-                agent_results = event.get("agent_results", [])
-                if len(agent_results) > emitted_agent_count:
-                    emitted_agent_count = yield from self._emit_agent_events(
-                        agent_results, emitted_agent_count,
-                    )
-
-                tool_results = event.get("tool_results", [])
-                if len(tool_results) > emitted_tool_count:
-                    emitted_tool_count = yield from self._emit_tool_events(
-                        tool_results, emitted_tool_count, _queue_emitted,
-                    )
-
-                error = event.get("error", "")
-                if error:
-                    yield {"type": "error", "message": error}
+            final_state = yield from self._stream_graph_events(
+                Command(resume=decision), graph_config, emit_classify=False,
+            )
 
             # Yield final answer
             final_answer = final_state.get("final_answer", "")
@@ -459,6 +396,68 @@ class ChatService:
             pass  # Pruning is best-effort; never fail the chat for it
 
     # ---- Stream event helpers (shared between stream_chat and resume_chat) ----
+
+    def _stream_graph_events(
+        self,
+        graph_input: Any,
+        graph_config: dict[str, Any],
+        *,
+        emit_classify: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream LangGraph events with common agent/tool/error emission.
+
+        Args:
+            graph_input: Initial state (for stream_chat) or Command(resume=...) (for resume_chat).
+            graph_config: LangGraph config dict with configurable and thread_id.
+            emit_classify: If True, emit a classify event when delegation_plan appears.
+
+        Yields:
+            SSE event dicts (classify, progress, tool_call, tool_result, agent_result, error, token).
+        """
+        emitted_tool_count = 0
+        emitted_agent_count = 0
+        classify_emitted = False
+        _queue_emitted: set[tuple[str, str]] = set()
+        final_state: dict[str, Any] = {}
+
+        for event in self._compiled_graph.stream(
+            graph_input, stream_mode="values", config=graph_config,
+        ):
+            yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
+            if not isinstance(event, dict):
+                continue
+            final_state = event
+
+            # Emit classify event (stream_chat only)
+            if emit_classify and not classify_emitted:
+                delegation_plan = event.get("delegation_plan")
+                if delegation_plan and len(delegation_plan) > 0:
+                    classify_emitted = True
+                    intent = "delegate" if len(delegation_plan) > 1 or (
+                        delegation_plan and delegation_plan[0].get("agent_id") != "commander"
+                    ) else "simple"
+                    yield {"type": "classify", "intent": intent, "delegation_plan": delegation_plan}
+
+            # Emit agent events
+            agent_results = event.get("agent_results", [])
+            if len(agent_results) > emitted_agent_count:
+                emitted_agent_count = yield from self._emit_agent_events(
+                    agent_results, emitted_agent_count,
+                )
+
+            # Emit tool events
+            tool_results = event.get("tool_results", [])
+            if len(tool_results) > emitted_tool_count:
+                emitted_tool_count = yield from self._emit_tool_events(
+                    tool_results, emitted_tool_count, _queue_emitted,
+                )
+
+            # Emit error
+            error = event.get("error", "")
+            if error:
+                yield {"type": "error", "message": error}
+
+        return final_state
 
     def _emit_agent_events(
         self, agent_results: list[dict], emitted_agent_count: int,

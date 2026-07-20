@@ -27,6 +27,8 @@ logger = logging.getLogger("matrix.orchestration")
 
 MAX_REACT_ITERATIONS = 20  # Hard safety net; goal-driven stopping should trigger earlier
 
+MAX_TOPLEVEL_REACT_ITERATIONS = 10  # Iteration limit for the top-level single-step ReAct loop
+
 MAX_SUBTASK_ITERATIONS = 10  # Per-subtask ReAct limit
 
 MAX_SUBTASKS = 5             # Max subtasks in a decomposition

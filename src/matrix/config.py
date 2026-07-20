@@ -39,8 +39,8 @@ ENV_AGNES_BASE_URL = "AGNES_BASE_URL"
 ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
 ENV_STORE_PATH = "MATRIX_STORE_PATH"
 ENV_CHECKPOINT_PATH = "MATRIX_CHECKPOINT_PATH"
-ENV_SKILLS_DIR = "MATRIX_SKILLS_DIR"
 ENV_SKILLS_BASE_DIR = "MATRIX_SKILLS_BASE_DIR"  # root dir for skills/{common,investment,general}
+ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
 ENV_RATE_LIMIT_PER_SEC = "RATE_LIMIT_PER_SEC"
 ENV_MAX_MESSAGE_CHARS = "MAX_MESSAGE_CHARS"
 ENV_LOG_LEVEL = "LOG_LEVEL"
@@ -106,7 +106,6 @@ class AgentConfig:
     trace_path: Path
     store_path: Path
     checkpoint_path: str
-    skills_dir: Path  # deprecated, kept for backward compat; use skills_base_dir
     skills_base_dir: Path  # root dir for skills/{common,investment,general}
     host: str
     port: int
@@ -190,14 +189,6 @@ def load_config() -> AgentConfig:
         str(root / "var" / "agent" / "checkpoints.db"),
     ).strip() or str(root / "var" / "agent" / "checkpoints.db")
 
-    # Skills dir: MATRIX_SKILLS_DIR > default
-    skills_raw = os.environ.get(ENV_SKILLS_DIR, "").strip()
-    if skills_raw:
-        skills_path = Path(skills_raw).expanduser()
-        skills_dir = skills_path if skills_path.is_absolute() else root / skills_path
-    else:
-        skills_dir = root / "skills" / "investment"
-
     # Skills base dir: MATRIX_SKILLS_BASE_DIR > default
     skills_base_raw = os.environ.get(ENV_SKILLS_BASE_DIR, "").strip()
     if skills_base_raw:
@@ -262,7 +253,6 @@ def load_config() -> AgentConfig:
         trace_path=trace_path,
         store_path=store_path,
         checkpoint_path=checkpoint_path,
-        skills_dir=skills_dir,
         skills_base_dir=skills_base_dir,
         host=host,
         port=port,
