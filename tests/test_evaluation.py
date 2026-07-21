@@ -41,6 +41,17 @@ class FakeLLM:
             return ""
         return self.responses.pop(0)
 
+    def complete_json(self, system: str, messages: list[dict[str, str]], schema=None, **kwargs):
+        import json
+        self.calls.append(("complete_json", messages))
+        if not self.responses:
+            return {}
+        text = self.responses.pop(0)
+        try:
+            return json.loads(text) if isinstance(text, str) else text
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
     def stream_complete(self, system: str, messages: list[dict[str, str]], **kwargs):
         self.calls.append(("stream", messages))
         text = self.responses.pop(0) if self.responses else ""

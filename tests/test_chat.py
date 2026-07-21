@@ -27,6 +27,18 @@ class FakeLLM:
             raise AssertionError("no fake LLM responses left")
         return self.responses.pop(0)
 
+    def complete_json(self, system: str, messages: list[dict[str, str]], schema=None, **kwargs):
+        """Fake JSON completion: parse the next response as JSON."""
+        import json
+        self.calls.append(("complete_json", messages))
+        if not self.responses:
+            raise AssertionError("no fake LLM responses left")
+        text = self.responses.pop(0)
+        try:
+            return json.loads(text) if isinstance(text, str) else text
+        except (json.JSONDecodeError, TypeError):
+            return []
+
     def stream_complete(self, system: str, messages: list[dict[str, str]], **kwargs):
         """Fake streaming: yield the next response character by character."""
         self.calls.append(("stream", messages))

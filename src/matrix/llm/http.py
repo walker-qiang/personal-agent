@@ -11,8 +11,9 @@ from urllib import error, request
 from ..rate_limiter import TokenBucketRateLimiter
 from .errors import LLMAuthError, LLMError, LLMTransientError, LLMRateLimitError
 
-MODEL_PROVIDER_MAX_ATTEMPTS = 2
-MODEL_PROVIDER_RETRY_DELAY_SEC = 0.5
+MODEL_PROVIDER_MAX_ATTEMPTS = 4
+MODEL_PROVIDER_RETRY_DELAY_SEC = 1.0
+MODEL_PROVIDER_RETRY_BACKOFF = 2.0  # exponential backoff multiplier
 TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 AUTH_HTTP_CODES = {401, 403}
 STREAM_READ_CHUNK = 4096
@@ -72,7 +73,8 @@ def post_json(
 def post_json_with_retry(
     url: str, payload: dict[str, Any], headers: dict[str, str], timeout_sec: float
 ) -> dict[str, Any]:
-    """POST JSON with retry on transient errors."""
+    """POST JSON with exponential backoff retry on transient errors."""
+    delay = MODEL_PROVIDER_RETRY_DELAY_SEC
     for attempt in range(1, MODEL_PROVIDER_MAX_ATTEMPTS + 1):
         try:
             return post_json(url, payload, headers, timeout_sec)
@@ -81,7 +83,8 @@ def post_json_with_retry(
                 raise LLMTransientError(
                     f"model provider transient failure after {attempt} attempts: {err}"
                 ) from err
-            time.sleep(MODEL_PROVIDER_RETRY_DELAY_SEC)
+            time.sleep(delay)
+            delay *= MODEL_PROVIDER_RETRY_BACKOFF
     raise LLMTransientError("model provider transient failure")
 
 

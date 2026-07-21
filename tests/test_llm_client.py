@@ -53,7 +53,7 @@ class TestDeepSeekClient:
         with (
             patch("matrix.llm.http.post_json", side_effect=LLMTransientError("timed out")),
             patch("matrix.llm.http.time.sleep"),
-            pytest.raises(LLMTransientError, match="after 2 attempts"),
+            pytest.raises(LLMTransientError, match="after 4 attempts"),
         ):
             client.complete("system", [])
 

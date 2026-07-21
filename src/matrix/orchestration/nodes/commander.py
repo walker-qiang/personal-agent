@@ -28,9 +28,13 @@ from ._helpers import (
     _extract_media_urls,
     _fix_media_answer,
     _get_configurable,
+    _inject_data_index,
+    _inject_working_memory,
     _is_high_risk,
     _is_refusal,
+    _prune_tools,
     _push_event,
+    _run_budget_and_compact,
     COMMANDER_AGGREGATE_PROMPT,
     COMMANDER_PLAN_PROMPT,
     DOMAIN_AGENT_REACT_SYSTEM,
@@ -45,6 +49,7 @@ from ._helpers import (
 from .react import _react_execute_tool_calls
 from ..anti_hallucination import verify_all_claims, build_verified_output
 from ..state import AgentState
+from ...context.compaction import compact_messages
 
 logger = logging.getLogger("matrix.orchestration")
 
@@ -77,12 +82,11 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     history_context = _build_history_context(cfg.get("history", []))
 
     try:
-        response = llm.complete(
+        plan = llm.complete_json(
             COMMANDER_PLAN_PROMPT.format(agents=agents_desc, question=user_msg, max_subtasks=MAX_SUBTASKS),
             [{"role": "user", "content": history_context + user_msg}],
             temperature=0.1,
         )
-        plan = _extract_json(response)
         if not isinstance(plan, list):
             plan = []
     except (LLMError, json.JSONDecodeError, ValueError) as e:
@@ -272,24 +276,14 @@ def _run_domain_agent_react(
         today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
 
-    # Pinned working memory: inject user's original request
+    # Pinned working memory + DataBus index
     wm = cfg.get("working_memory", {})
-    pinned = wm.get("pinned", "")
-    if not pinned:
-        user_msgs = [m for m in cfg.get("history", []) if m.get("role") == "user"]
-        if user_msgs:
-            pinned = str(user_msgs[0].get("content", ""))[:2000]
-    if pinned:
-        system_prompt = f"**Pinned Goal (your anchor):** {pinned}\n\n" + system_prompt
+    system_prompt = _inject_working_memory(system_prompt, wm, cfg.get("history", []))
 
-    # Inject active insights
-    insights = wm.get("insights", [])
-    if insights:
-        insight_block = "\n".join(f"- {i}" for i in insights[:5])
-        system_prompt += f"\n\n## Key Insights (from previous steps)\n{insight_block}"
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
     ]
+    system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), messages)
 
     _push_event(cfg, "progress", {"message": "Agent 开始分析任务，调用工具获取数据..."})
 
@@ -304,6 +298,21 @@ def _run_domain_agent_react(
             break
 
         llm_tools = _build_tools_for_llm(tools)
+        # P2-2: Action Space pruning
+        llm_tools = _prune_tools(llm_tools, messages, iteration=iteration)
+        pipeline_llm = cfg.get("pipeline_llm")
+        wm = cfg.get("working_memory", {})
+        user_goal = wm.get("pinned", original_question)
+
+        # P2-3: Budget pre-check + compaction (98% threshold, free model)
+        messages, rejected = _run_budget_and_compact(
+            messages, system_prompt, pipeline_llm, user_goal,
+        )
+        if rejected:
+            return messages + [
+                {"role": "assistant", "content": "[PROMPT_BUDGET_EXCEEDED] 上下文过长"}
+            ]
+
         result = _react_call_llm(llm, system_prompt, messages, llm_tools, original_question,
                                  agent_def, task, tool_results, tools)
 
@@ -739,12 +748,11 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
     try:
         history_context = _build_history_context(cfg.get("history", []))
-        response = llm.complete(
+        data = llm.complete_json(
             REFLECTION_PROMPT.format(question=user_msg, answer=answer),
             [{"role": "user", "content": history_context + "Evaluate the answer."}],
             temperature=0.1,
         )
-        data = _extract_json(response)
         if not isinstance(data, dict) or data.get("ok") is not False:
             return {}
 

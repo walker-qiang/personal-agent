@@ -99,55 +99,12 @@ class ChatService:
         self.store = SessionStore(config.store_path)
         self.store.backfill_titles()
 
-        # L1: ToolResultRefStore for externalizing large tool results
-        ref_store_path = config.root_path / "var" / "agent" / "tool_results.db"
-        self._ref_store = ToolResultRefStore(ref_store_path)
-        # Register get_stored_data tool for LLM retrieval of externalized data
-        self.tools.register(ToolDefinition(
-            name="get_stored_data",
-            description=(
-                "Retrieve full data that was externalized from context. "
-                "Use when you see a __refId reference and need the complete data. "
-                "Pass the refId from the __refId field."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "refId": {
-                        "type": "string",
-                        "description": "The reference ID from a __refId field",
-                    },
-                },
-                "required": ["refId"],
-            },
-            handler=make_get_stored_data_tool(self._ref_store),
-        ))
-        # Working memory tool: LLM can record key insights
-        self._wm_insights: list[str] = []  # shared across agents in same session
-        self.tools.register(ToolDefinition(
-            name="working_memory",
-            description=(
-                "Record a key insight or finding that should survive context compression. "
-                "Use this when you discover a critical piece of information (value, ID, "
-                "constraint, decision) that future steps need to know."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["add_insight"],
-                        "description": "Always 'add_insight' to record a finding",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The insight to record. Be specific: include values, IDs, names.",
-                    },
-                },
-                "required": ["action", "content"],
-            },
-            handler=self._handle_working_memory,
-        ))
+        # L1-L4: Context management tools
+        self._ref_store = ToolResultRefStore(
+            config.root_path / "var" / "agent" / "tool_results.db"
+        )
+        self._wm_insights: list[str] = []
+        self._register_internal_tools()
 
         # Configure rate limiter for LLM API calls
         if config.rate_limit_per_sec > 0:
@@ -416,6 +373,81 @@ class ChatService:
             self._wm_insights = self._wm_insights[:20]  # cap at 20 insights
             return {"ok": True, "recorded": content, "total_insights": len(self._wm_insights)}
         return {"ok": False, "error": f"Unknown action: {action}"}
+
+    def _handle_step_control(self, action: str, reason: str = "") -> dict:
+        """Handle step_control tool calls from the LLM.
+
+        The LLM explicitly signals its execution state instead of the system
+        guessing from text content. This eliminates the ambiguity between
+        'completed', 'thinking', 'confused', and 'explaining'.
+        """
+        valid = {"complete", "skip", "need_info"}
+        if action not in valid:
+            return {"ok": False, "error": f"Unknown action: {action}", "valid_actions": list(valid)}
+
+        logger.info("step_control: action=%s reason=%s", action, reason[:100] if reason else "")
+        return {"ok": True, "action": action, "reason": reason, "message": f"Step control: {action}"}
+
+    def _register_internal_tools(self) -> None:
+        """Register context management tools (P0-P2: get_stored_data, working_memory, step_control).
+
+        Extracted from __init__ to keep the constructor focused on wiring.
+        """
+        self.tools.register(ToolDefinition(
+            name="get_stored_data",
+            description=(
+                "Retrieve full data that was externalized from context. "
+                "Use when you see a __refId reference and need the complete data. "
+                "Pass the refId from the __refId field."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "refId": {"type": "string", "description": "The reference ID from a __refId field"},
+                },
+                "required": ["refId"],
+            },
+            handler=make_get_stored_data_tool(self._ref_store),
+        ))
+        self.tools.register(ToolDefinition(
+            name="working_memory",
+            description=(
+                "Record a key insight or finding that should survive context compression. "
+                "Use this when you discover a critical piece of information (value, ID, "
+                "constraint, decision) that future steps need to know."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add_insight"], "description": "Always 'add_insight' to record a finding"},
+                    "content": {"type": "string", "description": "The insight to record. Be specific: include values, IDs, names."},
+                },
+                "required": ["action", "content"],
+            },
+            handler=self._handle_working_memory,
+        ))
+        self.tools.register(ToolDefinition(
+            name="step_control",
+            description=(
+                "Explicitly signal your current execution state. Use this instead of "
+                "relying on the system to guess your intent from text content.\n"
+                "- complete: The current step is finished successfully. Use with reason "
+                "to summarize what was accomplished.\n"
+                "- skip: Skip this step because it's unnecessary (e.g., prerequisites "
+                "not met, data already available).\n"
+                "- need_info: You need more information before you can proceed. "
+                "Describe what's missing."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["complete", "skip", "need_info"], "description": "Your execution state"},
+                    "reason": {"type": "string", "description": "Brief explanation of why you're in this state"},
+                },
+                "required": ["action"],
+            },
+            handler=self._handle_step_control,
+        ))
 
     def _cleanup_stale_checkpoint(self, thread_id: str, call_id: str) -> None:
         """Delete stale checkpoints from a previous call to prevent reducer merge.
@@ -688,16 +720,11 @@ class ChatService:
         self.agent_registry.reload_skills()
 
     def _get_history(self, session_id: str, user_id: str = "default") -> list[dict[str, str]]:
-        """Return conversation history with user profile injected as context."""
+        """Return conversation history with layered user profile injected as context."""
         history = self.store.get_history(session_id, self.config.memory_max_turns)
-        profile = self.store.get_profile(user_id)
-        if profile:
-            # Build a compact profile summary and inject as system message
-            lines = ["[用户画像]"]
-            for k, v in profile.items():
-                lines.append(f"- {k}: {v}")
-            summary = "\n".join(lines)
-            history.insert(0, {"role": "system", "content": summary})
+        formatted = self.store.get_profile_formatted(user_id)
+        if formatted:
+            history.insert(0, {"role": "system", "content": formatted})
         return history
 
     def _remember(self, session_id: str, question: str, answer: str, user_id: str = "default") -> None:
@@ -717,15 +744,17 @@ class ChatService:
             prompt = MEMORY_EXTRACTION_PROMPT.format(
                 question=question[:500], answer=answer[:1000],
             )
-            result = self._pipeline_llm.complete(prompt)
-            data = json.loads(result.content)
+            data = self._pipeline_llm.complete_json(
+                prompt, [{"role": "user", "content": "Extract memories from this Q&A."}],
+            )
             updated = False
             for mem in data.get("memories", []):
                 key = mem["key"].strip()
                 value = mem["value"].strip()
+                mem_type = mem.get("type", "preference").strip()
                 if key and value:
-                    self.store.upsert_profile(user_id, key, value)
-                    logger.debug("memory_upsert: user=%s key=%s", user_id, key)
+                    self.store.upsert_profile(user_id, key, value, memory_type=mem_type)
+                    logger.debug("memory_upsert: user=%s key=%s type=%s", user_id, key, mem_type)
                     updated = True
             if updated and self.config.memory_sync_path:
                 json_path = Path(self.config.memory_sync_path) / f"{user_id}.json"

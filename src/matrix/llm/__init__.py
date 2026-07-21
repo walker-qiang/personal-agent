@@ -8,7 +8,7 @@ from __future__ import annotations
 from .anthropic import AnthropicClient
 from .deepseek import DeepSeekClient
 from .errors import LLMAuthError, LLMError, LLMTransientError, LLMRateLimitError
-from .protocol import FunctionCallResult, LLMClient, ToolCall
+from .protocol import FunctionCallResult, LLMClient, ToolCall, parse_json_response
 
 
 def build_llm_client(
@@ -61,5 +61,6 @@ __all__ = [
     "LLMAuthError",
     "LLMRateLimitError",
     "ToolCall",
+    "parse_json_response",
     "build_llm_client",
 ]

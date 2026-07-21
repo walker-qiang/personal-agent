@@ -49,6 +49,16 @@ _VERIF_BLOCK_RE = re.compile(
     r"\[VERIFICATION\]\s*(.*?)\s*\[/VERIFICATION\]", re.DOTALL | re.IGNORECASE
 )
 
+# Also match unclosed [VERIFICATION] (LLM forgot the closing tag)
+_UNCLOSED_VERIF_RE = re.compile(
+    r"\[VERIFICATION\].*$", re.DOTALL | re.IGNORECASE
+)
+
+# Loose tags outside a verification block (cleanup)
+_LOOSE_TAG_RE = re.compile(
+    r"\[/?(?:VERIFICATION|CLAIM|EVIDENCE|SOURCE|CONFIDENCE)\]", re.IGNORECASE
+)
+
 _CLAIM_RE = re.compile(
     r"\[CLAIM\]\s*(.*?)\s*\[/CLAIM\]", re.DOTALL | re.IGNORECASE
 )
@@ -317,7 +327,7 @@ def verify_claim_string_match(claim: Claim, tool_results: list[dict[str, Any]]) 
 
 _LLM_VERIFY_PROMPT = """You are a fact-checker. Given a factual claim and tool search results, determine if the claim is supported by the evidence.
 
-Respond with EXACTLY one word:
+Verdict options:
 - SUPPORTED: The claim is directly supported by the tool results
 - PARTIALLY: Some parts of the claim are supported, but not all
 - CONTRADICTED: The tool results contradict the claim
@@ -328,7 +338,7 @@ Claim: {claim}
 Tool Results:
 {tool_results}
 
-Your verdict (one word only):"""
+Return JSON: {{"verdict": "SUPPORTED|PARTIALLY|CONTRADICTED|NO_EVIDENCE"}}"""
 
 
 def verify_claims_with_llm(
@@ -358,7 +368,10 @@ def verify_claims_with_llm(
                 claim=claim.text,
                 tool_results=results_text,
             )
-            verdict = llm.complete("", [{"role": "user", "content": prompt}], temperature=0.0).strip().upper()
+            data = llm.complete_json(
+                "", [{"role": "user", "content": prompt}], temperature=0.0,
+            )
+            verdict = str(data.get("verdict", "NO_EVIDENCE")).upper() if isinstance(data, dict) else "ERROR"
             return (claim, verdict)
         except Exception as e:
             logger.warning("LLM claim verification failed for '%s': %s", claim.text[:80], e)
@@ -514,6 +527,26 @@ def _build_safe_response(result: VerificationResult) -> str:
     return "\n".join(parts)
 
 
+def _strip_all_verification_tags(text: str) -> str:
+    """Remove ALL verification-related tags from text, regardless of format.
+
+    Handles:
+    - [VERIFICATION]...[/VERIFICATION] (paired)
+    - [VERIFICATION]... (unclosed, to end of text)
+    - Loose [CLAIM], [/CLAIM], [EVIDENCE], [/EVIDENCE], [SOURCE], [/SOURCE] tags
+    - Multiple consecutive blank lines left after stripping
+    """
+    # 1. Strip paired [VERIFICATION]...[/VERIFICATION] blocks
+    cleaned = _VERIF_BLOCK_RE.sub("", text)
+    # 2. Strip unclosed [VERIFICATION]... to end
+    cleaned = _UNCLOSED_VERIF_RE.sub("", cleaned)
+    # 3. Strip any remaining loose tags
+    cleaned = _LOOSE_TAG_RE.sub("", cleaned)
+    # 4. Clean up excessive blank lines
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def build_verified_output(
     original_answer: str,
     verification: VerificationResult,
@@ -527,7 +560,8 @@ def build_verified_output(
     - < 30%: safe response (but if there are partial claims, show them with warning)
     """
     if verification.total == 0:
-        return original_answer
+        # No claims parsed, but still strip any verification tags the LLM emitted
+        return _strip_all_verification_tags(original_answer)
 
     # Effective verified: verified + partial at 0.5 weight
     effective_verified = verification.verified + verification.partial * 0.5
@@ -535,18 +569,18 @@ def build_verified_output(
 
     if verified_ratio >= 1.0:
         # All verified - return as-is (remove verification block for cleanliness)
-        clean = _VERIF_BLOCK_RE.sub("", original_answer).strip()
+        clean = _strip_all_verification_tags(original_answer)
         return clean
 
     if verified_ratio >= 0.7:
         # Most verified - mark unverified
-        clean = _VERIF_BLOCK_RE.sub("", original_answer).strip()
+        clean = _strip_all_verification_tags(original_answer)
         return _mark_unverified_claims(clean, verification)
 
     # < 70% — never discard the answer. The LLM's output is the best we have;
     # a post-processing pipeline cannot reliably judge correctness better than
     # the LLM that generated it. Always return the answer with a warning.
-    clean = _VERIF_BLOCK_RE.sub("", original_answer).strip()
+    clean = _strip_all_verification_tags(original_answer)
     return _add_confidence_warning(clean, verification)
 
 

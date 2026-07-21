@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 from .errors import LLMError
 from .http import post_json_stream, post_json_with_retry
-from .protocol import FunctionCallResult, ToolCall
+from .protocol import FunctionCallResult, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
 
@@ -74,6 +74,33 @@ class DeepSeekClient:
             return str(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as err:
             raise LLMError("DeepSeek response did not include message content") from err
+
+    def complete_json(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any] | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Call DeepSeek with response_format=json_object for guaranteed JSON output.
+
+        DeepSeek (OpenAI-compatible) supports response_format={"type": "json_object"}
+        which forces the model to output valid JSON. The system prompt must contain
+        the word "json" for this to work.
+        """
+        url = self.base_url.rstrip("/") + "/chat/completions"
+        payload = self._build_payload(system, messages, temperature=temperature)
+        # Force JSON output mode
+        payload["response_format"] = {"type": "json_object"}
+        data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
+        try:
+            content = str(data["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError) as err:
+            raise LLMError("DeepSeek response did not include message content") from err
+        try:
+            return parse_json_response(content)
+        except Exception as err:
+            raise LLMError(f"DeepSeek JSON output could not be parsed: {err}") from err
 
     def stream_complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from DeepSeek API.

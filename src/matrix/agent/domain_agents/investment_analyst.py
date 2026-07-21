@@ -19,6 +19,7 @@ INVESTMENT_ANALYST = AgentDefinition(
     ],
     tools=[
         "finance.*",
+        "news_search",
         "web_search",
         "web_fetch",
     ],

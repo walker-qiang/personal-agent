@@ -42,38 +42,3 @@ COMMANDER = AgentDefinition(
         "不确定的信息需明确标注",
     ],
 )
-
-# Commander's system prompt for plan generation
-COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。你需要制定一个委派计划来回答用户的问题。
-
-可用的领域专家：
-{agents}
-
-用户问题：{question}
-
-请制定执行计划，以 JSON 数组格式返回。每个步骤：
-{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务描述", "skill_name": "可选，如果该任务匹配某个技能则填写技能名", "purpose": "为什么需要这个专家"}}
-
-规则：
-- 投资/金融/持仓/配置相关问题委派给 investment-analyst
-- 通用问题（编程、写作、知识查询、闲聊）返回空数组 []，由指挥官直接回答
-- 跨领域问题可以委派给 investment-analyst 处理投资部分，其余指挥官自己处理
-- 每个专家只委派一次，合并相似任务
-- 如果任务匹配专家的某个技能，填写 skill_name 字段
-
-只返回 JSON 数组，不要其他文字。"""
-
-# Commander's prompt for aggregating results
-COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家的执行结果，汇总回答用户的问题。
-
-用户问题：{question}
-
-专家执行结果：
-{results}
-
-请用清晰、结构化的方式汇总回答。要求：
-1. 直接回答用户的问题
-2. 引用各专家的关键发现
-3. 如果某个专家结果不完整，明确说明
-4. 使用与用户相同的语言
-5. 使用 Markdown 格式化：**加粗**关键数字，表格对比数据，列表展示要点"""

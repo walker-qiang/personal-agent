@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS user_profile (
     user_id     TEXT NOT NULL,
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
+    memory_type TEXT NOT NULL DEFAULT 'preference',
+    created_at  REAL NOT NULL DEFAULT 0,
     updated_at  REAL NOT NULL,
     PRIMARY KEY (user_id, key)
 );
@@ -56,6 +58,9 @@ CREATE TABLE IF NOT EXISTS user_profile (
 
 class SessionStore:
     """Thread-safe SQLite store for users, sessions, and messages."""
+
+    # Memory decay: half-life in seconds (30 days)
+    MEMORY_HALF_LIFE = 30 * 86400
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
@@ -92,6 +97,17 @@ class SessionStore:
         msg_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()]
         if "user_id" not in msg_cols:
             self._conn.execute("ALTER TABLE messages ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+
+        # user_profile: add memory_type and created_at if missing
+        prof_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(user_profile)").fetchall()]
+        if "memory_type" not in prof_cols:
+            self._conn.execute(
+                "ALTER TABLE user_profile ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'preference'"
+            )
+        if "created_at" not in prof_cols:
+            self._conn.execute(
+                "ALTER TABLE user_profile ADD COLUMN created_at REAL NOT NULL DEFAULT 0"
+            )
 
         # Create idx_sessions_user after user_id column is guaranteed to exist
         self._conn.execute(
@@ -302,10 +318,7 @@ class SessionStore:
             self._get_conn().commit()
             return cur.rowcount
 
-    # ---- User Profile (long-term memory) ----
-
     def get_profile(self, user_id: str) -> dict[str, str]:
-        """Return all key-value pairs for a user."""
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT key, value FROM user_profile WHERE user_id=? ORDER BY updated_at DESC",
@@ -313,14 +326,121 @@ class SessionStore:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
-    def upsert_profile(self, user_id: str, key: str, value: str) -> None:
-        """Insert or update a profile entry."""
+    def get_policies(self, user_id: str) -> dict[str, str]:
+        """Return policy-type memories (hard rules, highest priority)."""
         with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value FROM user_profile "
+                "WHERE user_id=? AND memory_type='policy' ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def get_preferences(self, user_id: str) -> dict[str, str]:
+        """Return preference-type memories (user preferences, lower priority)."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value FROM user_profile "
+                "WHERE user_id=? AND memory_type='preference' ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def get_profile_formatted(self, user_id: str) -> str:
+        """Return profile as formatted text for system prompt injection.
+
+        Policies are presented first and marked as [HARD RULE] because they
+        cannot be overridden by user instructions. Preferences are presented
+        as [PREFERENCE], with time-decay weights applied.
+
+        Memories older than the half-life (30 days) are down-weighted by 50%,
+        and those older than 4 half-lives (120 days) are excluded entirely
+        unless they are policies (which never decay).
+        """
+        now = time.time()
+        policies = self._get_decayed_memories(user_id, "policy", now)
+        preferences = self._get_decayed_memories(user_id, "preference", now)
+
+        parts: list[str] = []
+        if policies:
+            parts.append("## Hard Rules (DO NOT override these)")
+            for k, v, weight in policies:
+                age_days = (now - self._get_updated_at(user_id, k)) / 86400
+                age_hint = ""
+                if age_days > 90:
+                    age_hint = f" [established {int(age_days)}d ago]"
+                parts.append(f"- [HARD RULE] {k}: {v}{age_hint}")
+        if preferences:
+            parts.append("\n## User Preferences")
+            for k, v, weight in preferences:
+                if weight < 0.5:
+                    parts.append(f"- [PREFERENCE, fading] {k}: {v}")
+                else:
+                    parts.append(f"- [PREFERENCE] {k}: {v}")
+        return "\n".join(parts) if parts else ""
+
+    def _get_decayed_memories(
+        self, user_id: str, memory_type: str, now: float,
+    ) -> list[tuple[str, str, float]]:
+        """Get memories with time-decay weights applied.
+
+        Decay formula: weight = 0.5^(age / half_life)
+        - age = 0 days → weight = 1.0
+        - age = 30 days → weight = 0.5
+        - age = 60 days → weight = 0.25
+        - age >= 120 days → excluded (weight < 0.0625) unless policy
+
+        Returns list of (key, value, weight) sorted by weight descending.
+        Policies never decay below 1.0.
+        """
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value, updated_at FROM user_profile "
+                "WHERE user_id=? AND memory_type=? ORDER BY updated_at DESC",
+                (user_id, memory_type),
+            ).fetchall()
+
+        results: list[tuple[str, str, float]] = []
+        for key, value, updated_at in rows:
+            age = now - updated_at
+            if memory_type == "policy":
+                weight = 1.0  # Policies never decay
+            else:
+                weight = 2.0 ** (-age / MEMORY_HALF_LIFE)
+                if weight < 0.0625:  # 4 half-lives = 120 days
+                    continue  # Exclude very stale memories
+            results.append((key, value, round(weight, 3)))
+
+        results.sort(key=lambda x: x[2], reverse=True)
+        return results
+
+    def _get_updated_at(self, user_id: str, key: str) -> float:
+        """Get the updated_at timestamp for a specific profile entry."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT updated_at FROM user_profile WHERE user_id=? AND key=?",
+                (user_id, key),
+            ).fetchone()
+        return row[0] if row else 0.0
+
+    def upsert_profile(self, user_id: str, key: str, value: str,
+                       memory_type: str = "preference") -> None:
+        """Insert or update a profile entry with memory type."""
+        now = time.time()
+        with self._lock:
+            # Get existing created_at so we don't overwrite it
+            existing = self._get_conn().execute(
+                "SELECT created_at FROM user_profile WHERE user_id=? AND key=?",
+                (user_id, key),
+            ).fetchone()
+            created_at = existing[0] if existing and existing[0] > 0 else now
+
             self._get_conn().execute(
-                "INSERT INTO user_profile (user_id, key, value, updated_at) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (user_id, key, value, time.time()),
+                "INSERT INTO user_profile (user_id, key, value, memory_type, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, key) DO UPDATE SET "
+                "value=excluded.value, memory_type=excluded.memory_type, updated_at=excluded.updated_at",
+                (user_id, key, value, memory_type, created_at, now),
             )
             self._get_conn().commit()
 

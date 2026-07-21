@@ -18,6 +18,7 @@ from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
 from ...context import ToolResultRefStore
+from ...context.compaction import compact_messages
 
 from ._helpers import (
     DOMAIN_AGENT_REACT_SYSTEM,
@@ -28,9 +29,13 @@ from ._helpers import (
     _classify_query_factuality,
     _evaluate_sufficiency,
     _get_configurable,
+    _inject_data_index,
+    _inject_working_memory,
     _is_refusal,
     _now_ts,
+    _prune_tools,
     _push_event,
+    _run_budget_and_compact,
     _trace,
     _trace_span,
     MAX_SAME_TOOL_CALLS,
@@ -72,23 +77,11 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
 
-    # Pinned working memory: inject user's original request
-    wm = state.get("working_memory", {})
-    pinned = wm.get("pinned", "")
-    if not pinned:
-        # Initialize pinned from user's first message
-        user_msgs = [m for m in state.get("messages", []) if m.get("role") == "user"]
-        if user_msgs:
-            pinned = str(user_msgs[0].get("content", ""))[:2000]
-            wm["pinned"] = pinned
-    if pinned:
-        system_prompt = f"**Pinned Goal (your anchor):** {pinned}\n\n" + system_prompt
-
-    # Inject active insights (newest first, max 5)
-    insights = wm.get("insights", [])
-    if insights:
-        insight_block = "\n".join(f"- {i}" for i in insights[:5])
-        system_prompt += f"\n\n## Key Insights (from previous steps)\n{insight_block}"
+    # Pinned working memory + DataBus index
+    system_prompt = _inject_working_memory(
+        system_prompt, state.get("working_memory", {}), state.get("messages", []),
+    )
+    system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), state.get("messages", []))
 
     react = {
         "messages": [{"role": "user", "content": task_content}],
@@ -129,9 +122,33 @@ def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     question = react.get("question", "")
     iteration = react.get("iteration", 0)
 
+    # P2-2: Action Space pruning
+    llm_tools = _prune_tools(llm_tools, messages, iteration=iteration)
+
     with _trace_span(cfg, "react_llm", session_id=state.get("session_id", ""),
                      agent_id=agent_id, iteration=iteration):
         try:
+            # P2-3: Budget pre-check + compaction (98% threshold, free model)
+            pipeline_llm = cfg.get("pipeline_llm")
+            wm = state.get("working_memory", {})
+            user_goal = wm.get("pinned", question)
+            messages, rejected = _run_budget_and_compact(
+                messages, system_prompt, pipeline_llm, user_goal,
+            )
+            if rejected:
+                _trace(cfg, {"event_type": "budget_exceeded", "session_id": state.get("session_id", "")})
+                return {
+                    "messages": messages + [{
+                        "role": "assistant",
+                        "content": "[PROMPT_BUDGET_EXCEEDED] 上下文过长，请精简问题后重试",
+                    }],
+                    "react": {"iteration": react.get("iteration", 0) + 1, "done": True},
+                    "agent_results": [{"agent": agent_id, "result": "BUDGET_EXCEEDED"}],
+                    "tool_call_count": 0,
+                    "tool_results": [],
+                }
+            react["messages"] = messages
+
             temp = _classify_query_factuality(question)
             result: FunctionCallResult = llm.function_call(system_prompt, messages, llm_tools, temperature=temp)
         except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:

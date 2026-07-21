@@ -7,11 +7,22 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
 from typing import Any
 
 from ..base import ToolDefinition
+from ._common import (
+    SKIP_TITLES,
+    boost_recent_results,
+    cache_get,
+    cache_key,
+    cache_set,
+    clean_html,
+    fetch,
+    filter_redirect_urls,
+    inject_current_year,
+    is_time_sensitive,
+    race_engines,
+)
 
 tool_definition = ToolDefinition(
     name="news_search",
@@ -34,40 +45,11 @@ tool_definition = ToolDefinition(
     handler=None,
 )
 
-_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
-
 _BING_NEWS_URL = "https://www.bing.com/news/search"
 _SO360_NEWS_URL = "https://news.so.com/ns"
 
-_STRIP_HTML = re.compile(r"<[^>]+>")
-_STRIP_ENTITY = re.compile(r"&[a-z]+;")
-_COLLAPSE_SPACE = re.compile(r"\s+")
-
-
-def _clean_html(text: str) -> str:
-    text = _STRIP_HTML.sub(" ", text)
-    text = _STRIP_ENTITY.sub(" ", text)
-    text = _COLLAPSE_SPACE.sub(" ", text)
-    return text.strip()
-
-
-def _fetch(url: str, timeout_sec: float) -> str | None:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except Exception:
-        return None
-
 
 # ---- Bing News parser ----
-
-# Bing News renders titles inside news-card divs, but snippets and source/date
-# are in separate sibling elements outside the card.  We parse them independently
-# and pair by order.
 
 _BING_NEWS_TITLE_RE = re.compile(
     r'<a[^>]*class="[^"]*title[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
@@ -107,24 +89,21 @@ def _parse_bing_news(html: str, limit: int) -> list[dict[str, str]]:
         if not title_match:
             continue
         url = title_match.group(1)
-        title = _clean_html(title_match.group(2))
+        title = clean_html(title_match.group(2))
         if not title:
             continue
         results.append({"title": title, "url": url, "snippet": ""})
 
-    # Extract snippets from the full page (they are siblings of news-card, not nested)
+    # Extract snippets from the full page (siblings of news-card, not nested)
     snippets = _BING_NEWS_SNIPPET_RE.findall(html)
     for i, snippet_html in enumerate(snippets):
         if i < len(results):
-            results[i]["snippet"] = _clean_html(snippet_html)
+            results[i]["snippet"] = clean_html(snippet_html)
 
     return results
 
 
 # ---- 360 News parser (fallback) ----
-
-_SKIP_TITLES = {"其他人还搜了", "最新相关消息", "相关搜索", "最新相关信息"}
-
 
 def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
     """Parse 360 News search results page."""
@@ -134,8 +113,8 @@ def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
     for h3_content in all_h3:
         if len(results) >= limit:
             break
-        title = _clean_html(h3_content)
-        if not title or title in _SKIP_TITLES:
+        title = clean_html(h3_content)
+        if not title or title in SKIP_TITLES:
             continue
         link_match = re.search(r'href="([^"]+)"', h3_content)
         url = link_match.group(1) if link_match else ""
@@ -147,99 +126,169 @@ def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
     )
     if not all_snippets:
         all_snippets = re.findall(r"<p[^>]*>(.*?)</p>", html, re.DOTALL)
-        all_snippets = [s for s in all_snippets if 30 < len(_clean_html(s)) < 500]
+        all_snippets = [s for s in all_snippets if 30 < len(clean_html(s)) < 500]
 
     for i, snippet_html in enumerate(all_snippets):
         if i < len(results):
-            results[i]["snippet"] = _clean_html(snippet_html)
+            results[i]["snippet"] = clean_html(snippet_html)
 
     return results
 
 
-# ---- URL filter ----
+# ---- Financial site fallback for stock/market queries ----
 
-# 360 redirect URLs (so.com/link?m=...) are not real web pages
-_REDIRECT_URL_RE = re.compile(r"^https?://(?:www\.)?so\.com/link\?", re.IGNORECASE)
-
-
-def _filter_redirect_urls(results: list[dict[str, str]]) -> list[dict[str, str]]:
-    for r in results:
-        url = r.get("url", "")
-        if url and _REDIRECT_URL_RE.search(url):
-            r["url"] = ""
-    return results
-
-
-# ---- Query preprocessing ----
-
-_TIME_SENSITIVE_RE = re.compile(
-    r"最近|最新|今天|今日|近期|当前|现在|近日|今年|本(?:周|月|年)",
+_FINANCE_KEYWORDS_RE = re.compile(
+    r"A股|沪深|上证|深证|创业板|科创板|大盘|股市|行情|"
+    r"涨停|跌停|收盘|开盘|指数|板块|个股|熊市|牛市|"
+    r"股票|基金|债券|期货|外汇|美股|港股|日股"
 )
 
-_MULTI_YEAR_RE = re.compile(r"\b(?:20\d{2}[-\s]*)+20\d{2}\b|\b20\d{2}\s+20\d{2}\b")
-
-_YEAR_IN_SNIPPET_RE = re.compile(r"\b(20\d{2})\b")
-
-
-def _result_year_score(snippet: str, current_year: int) -> int:
-    years = _YEAR_IN_SNIPPET_RE.findall(snippet)
-    if not years:
-        return 0
-    best = max(int(y) for y in years)
-    return 100 - (current_year - best) * 100
-
-
-def _boost_recent_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Reorder results so current-year results appear first (360 fallback only)."""
-    current_year = datetime.now(timezone.utc).year
-    scored = [(r, _result_year_score(r.get("snippet", ""), current_year)) for r in results]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [r for r, _ in scored]
+_FINANCE_SITES = [
+    {
+        "url": "https://finance.eastmoney.com/a/czqyw.html",
+        "name": "东方财富",
+        "parser": "_parse_eastmoney_headlines",
+    },
+    {
+        "url": "https://stock.10jqka.com.cn/",
+        "name": "同花顺",
+        "parser": "_parse_10jqka_headlines",
+    },
+]
 
 
-def _inject_current_year(query: str) -> str:
-    """If the query is time-sensitive, strip time-sensitive words and append
-    the current year if missing."""
-    if not _TIME_SENSITIVE_RE.search(query) and not _MULTI_YEAR_RE.search(query):
-        return query
-    current_year = str(datetime.now(timezone.utc).year)
-    cleaned = _TIME_SENSITIVE_RE.sub("", query)
-    cleaned = _MULTI_YEAR_RE.sub(current_year, cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if current_year not in cleaned:
-        cleaned = f"{cleaned} {current_year}"
-    return cleaned
+def _try_financial_sites(query: str, original_query: str) -> list[dict[str, str]]:
+    """If the query is finance-related, try fetching financial sites directly.
+
+    This handles the case where news search engines don't have same-day
+    market data but financial portals do.
+    """
+    if not _FINANCE_KEYWORDS_RE.search(original_query):
+        return []
+
+    results: list[dict[str, str]] = []
+    for site in _FINANCE_SITES:
+        html = fetch(site["url"], timeout_sec=8, label=site["name"])
+        if not html:
+            continue
+        parser = globals().get(site["parser"])
+        if parser is None:
+            continue
+        headlines = parser(html)
+        if headlines:
+            for h in headlines:
+                results.append({
+                    "title": h["title"],
+                    "snippet": h.get("snippet", ""),
+                    "url": h.get("url", site["url"]),
+                    "source": site["name"],
+                    "date": h.get("date", ""),
+                })
+            if results:
+                break
+
+    return results
+
+
+def _parse_eastmoney_headlines(html: str) -> list[dict[str, str]]:
+    """Parse headlines from East Money (东方财富) market page."""
+    results: list[dict[str, str]] = []
+    title_re = re.compile(
+        r'<a[^>]*href="(/a/[^"]+)"[^>]*title="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    for match in title_re.finditer(html):
+        url = "https://finance.eastmoney.com" + match.group(1)
+        title = match.group(2).strip()
+        if not title or len(title) < 4:
+            continue
+        if any(title == r["title"] for r in results):
+            continue
+        results.append({"title": title, "url": url, "snippet": "", "date": ""})
+        if len(results) >= 8:
+            break
+    return results
+
+
+def _parse_10jqka_headlines(html: str) -> list[dict[str, str]]:
+    """Parse headlines from 10jqka (同花顺) stock page."""
+    results: list[dict[str, str]] = []
+    title_re = re.compile(
+        r'<a[^>]*href="(https?://[^"]*10jqka\.com\.cn[^"]*)"[^>]*title="([^"]+)"',
+        re.DOTALL,
+    )
+    for match in title_re.finditer(html):
+        url = match.group(1)
+        title = match.group(2).strip()
+        if not title or len(title) < 4:
+            continue
+        if any(title == r["title"] for r in results):
+            continue
+        results.append({"title": title, "url": url, "snippet": "", "date": ""})
+        if len(results) >= 8:
+            break
+    return results
 
 
 # ---- public API ----
 
 def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
-    """Search news: Bing News (primary) → 360 News (fallback)."""
+    """Search news: Bing News + 360 News (parallel) → Financial sites (fallback)."""
     max_results = min(max(max_results, 1), 10)
     original_query = query
-    query = _inject_current_year(query)
-    is_time_sensitive = _TIME_SENSITIVE_RE.search(original_query) is not None
+    query = inject_current_year(query)
+    ts = is_time_sensitive(original_query)
 
-    # Engine 1: Bing News
-    bing_url = _BING_NEWS_URL + "?" + urllib.parse.urlencode({
-        "q": query,
-        "setlang": "zh-cn" if any("\u4e00" <= c <= "\u9fff" for c in query) else "en",
-    })
-    html = _fetch(bing_url, timeout_sec=10)
-    if html:
-        results = _parse_bing_news(html, max_results)
-        if results:
-            return {"results": results, "query": query, "engine": "bing-news"}
+    # Check cache first
+    ckey = cache_key("news_search", query, max_results)
+    cached = cache_get(ckey)
+    if cached is not None:
+        return cached
 
-    # Engine 2: 360 News (fallback)
-    news_url = _SO360_NEWS_URL + "?" + urllib.parse.urlencode({"q": query})
-    html = _fetch(news_url, timeout_sec=10)
-    if html:
-        results = _parse_so360_news(html, max_results)
-        if results:
-            results = _filter_redirect_urls(results)
-            if is_time_sensitive:
-                results = _boost_recent_results(results)
-            return {"results": results, "query": query, "engine": "so360-news"}
+    # Define engine fetch functions for parallel racing
+    def _try_bing_news() -> dict[str, Any] | None:
+        bing_url = _BING_NEWS_URL + "?" + urllib.parse.urlencode({
+            "q": query,
+            "setlang": "zh-cn" if any("\u4e00" <= c <= "\u9fff" for c in query) else "en",
+        })
+        html = fetch(bing_url, timeout_sec=10, label="bing-news")
+        if html:
+            results = _parse_bing_news(html, max_results)
+            if results:
+                return {"results": filter_redirect_urls(results), "query": query, "engine": "bing-news"}
+        return None
 
-    return {"results": [], "message": "未找到相关新闻，请尝试其他关键词"}
+    def _try_so360_news() -> dict[str, Any] | None:
+        news_url = _SO360_NEWS_URL + "?" + urllib.parse.urlencode({"q": query})
+        html = fetch(news_url, timeout_sec=10, label="so360-news")
+        if html:
+            results = _parse_so360_news(html, max_results)
+            if results:
+                return {
+                    "results": boost_recent_results(filter_redirect_urls(results), ts),
+                    "query": query,
+                    "engine": "so360-news",
+                }
+        return None
+
+    # Race Bing News + 360 News in parallel
+    winner = race_engines([
+        ("bing-news", _try_bing_news),
+        ("so360-news", _try_so360_news),
+    ], timeout_sec=12)
+
+    if winner:
+        _, result = winner
+        cache_set(ckey, result)
+        return result
+
+    # Fallback: financial sites for stock/market queries
+    fin_results = _try_financial_sites(query, original_query)
+    if fin_results:
+        result = {"results": fin_results[:max_results], "query": query, "engine": "finance-sites"}
+        cache_set(ckey, result)
+        return result
+
+    result = {"results": [], "message": "未找到相关新闻，请尝试其他关键词"}
+    cache_set(ckey, result)
+    return result

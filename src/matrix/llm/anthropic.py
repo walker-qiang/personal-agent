@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 from .errors import LLMError
 from .http import post_json_stream, post_json_with_retry
-from .protocol import FunctionCallResult, ToolCall
+from .protocol import FunctionCallResult, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
 
@@ -71,6 +71,67 @@ class AnthropicClient:
             )
         except (KeyError, TypeError) as err:
             raise LLMError("Anthropic response did not include text content") from err
+
+    def complete_json(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any] | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Call Anthropic and return parsed JSON.
+
+        Anthropic doesn't support response_format like OpenAI. Instead we use
+        the "forced single tool call" pattern: define a dummy tool with the
+        expected JSON schema and force the model to call it. The tool arguments
+        are guaranteed to be valid JSON.
+
+        Falls back to prompt-based JSON with parse_json_response if the tool
+        call approach fails.
+        """
+        # Build the dummy tool definition
+        tool_schema = schema or {"type": "object", "properties": {}}
+        tool_def = {
+            "name": "return_json",
+            "description": "Return the structured result as JSON",
+            "input_schema": tool_schema,
+        }
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": self._truncate(messages, system),
+            "tools": [tool_def],
+            "tool_choice": {"type": "tool", "name": "return_json"},
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        data = post_json_with_retry(
+            "https://api.anthropic.com/v1/messages",
+            payload,
+            self._headers(),
+            self.timeout_sec,
+        )
+
+        # Extract tool call arguments (guaranteed JSON from Anthropic)
+        try:
+            for block in data["content"]:
+                if block.get("type") == "tool_use" and block.get("name") == "return_json":
+                    return block["input"]
+        except (KeyError, TypeError):
+            pass
+
+        # Fallback: try parsing text content
+        try:
+            text = "".join(
+                str(chunk.get("text", "")) for chunk in data.get("content", [])
+                if chunk.get("type") == "text"
+            )
+            return parse_json_response(text)
+        except Exception as err:
+            raise LLMError(f"Anthropic JSON output could not be parsed: {err}") from err
 
     def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from Anthropic Messages API.
