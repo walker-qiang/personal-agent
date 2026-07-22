@@ -47,7 +47,7 @@ from ._helpers import (
     EVALUATOR_INTERVAL,
 )
 from .react import _react_execute_tool_calls
-from ..anti_hallucination import verify_all_claims, build_verified_output
+from ..anti_hallucination import verify_all_claims, build_verified_output, _strip_all_verification_tags
 from ..state import AgentState
 from ...context.compaction import compact_messages
 
@@ -749,6 +749,8 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
             verification = verify_all_claims(final_answer, all_tool_results, llm)
             if verification.total > 0:
                 final_answer = build_verified_output(final_answer, verification)
+            else:
+                final_answer = _strip_all_verification_tags(final_answer)
 
         result = {"final_answer": final_answer, "needs_summary": False}
         if is_retry:

@@ -23,6 +23,7 @@ from ..agent.domain_agents import INVESTMENT_ANALYST, MEDIA_GENERATOR
 from ..config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from ..llm import LLMClient, LLMError, build_llm_client
 from ..llm.http import set_rate_limiter
+from ..orchestration.anti_hallucination import _strip_all_verification_tags
 from ..orchestration import build_graph
 from ..orchestration.state import AgentState
 from ..rate_limiter import TokenBucketRateLimiter
@@ -361,6 +362,9 @@ class ChatService:
 
             # Yield final answer
             final_answer = final_state.get("final_answer", "")
+            # FINAL SAFETY NET: strip any leaked verification tags (same as normal path)
+            if final_answer:
+                final_answer = _strip_all_verification_tags(final_answer)
             if final_answer and not final_answer.startswith("所有领域专家"):
                 yield {"type": "token", "content": final_answer}
 
@@ -696,6 +700,14 @@ class ChatService:
                 self._remember(sid, text, answer, user_id=user_id)
         else:
             final_answer = final_state.get("final_answer", "")
+            # ---- FINAL SAFETY NET: strip any leaked verification tags ----
+            # This is the last gate before output reaches the user. Regardless
+            # of which internal path produced this answer (ReAct, aggregate,
+            # reflection revision, commander pass-through, error fallback),
+            # strip ALL verification markup here so it can NEVER leak to UI.
+            if final_answer:
+                final_answer = _strip_all_verification_tags(final_answer)
+            # ---- END SAFETY NET ----
             # ---- OUTPUT GUARD ----
             if final_answer and self._output_guard:
                 result = self._output_guard.check(final_answer, user_id=user_id)
