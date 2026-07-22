@@ -290,7 +290,10 @@ class ChatService:
         # Clean up stale checkpoint from previous call (P0-4: prevents reducer merge)
         self._cleanup_stale_checkpoint(sid, call_id)
 
-        initial_state = AgentState(user_message=text, session_id=sid, call_id=call_id)
+        initial_state = AgentState(
+            user_message=text, session_id=sid, call_id=call_id,
+            reflexion_max=self.config.reflexion_max_attempts,
+        )
 
         interrupted = False
         try:

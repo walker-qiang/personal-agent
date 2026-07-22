@@ -299,6 +299,7 @@ class TestReflectionNode:
         state = base_state(
             final_answer="当前持仓看起来不错，应该没问题。",
             user_message="当前持仓的配置偏离度是多少？",
+            reflexion_max=0,  # disable Reflexion retry, test revision path
         )
         result = reflection_node(state, config=make_config(llm, full_tools, agent_registry))
         assert "final_answer" in result

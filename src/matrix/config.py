@@ -54,6 +54,7 @@ ENV_RAG_EMBED_MODEL = "MATRIX_RAG_EMBED_MODEL"
 
 # MCP (Model Context Protocol) client config
 ENV_MCP_CONFIG_PATH = "MCP_CONFIG_PATH"
+ENV_REFLEXION_MAX_ATTEMPTS = "REFLEXION_MAX_ATTEMPTS"
 
 # ---- Defaults ----
 
@@ -135,6 +136,7 @@ class AgentConfig:
     rag_persist_dir: str = ""
     rag_embed_model: str = "BAAI/bge-small-zh-v1.5"
     mcp_config_path: str = ""
+    reflexion_max_attempts: int = 2  # 0 disables Reflexion loop
 
     @property
     def active_api_key(self) -> str:
@@ -256,6 +258,8 @@ def load_config() -> AgentConfig:
     if not mcp_config_path:
         mcp_config_path = str(root / "config" / "mcp_servers.json")
 
+    reflexion_max = clamp_int_env(ENV_REFLEXION_MAX_ATTEMPTS, 2, 0, 5)
+
     return AgentConfig(
         root_path=root,
         cache_path=cache_path,
@@ -292,6 +296,7 @@ def load_config() -> AgentConfig:
         rag_persist_dir=rag_persist_dir,
         rag_embed_model=rag_embed_model,
         mcp_config_path=mcp_config_path,
+        reflexion_max_attempts=reflexion_max,
     )
 
 

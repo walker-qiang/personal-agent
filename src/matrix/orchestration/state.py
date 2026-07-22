@@ -73,6 +73,15 @@ class AgentState(BaseModel):
     needs_summary: bool = False  # signal that chat.py should stream the final answer
     skip_reflection: bool = False  # skip reflection review (e.g. commander pass-through with tool data)
 
+    # Reflexion loop: self-reflection → retry with lessons learned
+    reflexion_attempts: int = 0       # current retry count
+    reflexion_max: int = 2            # max retries (0 = disabled, 1 = one retry, etc.)
+    reflexion_memory: list[str] = Field(
+        default_factory=list,
+        description="Self-reflections from previous attempts, newest last",
+    )
+    needs_reflexion_retry: bool = False  # signal from reflection → aggregate retry
+
     # Error
     error: str = ""
 

@@ -42,6 +42,7 @@ from ._helpers import (
     MAX_SUBTASK_ITERATIONS,
     MAX_SUBTASKS,
     REFLECTION_PROMPT,
+    REFLEXION_PROMPT,
     REVISE_PROMPT,
     EVALUATOR_INTERVAL,
 )
@@ -660,26 +661,44 @@ def _extract_answer(text: str) -> str | None:
 # ── Aggregate ────────────────────────────────────────────────────────────────
 
 def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Commander reviews all agent results and aggregates them into a final answer."""
+    """Commander reviews all agent results and aggregates them into a final answer.
+
+    On Reflexion retry, injects self-reflection memory as additional context
+    so the LLM can produce a better answer informed by past mistakes.
+    """
     cfg = _get_configurable(config)
     llm = cfg["llm"]
 
     user_msg = state["user_message"]
     agent_results = state.get("agent_results", [])
 
+    # On reflexion retry, inject reflection memory into the prompt
+    reflexion_memory = state.get("reflexion_memory", [])
+    is_retry = state.get("needs_reflexion_retry", False)
+
     if not agent_results:
-        return {"needs_summary": True}
+        result = {"needs_summary": True}
+        if is_retry:
+            result["needs_reflexion_retry"] = False  # clear retry flag
+        return result
 
     if len(agent_results) == 1 and agent_results[0].get("agent_id") == "commander":
         result_text = agent_results[0].get("result", "")
         if result_text:
-            return {"final_answer": result_text, "needs_summary": False, "skip_reflection": True}
-        return {"needs_summary": True, "skip_reflection": True}
+            result = {"final_answer": result_text, "needs_summary": False, "skip_reflection": True}
+        else:
+            result = {"needs_summary": True, "skip_reflection": True}
+        if is_retry:
+            result["needs_reflexion_retry"] = False
+        return result
 
     all_errors = all(r.get("error") for r in agent_results)
     if all_errors:
         errors = "\n".join(f"- {r['agent_id']}: {r['error']}" for r in agent_results)
-        return {"final_answer": f"所有领域专家执行失败：\n{errors}", "needs_summary": False}
+        result = {"final_answer": f"所有领域专家执行失败：\n{errors}", "needs_summary": False}
+        if is_retry:
+            result["needs_reflexion_retry"] = False
+        return result
 
     results_summary = []
     for r in agent_results:
@@ -695,10 +714,25 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         })
 
     history_context = _build_history_context(cfg.get("history", []))
-    system_prompt = COMMANDER_AGGREGATE_PROMPT.format(
-        question=user_msg,
-        results=json.dumps(results_summary, ensure_ascii=False, indent=2),
-    )
+
+    # Build system prompt, injecting reflection memory on retry
+    if is_retry and reflexion_memory:
+        reflections_text = "\n".join(f"- {r}" for r in reflexion_memory)
+        system_prompt = (
+            COMMANDER_AGGREGATE_PROMPT.format(
+                question=user_msg,
+                results=json.dumps(results_summary, ensure_ascii=False, indent=2),
+            )
+            + "\n\n## Self-Reflection (from previous attempt)\n"
+            + "Your previous answer had issues. Here is what you learned:\n"
+            + reflections_text
+            + "\n\nAddress these issues in your new answer."
+        )
+    else:
+        system_prompt = COMMANDER_AGGREGATE_PROMPT.format(
+            question=user_msg,
+            results=json.dumps(results_summary, ensure_ascii=False, indent=2),
+        )
 
     try:
         response = llm.complete(
@@ -716,20 +750,35 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
             if verification.total > 0:
                 final_answer = build_verified_output(final_answer, verification)
 
-        return {"final_answer": final_answer, "needs_summary": False}
+        result = {"final_answer": final_answer, "needs_summary": False}
+        if is_retry:
+            result["needs_reflexion_retry"] = False  # clear retry flag for next cycle
+        return result
     except LLMError as e:
         logger.error("aggregate_node LLM failed: %s", type(e).__name__)
         parts = []
         for r in agent_results:
             if r.get("result"):
                 parts.append(f"### {r['agent_id']}\n{r['result']}")
-        return {"final_answer": "\n\n".join(parts) if parts else "无法汇总结果。", "needs_summary": False}
+        result = {"final_answer": "\n\n".join(parts) if parts else "无法汇总结果。", "needs_summary": False}
+        if is_retry:
+            result["needs_reflexion_retry"] = False
+        return result
 
 
-# ── Reflection ───────────────────────────────────────────────────────────────
+# ── Reflection (Reflexion loop) ─────────────────────────────────────────────
 
 def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
-    """Internal quality check: verify → revise if needed → output clean answer."""
+    """Reflexion quality gate: evaluate → self-reflect → retry or finalize.
+
+    When the answer is insufficient and retry budget remains, this node
+    generates a self-reflection (lessons learned), stores it in state,
+    and signals the graph to route back to ``aggregate`` for a retry with
+    the reflection as additional context.
+
+    When the answer is good or retries are exhausted, it applies a final
+    best-effort revision and returns the cleaned answer.
+    """
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])
 
@@ -745,6 +794,9 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
     if len(answer) < 15 or answer.startswith("技能") or answer.startswith("所有领域专家"):
         return {}
 
+    max_attempts = state.get("reflexion_max", 0)
+    current_attempt = state.get("reflexion_attempts", 0)
+
     try:
         history_context = _build_history_context(cfg.get("history", []))
         data = llm.complete_json(
@@ -753,12 +805,50 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
             temperature=0.1,
         )
         if not isinstance(data, dict) or data.get("ok") is not False:
-            return {}
+            return {}  # Answer is acceptable
 
         issues = data.get("issues", [])
         if not issues:
             return {}
 
+        # ---- Reflexion loop: retry with self-reflection ----
+        if current_attempt < max_attempts:
+            # Generate self-reflection
+            prior = state.get("reflexion_memory", [])
+            prior_text = (
+                "Previous reflections:\n" + "\n".join(f"- {r}" for r in prior)
+                if prior else "No prior reflections."
+            )
+
+            reflection = llm.complete(
+                REFLEXION_PROMPT.format(
+                    question=user_msg,
+                    answer=answer,
+                    issues="\n".join(f"- {i}" for i in issues),
+                    prior_reflections=prior_text,
+                ),
+                [{"role": "user", "content": "Write your self-reflection."}],
+                temperature=0.2,
+            ).strip()
+
+            if reflection:
+                _push_event(cfg, "reflexion", {
+                    "attempt": current_attempt + 1,
+                    "issues": issues,
+                    "reflection": reflection[:200],
+                })
+                logger.info(
+                    "reflexion_retry: attempt=%d/%d issues=%d",
+                    current_attempt + 1, max_attempts, len(issues),
+                )
+                return {
+                    "reflexion_attempts": current_attempt + 1,
+                    "reflexion_memory": prior + [reflection],
+                    # Signal graph to route back to aggregate for retry
+                    "needs_reflexion_retry": True,
+                }
+
+        # ---- Max retries exhausted: best-effort revision ----
         revise_response = llm.complete(
             REVISE_PROMPT.format(
                 question=user_msg, answer=answer,
@@ -771,7 +861,7 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         if revised and len(revised) > 10:
             return {"final_answer": revised}
     except (LLMError, json.JSONDecodeError, ValueError) as e:
-        logger.warning("reflection_node revise LLM failed: %s", type(e).__name__)
+        logger.warning("reflection_node LLM failed: %s", type(e).__name__)
 
     return {}
 

@@ -110,7 +110,18 @@ def build_graph() -> StateGraph:
 
     # aggregate → reflection → end
     graph.add_edge("aggregate", "reflection")
-    graph.add_edge("reflection", END)
+    # reflection → END (with conditional Reflexion retry)
+    def _after_reflection(state: AgentState) -> str:
+        """Route after reflection: retry via aggregate or finish."""
+        if state.get("needs_reflexion_retry"):
+            return "aggregate"
+        return END
+
+    graph.add_conditional_edges(
+        "reflection",
+        _after_reflection,
+        {"aggregate": "aggregate", END: END},
+    )
 
     return graph
 

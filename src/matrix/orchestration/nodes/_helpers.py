@@ -270,6 +270,37 @@ Please rewrite the answer to fix these issues. Keep the same language and format
 Return ONLY the corrected answer, no explanations."""
 
 
+REFLEXION_PROMPT = """You are a self-reflecting AI. Your previous attempt to answer a user's question was deemed insufficient.
+
+Analyze what went wrong and write a concise self-reflection that will help the next attempt succeed.
+
+User question: {question}
+Previous answer: {answer}
+Issues identified:
+{issues}
+
+{prior_reflections}
+
+Write a self-reflection (max 3 sentences) covering:
+1. What specific information was missing or wrong
+2. What approach should be tried differently
+3. What to focus on in the next attempt
+
+Return ONLY the self-reflection text, no JSON, no formatting."""
+
+
+REFLEXION_RETRY_PROMPT = """You are re-attempting to answer a user's question after self-reflection.
+
+Your previous answer was not good enough. Here is what you learned:
+
+{reflections}
+
+User question: {question}
+
+Provide a better answer this time, addressing the issues identified in your reflections.
+Use the available tool results and data. Reply in the same language as the user."""
+
+
 # ---- Helpers ----
 
 
