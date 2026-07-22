@@ -19,7 +19,7 @@ from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
 from ..anti_hallucination import (
     verify_all_claims, build_verified_output, VerificationResult,
-    _VERIF_BLOCK_RE,
+    _strip_all_verification_tags,
 )
 from ..state import AgentState
 
@@ -797,9 +797,10 @@ def _build_react_final_answer(
     if verification.total > 0:
         answer = build_verified_output(answer, verification)
     else:
-        # Always strip [VERIFICATION] block from user-facing output,
-        # even when parsing found no claims (e.g. LLM formatted it incorrectly).
-        answer = _VERIF_BLOCK_RE.sub("", answer).strip()
+        # Always strip ALL verification tags from user-facing output,
+        # even when parsing found no claims (e.g. LLM formatted it incorrectly,
+        # forgot closing tags, or emitted loose [CLAIM]/[EVIDENCE] tags).
+        answer = _strip_all_verification_tags(answer)
 
     new_result = {
         "agent_id": agent_id,
