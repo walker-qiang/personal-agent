@@ -320,6 +320,10 @@ def _trace(cfg: dict[str, Any], event: dict[str, Any]) -> None:
 def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
     """Record a span: start and end events with latency.
 
+    Dual-mode tracing:
+    1. Legacy events → TraceStore.record() (backward compatible)
+    2. OTel spans → TraceStore.start_span()/end_span() (OTel standardized)
+
     Usage:
         with _trace_span(cfg, "react_llm", session_id=..., agent_id=...,
                          parent_span_id=...) as span_id:
@@ -332,6 +336,7 @@ def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
     agent_id = kwargs.get("agent_id", "")
     iteration = kwargs.get("iteration", 0)
 
+    # Legacy event: span_start
     _trace(cfg, {
         "session_id": session_id,
         "event_type": "span_start",
@@ -343,11 +348,27 @@ def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
         "arguments": {"iteration": iteration},
     })
 
+    # OTel span: start
+    trace_store = cfg.get("trace")
+    otel_span = None
+    if trace_store is not None and hasattr(trace_store, "start_span"):
+        try:
+            otel_span = trace_store.start_span(
+                name,
+                session_id=session_id,
+                agent_id=agent_id,
+                iteration=iteration,
+            )
+        except Exception:
+            otel_span = None
+
     started = time.perf_counter()
     try:
         yield span_id
     finally:
         elapsed = round((time.perf_counter() - started) * 1000, 3)
+
+        # Legacy event: span_end
         _trace(cfg, {
             "session_id": session_id,
             "event_type": "span_end",
@@ -358,6 +379,13 @@ def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
             "elapsed_ms": elapsed,
             "ts": _now_ts(),
         })
+
+        # OTel span: end
+        if otel_span is not None and trace_store is not None:
+            try:
+                trace_store.end_span(otel_span)
+            except Exception:
+                pass
 
 
 

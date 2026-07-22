@@ -2,25 +2,64 @@
 
 Replaces the old JSONL TraceLogger with SQLite-backed structured storage
 that supports querying by session_id, event type, and time range.
+
+Now with OpenTelemetry-standardized span storage and OTLP export support.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
+from .otel import (
+    Span,
+    Tracer,
+    OTLPExporter,
+    TraceContext,
+    normalize_legacy_event,
+    event_to_span_kind,
+    event_to_status,
+    STATUS_UNSET,
+    SPAN_KIND_INTERNAL,
+)
+
+logger = logging.getLogger("matrix.observability")
+
 
 class TraceStore:
-    """SQLite-backed trace event store. Thread-safe, WAL mode."""
+    """SQLite-backed trace event store with OTel-standardized span support.
 
-    def __init__(self, db_path: Path, sanitizer: object | None = None):
+    Dual-mode storage:
+    1. Legacy events: ``record()`` stores flat event dicts (backward compatible)
+    2. OTel spans: ``record_span()`` stores OTel Span objects with full
+       trace context (trace_id, span_id, parent_span_id, attributes, etc.)
+
+    OTel spans can be exported to external backends via OTLP/JSON.
+    """
+
+    def __init__(
+        self,
+        db_path: Path,
+        sanitizer: object | None = None,
+        *,
+        service_name: str = "matrix-agent",
+        otlp_endpoint: str = "",
+        otlp_export: bool = False,
+    ):
         self.db_path = db_path
         self._lock = threading.Lock()
         self._sanitizer = sanitizer  # TraceSanitizer or None
+        self._tracer = Tracer(service_name=service_name)
+        self._exporter = OTLPExporter(
+            endpoint=otlp_endpoint if otlp_export else "",
+            service_name=service_name,
+        )
+        self._otlp_export = otlp_export
         self._init_db()
 
     # ---- public API ----
@@ -57,6 +96,120 @@ class TraceStore:
                 ),
             )
             conn.commit()
+
+    def record_span(self, span: Span) -> None:
+        """Record an OTel Span to SQLite and optionally export via OTLP.
+
+        The span is stored in a dedicated ``otel_spans`` table with
+        standard OTel fields, while also being indexed for querying
+        by trace_id, session_id, etc.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            attrs_json = json.dumps(span.attributes, ensure_ascii=False, default=str)
+            events_json = json.dumps(span.events, ensure_ascii=False, default=str)
+            resource_json = json.dumps(span.resource, ensure_ascii=False, default=str)
+
+            # Extract session.id from attributes for indexing
+            session_id = span.attributes.get("session.id", "")
+
+            conn.execute(
+                """INSERT INTO otel_spans
+                   (trace_id, span_id, parent_span_id, name, kind,
+                    start_time_unix_nano, end_time_unix_nano,
+                    status_code, status_message,
+                    attributes, events, resource, session_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    span.trace_id,
+                    span.span_id,
+                    span.parent_span_id,
+                    span.name,
+                    span.kind,
+                    span.start_time_unix_nano,
+                    span.end_time_unix_nano,
+                    span.status_code,
+                    span.status_message,
+                    attrs_json,
+                    events_json,
+                    resource_json,
+                    session_id,
+                ),
+            )
+            conn.commit()
+
+        # Async OTLP export (non-blocking)
+        if self._otlp_export:
+            try:
+                self._exporter.export([span])
+            except Exception as e:
+                logger.debug("otlp_export_error: %s", e)
+
+    @property
+    def tracer(self) -> Tracer:
+        """Access the internal OTel Tracer for creating spans."""
+        return self._tracer
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        session_id: str = "",
+        agent_id: str = "",
+        kind: int = SPAN_KIND_INTERNAL,
+        **attributes: Any,
+    ) -> Span:
+        """Start an OTel span. Use ``end_span()`` to finalize.
+
+        Convenience method that delegates to the internal Tracer.
+        """
+        return self._tracer.start_span(
+            name, session_id=session_id, agent_id=agent_id,
+            kind=kind, **attributes,
+        )
+
+    def end_span(self, span: Span, *, status: int | None = None, message: str = "") -> None:
+        """End a span and record it to SQLite + OTLP.
+
+        Args:
+            span: The span to end
+            status: OTel StatusCode (optional, defaults to OK if no error)
+            message: Status message (for errors)
+        """
+        self._tracer.end_span(span)
+        if status is not None:
+            span.set_status(status, message)
+        elif span.status_code == STATUS_UNSET:
+            span.set_status(1)  # STATUS_OK
+        self.record_span(span)
+
+    def query_spans(
+        self,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query OTel spans by trace_id or session_id."""
+        conditions = []
+        params: list[Any] = []
+        if trace_id:
+            conditions.append("trace_id = ?")
+            params.append(trace_id)
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        conn = self._get_conn()
+        rows = conn.execute(
+            f"SELECT * FROM otel_spans {where} "
+            "ORDER BY start_time_unix_nano DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        return [_span_row_to_dict(r) for r in rows]
+
+    def export_otlp(self) -> list[dict[str, Any]]:
+        """Get buffered OTLP exports (for debugging/testing)."""
+        return self._exporter.get_buffered()
 
     def query(
         self,
@@ -159,7 +312,7 @@ class TraceStore:
         _add_column_if_missing(conn, "trace_events", "span_id", "TEXT")
         _add_column_if_missing(conn, "trace_events", "parent_span_id", "TEXT")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trace_session ON trace_events(session_id)"
+            "CREATE INDEX IF NOT EXISTS idx_trace_span ON trace_events(span_id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trace_ts ON trace_events(ts)"
@@ -169,6 +322,30 @@ class TraceStore:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trace_span ON trace_events(span_id)"
+        )
+        # OTel spans table (standardized span storage)
+        conn.execute("""CREATE TABLE IF NOT EXISTS otel_spans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            span_id TEXT NOT NULL,
+            parent_span_id TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
+            kind INTEGER NOT NULL DEFAULT 0,
+            start_time_unix_nano INTEGER NOT NULL,
+            end_time_unix_nano INTEGER NOT NULL DEFAULT 0,
+            status_code INTEGER NOT NULL DEFAULT 0,
+            status_message TEXT NOT NULL DEFAULT '',
+            attributes TEXT NOT NULL DEFAULT '{}',
+            events TEXT NOT NULL DEFAULT '[]',
+            resource TEXT NOT NULL DEFAULT '{}',
+            session_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_otel_trace ON otel_spans(trace_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_otel_session ON otel_spans(session_id)"
         )
         conn.commit()
 
@@ -188,10 +365,24 @@ class TraceLogger(TraceStore):
     TraceLogger continues to work without changes.
     """
 
-    def __init__(self, path: Path, sanitizer: object | None = None):
+    def __init__(
+        self,
+        path: Path,
+        sanitizer: object | None = None,
+        *,
+        service_name: str = "matrix-agent",
+        otlp_endpoint: str = "",
+        otlp_export: bool = False,
+    ):
         # Convert trace.jsonl path to trace.db path
         db_path = path.with_suffix(".db")
-        super().__init__(db_path, sanitizer=sanitizer)
+        super().__init__(
+            db_path,
+            sanitizer=sanitizer,
+            service_name=service_name,
+            otlp_endpoint=otlp_endpoint,
+            otlp_export=otlp_export,
+        )
 
 
 # ---- helpers ----
@@ -241,3 +432,23 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, co
     cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
+def _span_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert an otel_spans row to a dict, parsing JSON fields."""
+    d = dict(row)
+    for field in ("attributes", "events", "resource"):
+        val = d.get(field)
+        if val and isinstance(val, str):
+            try:
+                d[field] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    # Add convenience fields
+    start = d.get("start_time_unix_nano", 0)
+    end = d.get("end_time_unix_nano", 0)
+    if start and end:
+        d["elapsed_ms"] = round((end - start) / 1e6, 3)
+    else:
+        d["elapsed_ms"] = 0.0
+    return d

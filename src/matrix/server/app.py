@@ -47,8 +47,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- GUARDRAILS ----
     guard_config = GuardConfig.from_env()
     guardrails = GuardrailPipeline(guard_config)
-    # Wire TraceSanitizer to TraceLogger
-    trace = TraceLogger(config.trace_path, sanitizer=guardrails.privacy)
+    # Wire TraceSanitizer to TraceLogger (now with OTel support)
+    trace = TraceLogger(
+        config.trace_path,
+        sanitizer=guardrails.privacy,
+        service_name="matrix-agent",
+        otlp_endpoint=config.otel_exporter_endpoint,
+        otlp_export=config.otel_export,
+    )
     # Wire ToolGuard to ToolRegistry
     if guardrails.tool:
         tools_registry.set_guard(guardrails.tool)

@@ -55,6 +55,8 @@ ENV_RAG_EMBED_MODEL = "MATRIX_RAG_EMBED_MODEL"
 # MCP (Model Context Protocol) client config
 ENV_MCP_CONFIG_PATH = "MCP_CONFIG_PATH"
 ENV_REFLEXION_MAX_ATTEMPTS = "REFLEXION_MAX_ATTEMPTS"
+ENV_OTEL_EXPORTER_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+ENV_OTEL_EXPORT = "OTEL_EXPORT"
 
 # ---- Defaults ----
 
@@ -137,6 +139,8 @@ class AgentConfig:
     rag_embed_model: str = "BAAI/bge-small-zh-v1.5"
     mcp_config_path: str = ""
     reflexion_max_attempts: int = 2  # 0 disables Reflexion loop
+    otel_exporter_endpoint: str = ""  # OTLP endpoint (e.g. http://localhost:4318/v1/traces)
+    otel_export: bool = False  # Enable OTLP export
 
     @property
     def active_api_key(self) -> str:
@@ -260,6 +264,10 @@ def load_config() -> AgentConfig:
 
     reflexion_max = clamp_int_env(ENV_REFLEXION_MAX_ATTEMPTS, 2, 0, 5)
 
+    # OTel export
+    otel_endpoint = os.environ.get(ENV_OTEL_EXPORTER_ENDPOINT, "").strip()
+    otel_export = os.environ.get(ENV_OTEL_EXPORT, "").strip().lower() in ("1", "true", "yes")
+
     return AgentConfig(
         root_path=root,
         cache_path=cache_path,
@@ -297,6 +305,8 @@ def load_config() -> AgentConfig:
         rag_embed_model=rag_embed_model,
         mcp_config_path=mcp_config_path,
         reflexion_max_attempts=reflexion_max,
+        otel_exporter_endpoint=otel_endpoint,
+        otel_export=otel_export,
     )
 
 
