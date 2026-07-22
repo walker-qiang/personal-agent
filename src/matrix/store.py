@@ -275,13 +275,15 @@ class SessionStore:
             conn.commit()
 
     def get_history(self, session_id: str, max_turns: int = 8) -> list[dict[str, str]]:
-        """Return the last N turns of conversation history."""
+        """Return the last N turns of conversation history (most recent first)."""
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT role, content FROM messages "
-                "WHERE session_id=? ORDER BY created_at ASC LIMIT ?",
+                "WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
                 (session_id, max_turns * 2),
             ).fetchall()
+        # Reverse to restore chronological order
+        rows = list(reversed(rows))
         return [{"role": r[0], "content": r[1]} for r in rows]
 
     def reset(self, session_id: str) -> None:
@@ -326,6 +328,37 @@ class SessionStore:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def get_all_memories(self, user_id: str) -> list[dict]:
+        """Return all memories with full metadata for evolution processing.
+
+        Returns list of dicts with keys: key, value, memory_type, created_at, updated_at
+        """
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value, memory_type, created_at, updated_at "
+                "FROM user_profile WHERE user_id=? ORDER BY updated_at DESC",
+                (user_id,),
+            ).fetchall()
+        return [
+            {
+                "key": r[0],
+                "value": r[1],
+                "memory_type": r[2],
+                "created_at": r[3],
+                "updated_at": r[4],
+            }
+            for r in rows
+        ]
+
+    def count_memories(self, user_id: str) -> int:
+        """Return total number of memories for a user."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT COUNT(*) FROM user_profile WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
     def get_policies(self, user_id: str) -> dict[str, str]:
         """Return policy-type memories (hard rules, highest priority)."""
         with self._lock:
@@ -364,15 +397,15 @@ class SessionStore:
         parts: list[str] = []
         if policies:
             parts.append("## Hard Rules (DO NOT override these)")
-            for k, v, weight in policies:
-                age_days = (now - self._get_updated_at(user_id, k)) / 86400
+            for k, v, weight, updated_at in policies:
+                age_days = (now - updated_at) / 86400
                 age_hint = ""
                 if age_days > 90:
                     age_hint = f" [established {int(age_days)}d ago]"
                 parts.append(f"- [HARD RULE] {k}: {v}{age_hint}")
         if preferences:
             parts.append("\n## User Preferences")
-            for k, v, weight in preferences:
+            for k, v, weight, _ in preferences:
                 if weight < 0.5:
                     parts.append(f"- [PREFERENCE, fading] {k}: {v}")
                 else:
@@ -381,7 +414,7 @@ class SessionStore:
 
     def _get_decayed_memories(
         self, user_id: str, memory_type: str, now: float,
-    ) -> list[tuple[str, str, float]]:
+    ) -> list[tuple[str, str, float, float]]:
         """Get memories with time-decay weights applied.
 
         Decay formula: weight = 0.5^(age / half_life)
@@ -390,7 +423,7 @@ class SessionStore:
         - age = 60 days → weight = 0.25
         - age >= 120 days → excluded (weight < 0.0625) unless policy
 
-        Returns list of (key, value, weight) sorted by weight descending.
+        Returns list of (key, value, weight, updated_at) sorted by weight descending.
         Policies never decay below 1.0.
         """
         with self._lock:
@@ -400,16 +433,16 @@ class SessionStore:
                 (user_id, memory_type),
             ).fetchall()
 
-        results: list[tuple[str, str, float]] = []
+        results: list[tuple[str, str, float, float]] = []
         for key, value, updated_at in rows:
             age = now - updated_at
             if memory_type == "policy":
                 weight = 1.0  # Policies never decay
             else:
-                weight = 2.0 ** (-age / MEMORY_HALF_LIFE)
+                weight = 2.0 ** (-age / self.MEMORY_HALF_LIFE)
                 if weight < 0.0625:  # 4 half-lives = 120 days
                     continue  # Exclude very stale memories
-            results.append((key, value, round(weight, 3)))
+            results.append((key, value, round(weight, 3), updated_at))
 
         results.sort(key=lambda x: x[2], reverse=True)
         return results

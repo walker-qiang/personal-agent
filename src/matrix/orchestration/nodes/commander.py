@@ -24,7 +24,6 @@ from ._helpers import (
     _check_early_stop,
     _classify_query_factuality,
     _evaluate_sufficiency,
-    _extract_json,
     _extract_media_urls,
     _fix_media_answer,
     _get_configurable,

@@ -52,6 +52,9 @@ ENV_RAG_DOCS_PATH = "MATRIX_RAG_DOCS_PATH"
 ENV_RAG_PERSIST_DIR = "MATRIX_RAG_PERSIST_DIR"
 ENV_RAG_EMBED_MODEL = "MATRIX_RAG_EMBED_MODEL"
 
+# MCP (Model Context Protocol) client config
+ENV_MCP_CONFIG_PATH = "MCP_CONFIG_PATH"
+
 # ---- Defaults ----
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
@@ -131,6 +134,7 @@ class AgentConfig:
     rag_docs_path: str = ""
     rag_persist_dir: str = ""
     rag_embed_model: str = "BAAI/bge-small-zh-v1.5"
+    mcp_config_path: str = ""
 
     @property
     def active_api_key(self) -> str:
@@ -247,6 +251,11 @@ def load_config() -> AgentConfig:
         rag_persist_dir = str(root / "var" / "rag")
     rag_embed_model = os.environ.get(ENV_RAG_EMBED_MODEL, "BAAI/bge-small-zh-v1.5").strip() or "BAAI/bge-small-zh-v1.5"
 
+    # MCP config path: MCP_CONFIG_PATH > default
+    mcp_config_path = os.environ.get(ENV_MCP_CONFIG_PATH, "").strip()
+    if not mcp_config_path:
+        mcp_config_path = str(root / "config" / "mcp_servers.json")
+
     return AgentConfig(
         root_path=root,
         cache_path=cache_path,
@@ -282,6 +291,7 @@ def load_config() -> AgentConfig:
         rag_docs_path=rag_docs_path,
         rag_persist_dir=rag_persist_dir,
         rag_embed_model=rag_embed_model,
+        mcp_config_path=mcp_config_path,
     )
 
 

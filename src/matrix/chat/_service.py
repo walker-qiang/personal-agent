@@ -29,7 +29,8 @@ from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..context import ToolResultRefStore, make_get_stored_data_tool
-from ._utils import (
+from ..memory import EvolutionConfig, MemoryEvolution
+from ._utils import(
     MEMORY_EXTRACTION_PROMPT,
     _drain_queue,
     preview_json,
@@ -103,7 +104,16 @@ class ChatService:
         self._ref_store = ToolResultRefStore(
             config.root_path / "var" / "agent" / "tool_results.db"
         )
-        self._wm_insights: list[str] = []
+        # Per-user working memory insights (user_id → list[str])
+        self._wm_insights: dict[str, list[str]] = {}
+        # Memory evolution pipeline (consolidation, conflict resolution, forgetting)
+        self._evolution = MemoryEvolution(
+            self.store,
+            config=EvolutionConfig(
+                enable_llm_consolidation=self.config.llm_available,
+            ),
+            llm=self._pipeline_llm if self.config.llm_available else None,
+        )
         self._register_internal_tools()
 
         # Configure rate limiter for LLM API calls
@@ -292,7 +302,7 @@ class ChatService:
                 len(text),
             )
 
-            graph_config = self._build_graph_config(sid, session_llm, history, text)
+            graph_config = self._build_graph_config(sid, session_llm, history, text, user_id)
 
             try:
                 final_state = yield from self._stream_graph_events(
@@ -363,15 +373,17 @@ class ChatService:
 
     # ---- Internal ----
 
-    def _handle_working_memory(self, action: str, content: str) -> dict:
+    def _handle_working_memory(self, action: str, content: str, user_id: str = "default") -> dict:
         """Handle working_memory tool calls from the LLM.
 
         Used by the LLM to record key insights that survive context compression.
+        Insights are isolated per user_id to prevent cross-user leakage.
         """
         if action == "add_insight" and content:
-            self._wm_insights.insert(0, content)
-            self._wm_insights = self._wm_insights[:20]  # cap at 20 insights
-            return {"ok": True, "recorded": content, "total_insights": len(self._wm_insights)}
+            insights = self._wm_insights.setdefault(user_id, [])
+            insights.insert(0, content)
+            self._wm_insights[user_id] = insights[:20]  # cap at 20 insights
+            return {"ok": True, "recorded": content, "total_insights": len(self._wm_insights[user_id])}
         return {"ok": False, "error": f"Unknown action: {action}"}
 
     def _handle_step_control(self, action: str, reason: str = "") -> dict:
@@ -637,7 +649,7 @@ class ChatService:
 
     def _build_graph_config(
         self, sid: str, session_llm: LLMClient, history: list[dict],
-        user_message: str = "",
+        user_message: str = "", user_id: str = "default",
     ) -> dict[str, Any]:
         """Build the LangGraph config dict for a streaming session."""
         return {
@@ -652,7 +664,7 @@ class ChatService:
                 "ref_store": self._ref_store,
                 "working_memory": {
                     "pinned": user_message,
-                    "insights": list(self._wm_insights),
+                    "insights": list(self._wm_insights.get(user_id, [])),
                 },
             },
             "thread_id": sid,
@@ -761,6 +773,16 @@ class ChatService:
                 self.store.sync_profile_to_file(user_id, str(json_path))
         except Exception:
             pass  # Memory extraction is best-effort
+
+        # Run memory evolution (conflict resolution, consolidation, forgetting)
+        try:
+            report = self._evolution.evolve(user_id)
+            if report.total_before != report.total_after:
+                logger.info(
+                    "memory_evolved: user=%s %s", user_id, str(report),
+                )
+        except Exception:
+            pass  # Evolution is best-effort
 
     def _stream_summarize(
         self, state: dict[str, Any], session_id: str, original_text: str, llm: LLMClient,

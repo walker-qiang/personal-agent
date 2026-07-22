@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Wire ToolGuard to ToolRegistry
     if guardrails.tool:
         tools_registry.set_guard(guardrails.tool)
+    # Wire IndirectInjectionGuard to ToolRegistry
+    if guardrails.injection:
+        tools_registry.set_injection_guard(guardrails.injection)
     # ---- END GUARDRAILS ----
 
     app.state.tools = tools_registry
@@ -115,7 +118,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("rag: initialization failed (will run without RAG): %s", exc)
 
+    # ---- MCP CLIENT ----
+    # Connect to external MCP servers and register their tools
+    app.state.mcp_client = None
+    try:
+        from ..tools.mcp import init_mcp_client, register_mcp_tools
+
+        mcp_manager = init_mcp_client(config.mcp_config_path)
+        if mcp_manager is not None:
+            mcp_count = register_mcp_tools(tools_registry, mcp_manager)
+            app.state.mcp_client = mcp_manager
+            logger.info("mcp: %d tools registered", mcp_count)
+    except Exception as exc:
+        logger.warning("mcp: initialization failed (will run without MCP): %s", exc)
+    # ---- END MCP CLIENT ----
+
     yield
+
+    # ---- Cleanup ----
+    # Disconnect MCP servers on shutdown
+    if app.state.mcp_client is not None:
+        try:
+            app.state.mcp_client.stop()
+        except Exception as exc:
+            logger.warning("mcp: shutdown error: %s", exc)
 
 
 def create_app(config: AgentConfig | None = None) -> FastAPI:
@@ -167,6 +193,10 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(provider.router)
     app.include_router(trace.router)
+
+    # MCP server management routes
+    from .routes import mcp as mcp_routes
+    app.include_router(mcp_routes.router)
 
     # Auth middleware — verify JWT on protected routes
     app.add_middleware(AuthMiddleware)

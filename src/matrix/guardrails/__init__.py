@@ -1,10 +1,11 @@
 """Security guardrails for Matrix Agent.
 
-Four independent guard layers:
-- InputGuard:   prompt injection / data exfiltration / role confusion detection
-- OutputGuard:  PII redaction (phone, ID card, email, bank card, API key)
-- ToolGuard:    tool blacklist, parameter validation, path traversal, rate limiting
-- TraceSanitizer: PII redaction before trace persistence
+Five independent guard layers:
+- InputGuard:              prompt injection / data exfiltration / role confusion detection
+- OutputGuard:             PII redaction (phone, ID card, email, bank card, API key)
+- ToolGuard:               tool blacklist, parameter validation, path traversal, rate limiting
+- IndirectInjectionGuard:  detect & neutralise prompt injection in tool results
+- TraceSanitizer:          PII redaction before trace persistence
 
 All guards are fail-open by default — guard exceptions do not block requests.
 """
@@ -17,6 +18,11 @@ from .input_guard import InputGuard, InputResult
 from .output_guard import OutputGuard, OutputResult
 from .privacy import TraceSanitizer
 from .tool_guard import ToolGuard, ToolGuardError
+from .indirect_injection_guard import (
+    IndirectInjectionGuard,
+    IndirectInjectionResult,
+    InjectionFinding,
+)
 
 
 @dataclass
@@ -32,6 +38,10 @@ class GuardConfig:
     tool_blacklist: list[str] = field(default_factory=list)
     trace_privacy: bool = True
     max_message_len: int = 51200  # 50KB
+    # Indirect injection guard
+    injection_enabled: bool = True
+    injection_block_mode: bool = False  # False = sanitise, True = block
+    injection_check_all_tools: bool = False  # False = only high-risk tools
 
     @classmethod
     def from_env(cls) -> GuardConfig:
@@ -66,17 +76,21 @@ class GuardConfig:
             tool_blacklist=blacklist,
             trace_privacy=_bool_env("GUARD_TRACE_PRIVACY", True),
             max_message_len=_int_env("GUARD_MAX_MESSAGE_LEN", 51200),
+            injection_enabled=_bool_env("GUARD_INJECTION_ENABLED", True),
+            injection_block_mode=_bool_env("GUARD_INJECTION_BLOCK_MODE", False),
+            injection_check_all_tools=_bool_env("GUARD_INJECTION_CHECK_ALL_TOOLS", False),
         )
 
 
 class GuardrailPipeline:
-    """Unified entry point: assembles all four guards on demand."""
+    """Unified entry point: assembles all guards on demand."""
 
     def __init__(self, config: GuardConfig | None = None):
         self.config = config or GuardConfig.from_env()
         self.input = InputGuard(self.config) if self.config.input_enabled else None
         self.output = OutputGuard(self.config) if self.config.output_enabled else None
         self.tool = ToolGuard(self.config) if self.config.tool_enabled else None
+        self.injection = IndirectInjectionGuard(self.config) if self.config.injection_enabled else None
         self.privacy = TraceSanitizer() if self.config.trace_privacy else None
 
 
@@ -89,5 +103,8 @@ __all__ = [
     "OutputResult",
     "ToolGuard",
     "ToolGuardError",
+    "IndirectInjectionGuard",
+    "IndirectInjectionResult",
+    "InjectionFinding",
     "TraceSanitizer",
 ]

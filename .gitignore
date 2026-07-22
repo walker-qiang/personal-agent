@@ -27,3 +27,4 @@ htmlcov/
 
 # Node
 node_modules/tsconfig.tsbuildinfo
+config/mcp_servers.json

@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from ..llm import LLMClient
-from ..llm.truncate import estimate_tokens
 
 logger = logging.getLogger("matrix.context")
 
@@ -163,31 +161,6 @@ def build_handoff_message(handoff: dict[str, Any]) -> dict[str, Any]:
     return {"role": "system", "content": "\n".join(parts)}
 
 
-def should_compact(
-    messages: list[dict[str, Any]],
-    system_prompt: str = "",
-    context_window: int = CONTEXT_WINDOW_TOKENS,
-) -> bool:
-    """Check if compaction should be triggered.
-
-    Returns True if estimated token usage >= 85% of context window.
-    """
-    if len(messages) <= MIN_PRESERVE_MESSAGES:
-        return False
-
-    total_tokens = estimate_tokens(system_prompt)
-    for msg in messages:
-        content = msg.get("content", "")
-        total_tokens += estimate_tokens(str(content))
-
-    usage_ratio = total_tokens / context_window
-    logger.debug(
-        "compaction_check: estimated_tokens=%d usage=%.1f%%",
-        total_tokens, usage_ratio * 100,
-    )
-    return usage_ratio >= COMPACTION_THRESHOLD
-
-
 def compact_messages(
     messages: list[dict[str, Any]],
     user_goal: str,
@@ -272,38 +245,3 @@ def _fallback_truncate(
         ),
     }
     return [marker] + to_keep
-
-
-def estimate_usage_ratio(
-    messages: list[dict[str, Any]],
-    system_prompt: str = "",
-    context_window: int = CONTEXT_WINDOW_TOKENS,
-) -> float:
-    """Estimate current token usage as a ratio of context window."""
-    total = estimate_tokens(system_prompt)
-    for msg in messages:
-        content = msg.get("content", "")
-        total += estimate_tokens(str(content))
-    return min(total / context_window, 1.0)
-
-
-def extract_ref_ids(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Extract all __refId references from tool messages.
-
-    Used by the compaction prompt to ensure data refs are not lost.
-    """
-    refs: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    for msg in messages:
-        if msg.get("role") != "tool":
-            continue
-        content = str(msg.get("content", ""))
-        # Look for __refId patterns
-        for match in re.finditer(r'"__refId"\s*:\s*"([^"]+)"', content):
-            ref_id = match.group(1)
-            if ref_id not in seen:
-                seen.add(ref_id)
-                refs.append({"refId": ref_id, "tool": "?", "summary": ""})
-
-    return refs
