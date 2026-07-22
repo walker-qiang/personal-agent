@@ -70,6 +70,22 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     history_context = _build_history_context(cfg.get("history", []))
     task_content = history_context + f"请完成以下任务：{task}"
 
+    # Build initial message with attachments if present
+    attachments = cfg.get("attachments", [])
+    if attachments:
+        content_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": task_content},
+        ]
+        for att in attachments:
+            if att.get("type") == "image":
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{att['mime_type']};base64,{att['base64']}"},
+                })
+        react_messages: list[dict[str, Any]] = [{"role": "user", "content": content_blocks}]
+    else:
+        react_messages = [{"role": "user", "content": task_content}]
+
     system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
         agent_name=agent_def.name,
         persona=agent_def.persona,
@@ -84,7 +100,7 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), state.get("messages", []))
 
     react = {
-        "messages": [{"role": "user", "content": task_content}],
+        "messages": react_messages,
         "system": system_prompt,
         "tools_json": llm_tools,
         "question": state["user_message"],

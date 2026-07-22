@@ -150,6 +150,7 @@ def agent_config(tmp_cache_path: Path) -> AgentConfig:
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
+        agnes_api_key="test-key",
     )
 
 

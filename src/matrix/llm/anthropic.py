@@ -287,7 +287,37 @@ class AnthropicClient:
             elif role == "assistant":
                 converted.append({"role": "assistant", "content": content})
             elif role == "user":
-                converted.append({"role": "user", "content": content})
+                if isinstance(content, list):
+                    # Multi-modal user message: convert content blocks
+                    anthropic_blocks = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                anthropic_blocks.append({"type": "text", "text": block.get("text", "")})
+                            elif block.get("type") == "image_url":
+                                image_url = block.get("image_url", {})
+                                url = image_url.get("url", "")
+                                # Handle data: URLs (base64 encoded)
+                                if url.startswith("data:"):
+                                    # Parse data:image/png;base64,xxxxx
+                                    header, b64_data = url.split(",", 1)
+                                    media_type = header.split(":")[1].split(";")[0] if ":" in header else "image/png"
+                                    anthropic_blocks.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": b64_data,
+                                        },
+                                    })
+                                else:
+                                    # URL-based image (not supported by Anthropic, skip)
+                                    anthropic_blocks.append({"type": "text", "text": f"[图片: {url}]"})
+                            else:
+                                anthropic_blocks.append(block)
+                    converted.append({"role": "user", "content": anthropic_blocks})
+                else:
+                    converted.append({"role": "user", "content": content})
             else:
                 converted.append({"role": "user", "content": str(content)})
 

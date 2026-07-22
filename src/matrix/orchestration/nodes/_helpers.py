@@ -454,7 +454,15 @@ def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) ->
     lines = []
     for h in recent:
         role_label = "用户" if h["role"] == "user" else "助手"
-        lines.append(f"[{role_label}]: {h['content'][:300]}")
+        content = h.get("content", "")
+        if isinstance(content, list):
+            # Multi-modal content: extract text parts only
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            content = " ".join(text_parts)
+        lines.append(f"[{role_label}]: {content[:300]}")
     return "对话历史：\n" + "\n".join(lines) + "\n\n"
 
 

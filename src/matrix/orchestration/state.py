@@ -73,6 +73,12 @@ class AgentState(BaseModel):
     needs_summary: bool = False  # signal that chat.py should stream the final answer
     skip_reflection: bool = False  # skip reflection review (e.g. commander pass-through with tool data)
 
+    # Multi-modal attachments (images for vision model input)
+    attachments: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Uploaded image attachments: [{type, mime_type, base64}]",
+    )
+
     # Reflexion loop: self-reflection → retry with lessons learned
     reflexion_attempts: int = 0       # current retry count
     reflexion_max: int = 2            # max retries (0 = disabled, 1 = one retry, etc.)

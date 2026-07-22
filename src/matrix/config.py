@@ -115,8 +115,8 @@ class AgentConfig:
     skills_base_dir: Path  # root dir for skills/{common,investment,general}
     host: str
     port: int
-    agent_provider: str = "deepseek"
-    agent_model: str = DEFAULT_DEEPSEEK_MODEL
+    agent_provider: str = "agnes"
+    agent_model: str = DEFAULT_AGNES_MODEL
     agent_max_tokens: int = 8192
     agent_model_timeout_sec: float = 45.0
     deepseek_api_key: str = ""
@@ -208,7 +208,7 @@ def load_config() -> AgentConfig:
         skills_base_dir = root / ".." / "personal-assets" / "技能"
 
     host, port = load_bind_addr()
-    provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
+    provider = os.environ.get(ENV_AGENT_PROVIDER, "agnes").strip().lower() or "agnes"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
 
     # Log level: map string to int

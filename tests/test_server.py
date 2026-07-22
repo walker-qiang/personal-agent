@@ -25,6 +25,9 @@ def client(tmp_cache_path: Path):
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
+        agnes_api_key="test-key",
+        agent_provider="deepseek",
+        agent_model="deepseek-chat",
         jwt_secret="test-jwt-secret-for-server-tests",
         admin_password_hash=hash_password("test-password"),
     )
@@ -78,7 +81,7 @@ class TestHealthz:
             resp = client.get("/healthz")
             data = resp.json()
             assert data["llm_available"] is False
-            assert "missing DEEPSEEK_API_KEY" in data["llm_error"]
+            assert "missing AGNES_API_KEY" in data["llm_error"]
 
 
 class TestTools:
@@ -199,7 +202,7 @@ class TestChat:
             assert resp.status_code == 200
             text = resp.text
             assert "event: error" in text
-            assert "missing DEEPSEEK_API_KEY" in text
+            assert "missing AGNES_API_KEY" in text
             assert "event: done" in text
 
     def test_chat_with_tools(self, client, auth_token):

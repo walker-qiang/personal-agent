@@ -78,6 +78,7 @@ def eval_chat_service(tmp_cache_path: Path) -> ChatService:
         host="127.0.0.1",
         port=0,
         deepseek_api_key="test-key",
+        agnes_api_key="test-key",
     )
     registry = ToolRegistry()
     register_all(registry, tmp_cache_path)

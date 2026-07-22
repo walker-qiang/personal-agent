@@ -34,10 +34,17 @@ def _msg_content(msg: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        # Anthropic-style content blocks
-        return " ".join(
-            b.get("text", "") for b in content if isinstance(b, dict)
-        )
+        # Multi-modal content blocks: extract text parts, mark images
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif b.get("type") == "image_url":
+                    parts.append("[图片]")
+                elif b.get("type") == "image":
+                    parts.append("[图片]")
+        return " ".join(parts)
     return str(content)
 
 

@@ -9,15 +9,20 @@ from typing import Any, Iterator, Protocol
 
 
 class LLMClient(Protocol):
-    """Protocol for LLM provider clients."""
+    """Protocol for LLM provider clients.
 
-    def complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+    Messages use the OpenAI-compatible format. The ``content`` field
+    can be either a plain string or a list of content blocks for
+    multi-modal input (images, etc.).
+    """
+
+    def complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
         ...
 
     def complete_json(
         self,
         system: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         schema: dict[str, Any] | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any] | list[Any]:
@@ -45,7 +50,7 @@ class LLMClient(Protocol):
         """
         ...
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens one by one. Yields content chunks."""
         ...
 

@@ -131,7 +131,7 @@ class TestAgentConfig:
             port=0,
         )
         assert not config.llm_available
-        assert "missing DEEPSEEK_API_KEY" in config.llm_unavailable_reason
+        assert "missing AGNES_API_KEY" in config.llm_unavailable_reason
 
     def test_active_api_key_returns_correct_provider(self, agent_config):
         assert agent_config.active_api_key == "test-key"

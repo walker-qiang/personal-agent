@@ -283,6 +283,19 @@ def _run_domain_agent_react(
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
     ]
+    # Inject image attachments as multi-modal content blocks
+    attachments = cfg.get("attachments", [])
+    if attachments:
+        content_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": history_context + f"请完成以下任务：{task}"},
+        ]
+        for att in attachments:
+            if att.get("type") == "image":
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{att['mime_type']};base64,{att['base64']}"},
+                })
+        messages = [{"role": "user", "content": content_blocks}]
     system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), messages)
 
     _push_event(cfg, "progress", {"message": "Agent 开始分析任务，调用工具获取数据..."})

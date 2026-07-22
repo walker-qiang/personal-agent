@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import uuid
 from pathlib import Path
 
@@ -76,6 +77,12 @@ async def upload_file(
 
     mime_type = file.content_type or ""
     extracted_text = _extract_text(file_path, mime_type)
+    is_image = ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+    # Encode image as base64 for vision model input
+    base64_data = ""
+    if is_image:
+        base64_data = base64.b64encode(content).decode("utf-8")
 
     return {
         "file_id": file_id,
@@ -83,6 +90,7 @@ async def upload_file(
         "mime_type": mime_type,
         "size": len(content),
         "ext": ext,
-        "is_image": ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"),
+        "is_image": is_image,
+        "base64": base64_data,
         "text": extracted_text[:5000] if extracted_text else "",  # Truncate for response
     }

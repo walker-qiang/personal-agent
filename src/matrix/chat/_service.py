@@ -236,8 +236,13 @@ class ChatService:
         if session_id:
             self.store.reset(session_id)
 
-    def _load_file_content(self, file_id: str) -> str:
-        """Load uploaded file content for injection into chat messages."""
+    def _load_file_content(self, file_id: str) -> str | dict[str, Any]:
+        """Load uploaded file content for injection into chat messages.
+
+        Returns:
+            - str: text content for text/PDF files
+            - dict: {"type": "image", "mime_type": "...", "base64": "..."} for images
+        """
         upload_dir = self.config.root_path.parent / "var" / "uploads"
         for ext in (".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"):
             file_path = upload_dir / f"{file_id}{ext}"
@@ -257,7 +262,18 @@ class ChatService:
                     except ImportError:
                         return f"[PDF: {file_path.name}]"
                 else:
-                    return f"[图片文件: {file_path.name}]"
+                    # Image: return base64 data for vision model
+                    import base64
+                    content = file_path.read_bytes()
+                    mime_map = {
+                        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                        ".webp": "image/webp", ".gif": "image/gif",
+                    }
+                    return {
+                        "type": "image",
+                        "mime_type": mime_map.get(ext, "image/png"),
+                        "base64": base64.b64encode(content).decode("utf-8"),
+                    }
         return ""
 
     def stream_chat(self, message: str, session_id: str | None = None, user_id: str = "default", file_id: str | None = None) -> Iterator[dict[str, Any]]:
@@ -271,10 +287,20 @@ class ChatService:
             return
 
         # Inject uploaded file content into the message
+        attachments: list[dict[str, Any]] = []
         if file_id:
             file_content = self._load_file_content(file_id)
             if file_content:
-                text = f"[文件内容]\n{file_content}\n\n[用户问题]\n{text}"
+                if isinstance(file_content, dict) and file_content.get("type") == "image":
+                    attachments.append(file_content)
+                    # Add a hint in the text so classification still works
+                    if not text:
+                        text = "请描述这张图片的内容"
+                else:
+                    # Text/PDF: inject as before
+                    content_str = file_content if isinstance(file_content, str) else ""
+                    if content_str:
+                        text = f"[文件内容]\n{content_str}\n\n[用户问题]\n{text}"
 
         if not self.config.llm_available:
             yield {
@@ -294,6 +320,7 @@ class ChatService:
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
             reflexion_max=self.config.reflexion_max_attempts,
+            attachments=attachments,
         )
 
         interrupted = False
@@ -306,7 +333,7 @@ class ChatService:
                 len(text),
             )
 
-            graph_config = self._build_graph_config(sid, session_llm, history, text, user_id)
+            graph_config = self._build_graph_config(sid, session_llm, history, text, user_id, attachments)
 
             try:
                 final_state = yield from self._stream_graph_events(
@@ -657,6 +684,7 @@ class ChatService:
     def _build_graph_config(
         self, sid: str, session_llm: LLMClient, history: list[dict],
         user_message: str = "", user_id: str = "default",
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build the LangGraph config dict for a streaming session."""
         return {
@@ -669,6 +697,7 @@ class ChatService:
                 "history": history,
                 "event_queue": queue.Queue(),
                 "ref_store": self._ref_store,
+                "attachments": attachments or [],
                 "working_memory": {
                     "pinned": user_message,
                     "insights": list(self._wm_insights.get(user_id, [])),
@@ -806,6 +835,7 @@ class ChatService:
         """Stream the LLM summarization token by token via SSE."""
         user_msg = state.get("user_message", original_text)
         tool_results = state.get("tool_results", [])
+        attachments = state.get("attachments", [])
 
         system_prompt = """You are a helpful AI assistant. Answer the user's question using only the provided data.
 Rules:
@@ -828,17 +858,31 @@ Rules:
                 lines.append(f"[{role_label}]: {h['content'][:300]}")
             history_context = "对话历史：\n" + "\n".join(lines) + "\n\n"
 
-        user_message = f"""User question: {user_msg}
+        user_message_text = f"""User question: {user_msg}
 
 Tool results:
 {json.dumps(tool_results, ensure_ascii=False, indent=2)}
 
 Please answer the user's question using only the provided data."""
 
+        # Build multi-modal user message if attachments present
+        if attachments:
+            content_blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": history_context + user_message_text},
+            ]
+            for att in attachments:
+                content_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{att['mime_type']};base64,{att['base64']}"},
+                })
+            user_message: str | list[dict[str, Any]] = content_blocks
+        else:
+            user_message = history_context + user_message_text
+
         full_answer: list[str] = []
         try:
             for token in llm.stream_complete(
-                system_prompt, [{"role": "user", "content": history_context + user_message}]
+                system_prompt, [{"role": "user", "content": user_message}]
             ):
                 full_answer.append(token)
                 yield {"type": "token", "content": token}

@@ -122,7 +122,15 @@ const FileUpload: React.FC<Props> = ({ onFileSelected }) => {
 
       {file ? (
         <div style={styles.fileInfo}>
-          <span style={styles.fileIcon}>{'\uD83D\uDCCE'}</span>
+          {file.is_image && file.base64 ? (
+            <img
+              src={`data:${file.mime_type};base64,${file.base64}`}
+              alt={file.filename}
+              style={styles.imagePreview}
+            />
+          ) : (
+            <span style={styles.fileIcon}>{'\uD83D\uDCCE'}</span>
+          )}
           <div style={styles.fileDetails}>
             <span style={styles.fileName}>{file.filename}</span>
             <span style={styles.fileSize}>{formatFileSize(file.size)}</span>
@@ -208,6 +216,14 @@ const styles: Record<string, React.CSSProperties> = {
   fileIcon: {
     fontSize: 18,
     flexShrink: 0,
+  },
+  imagePreview: {
+    width: 36,
+    height: 36,
+    borderRadius: 6,
+    objectFit: 'cover' as const,
+    flexShrink: 0,
+    border: '1px solid var(--rule, #333)',
   },
   fileDetails: {
     display: 'flex',

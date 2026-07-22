@@ -525,7 +525,7 @@ class TestOTelConfig:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
         monkeypatch.setenv("OTEL_EXPORT", "true")
         monkeypatch.setenv("JWT_SECRET", "test-secret")
-        monkeypatch.chdir("/Users/qiang.lilq/personal-system/personal-agent")
+        monkeypatch.chdir("/Users/liqiang/code/personal-system/personal-agent")
         config = load_config()
         assert config.otel_exporter_endpoint == "http://localhost:4318/v1/traces"
         assert config.otel_export is True
@@ -533,7 +533,7 @@ class TestOTelConfig:
     def test_env_var_otlp_disabled_by_default(self, monkeypatch):
         from matrix.config import load_config
         monkeypatch.setenv("JWT_SECRET", "test-secret")
-        monkeypatch.chdir("/Users/qiang.lilq/personal-system/personal-agent")
+        monkeypatch.chdir("/Users/liqiang/code/personal-system/personal-agent")
         config = load_config()
         assert config.otel_export is False
         assert config.otel_exporter_endpoint == ""

@@ -75,4 +75,6 @@ export interface FileInfo {
   filename: string;
   mime_type: string;
   size: number;
+  is_image?: boolean;
+  base64?: string;
 }

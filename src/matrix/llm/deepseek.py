@@ -66,7 +66,7 @@ class DeepSeekClient:
             "content-type": "application/json",
         }
 
-    def complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+    def complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
         url = self.base_url.rstrip("/") + "/chat/completions"
         payload = self._build_payload(system, messages, temperature=temperature)
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
@@ -78,7 +78,7 @@ class DeepSeekClient:
     def complete_json(
         self,
         system: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         schema: dict[str, Any] | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any] | list[Any]:
@@ -102,7 +102,7 @@ class DeepSeekClient:
         except Exception as err:
             raise LLMError(f"DeepSeek JSON output could not be parsed: {err}") from err
 
-    def stream_complete(self, system: str, messages: list[dict[str, str]], temperature: float | None = None) -> Iterator[str]:
+    def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from DeepSeek API.
 
         Uses SSE streaming (stream=True). Yields content delta chunks.
