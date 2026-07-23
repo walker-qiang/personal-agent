@@ -73,7 +73,7 @@ KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
     ],
     "agnes": [
-        {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash", "desc": "免费"},
+        {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash", "desc": "免费 · 256K上下文"},
     ],
     "anthropic": [
         {"id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet", "desc": "推荐"},
