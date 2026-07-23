@@ -1671,11 +1671,8 @@ function saveFileContent(skillName, type, filename) {
 }
 
 function closeModal() {
-  // Remove any modal overlays (skill modal, MCP modal, etc.)
-  ['skillModal', 'mcpModal'].forEach(function(id) {
-    const el = document.getElementById(id);
-    if (el) el.remove();
-  });
+  // Remove any modal overlays (skill modal, MCP modal, list modals, etc.)
+  document.querySelectorAll('.modal-overlay').forEach(function(el) { el.remove(); });
 }
 
 function saveSkill(skillName) {
