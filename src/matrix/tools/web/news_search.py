@@ -20,6 +20,7 @@ from ._common import (
     fetch,
     filter_redirect_urls,
     inject_current_year,
+    is_blocked_page,
     is_time_sensitive,
     race_engines,
 )
@@ -135,101 +136,6 @@ def _parse_so360_news(html: str, limit: int) -> list[dict[str, str]]:
     return results
 
 
-# ---- Financial site fallback for stock/market queries ----
-
-_FINANCE_KEYWORDS_RE = re.compile(
-    r"A股|沪深|上证|深证|创业板|科创板|大盘|股市|行情|"
-    r"涨停|跌停|收盘|开盘|指数|板块|个股|熊市|牛市|"
-    r"股票|基金|债券|期货|外汇|美股|港股|日股"
-)
-
-_FINANCE_SITES = [
-    {
-        "url": "https://finance.eastmoney.com/a/czqyw.html",
-        "name": "东方财富",
-        "parser": "_parse_eastmoney_headlines",
-    },
-    {
-        "url": "https://stock.10jqka.com.cn/",
-        "name": "同花顺",
-        "parser": "_parse_10jqka_headlines",
-    },
-]
-
-
-def _try_financial_sites(query: str, original_query: str) -> list[dict[str, str]]:
-    """If the query is finance-related, try fetching financial sites directly.
-
-    This handles the case where news search engines don't have same-day
-    market data but financial portals do.
-    """
-    if not _FINANCE_KEYWORDS_RE.search(original_query):
-        return []
-
-    results: list[dict[str, str]] = []
-    for site in _FINANCE_SITES:
-        html = fetch(site["url"], timeout_sec=8, label=site["name"])
-        if not html:
-            continue
-        parser = globals().get(site["parser"])
-        if parser is None:
-            continue
-        headlines = parser(html)
-        if headlines:
-            for h in headlines:
-                results.append({
-                    "title": h["title"],
-                    "snippet": h.get("snippet", ""),
-                    "url": h.get("url", site["url"]),
-                    "source": site["name"],
-                    "date": h.get("date", ""),
-                })
-            if results:
-                break
-
-    return results
-
-
-def _parse_eastmoney_headlines(html: str) -> list[dict[str, str]]:
-    """Parse headlines from East Money (东方财富) market page."""
-    results: list[dict[str, str]] = []
-    title_re = re.compile(
-        r'<a[^>]*href="(/a/[^"]+)"[^>]*title="([^"]+)"[^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-    for match in title_re.finditer(html):
-        url = "https://finance.eastmoney.com" + match.group(1)
-        title = match.group(2).strip()
-        if not title or len(title) < 4:
-            continue
-        if any(title == r["title"] for r in results):
-            continue
-        results.append({"title": title, "url": url, "snippet": "", "date": ""})
-        if len(results) >= 8:
-            break
-    return results
-
-
-def _parse_10jqka_headlines(html: str) -> list[dict[str, str]]:
-    """Parse headlines from 10jqka (同花顺) stock page."""
-    results: list[dict[str, str]] = []
-    title_re = re.compile(
-        r'<a[^>]*href="(https?://[^"]*10jqka\.com\.cn[^"]*)"[^>]*title="([^"]+)"',
-        re.DOTALL,
-    )
-    for match in title_re.finditer(html):
-        url = match.group(1)
-        title = match.group(2).strip()
-        if not title or len(title) < 4:
-            continue
-        if any(title == r["title"] for r in results):
-            continue
-        results.append({"title": title, "url": url, "snippet": "", "date": ""})
-        if len(results) >= 8:
-            break
-    return results
-
-
 # ---- public API ----
 
 def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
@@ -247,12 +153,17 @@ def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
 
     # Define engine fetch functions for parallel racing
     def _try_bing_news() -> dict[str, Any] | None:
-        bing_url = _BING_NEWS_URL + "?" + urllib.parse.urlencode({
-            "q": query,
-            "setlang": "zh-cn" if any("\u4e00" <= c <= "\u9fff" for c in query) else "en",
-        })
+        is_zh = any("\u4e00" <= c <= "\u9fff" for c in query)
+        bing_params = {"q": query}
+        if is_zh:
+            bing_params["setlang"] = "zh-cn"
+            bing_params["cc"] = "cn"
+            bing_params["setmkt"] = "zh-CN"
+        else:
+            bing_params["setlang"] = "en"
+        bing_url = _BING_NEWS_URL + "?" + urllib.parse.urlencode(bing_params)
         html = fetch(bing_url, timeout_sec=10, label="bing-news")
-        if html:
+        if html and not is_blocked_page(html):
             results = _parse_bing_news(html, max_results)
             if results:
                 return {"results": filter_redirect_urls(results), "query": query, "engine": "bing-news"}
@@ -261,7 +172,7 @@ def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
     def _try_so360_news() -> dict[str, Any] | None:
         news_url = _SO360_NEWS_URL + "?" + urllib.parse.urlencode({"q": query})
         html = fetch(news_url, timeout_sec=10, label="so360-news")
-        if html:
+        if html and not is_blocked_page(html):
             results = _parse_so360_news(html, max_results)
             if results:
                 return {
@@ -279,13 +190,6 @@ def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
 
     if winner:
         _, result = winner
-        cache_set(ckey, result)
-        return result
-
-    # Fallback: financial sites for stock/market queries
-    fin_results = _try_financial_sites(query, original_query)
-    if fin_results:
-        result = {"results": fin_results[:max_results], "query": query, "engine": "finance-sites"}
         cache_set(ckey, result)
         return result
 

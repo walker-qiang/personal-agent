@@ -23,6 +23,7 @@ from ._common import (
     fetch,
     filter_redirect_urls,
     inject_current_year,
+    is_blocked_page,
     is_time_sensitive,
     race_engines,
 )
@@ -172,19 +173,24 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
     def _try_so360() -> dict[str, Any] | None:
         so360_url = _SO360_URL + "?" + urllib.parse.urlencode({"q": query})
         html = fetch(so360_url, timeout_sec=10, label="so360")
-        if html:
+        if html and not is_blocked_page(html):
             results = _parse_so360(html, max_results)
             if results:
                 return {"results": boost_recent_results(filter_redirect_urls(results), ts), "query": query, "engine": "so360"}
         return None
 
     def _try_bing() -> dict[str, Any] | None:
-        bing_url = _BING_URL + "?" + urllib.parse.urlencode({
-            "q": query,
-            "setlang": "zh-cn" if any("\u4e00" <= c <= "\u9fff" for c in query) else "en",
-        })
+        is_zh = any("\u4e00" <= c <= "\u9fff" for c in query)
+        bing_params = {"q": query}
+        if is_zh:
+            bing_params["setlang"] = "zh-cn"
+            bing_params["cc"] = "cn"
+            bing_params["setmkt"] = "zh-CN"
+        else:
+            bing_params["setlang"] = "en"
+        bing_url = _BING_URL + "?" + urllib.parse.urlencode(bing_params)
         html = fetch(bing_url, timeout_sec=10, label="bing")
-        if html:
+        if html and not is_blocked_page(html):
             results = _parse_bing(html, max_results)
             if results:
                 return {"results": boost_recent_results(filter_redirect_urls(results), ts), "query": query, "engine": "bing"}
@@ -201,7 +207,7 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
                 html = resp.read().decode("utf-8", errors="replace")
         except Exception:
             return None
-        if html:
+        if html and not is_blocked_page(html):
             results = _parse_ddg(html, max_results)
             if results:
                 return {"results": boost_recent_results(results, ts), "query": query, "engine": "duckduckgo"}

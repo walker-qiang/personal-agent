@@ -39,7 +39,7 @@ MAX_CONSECUTIVE_FAILURES = 2      # Stop if N consecutive tool calls all fail
 
 MAX_CONSECUTIVE_NO_PROGRESS = 3   # Stop if N consecutive steps add no new info
 
-MAX_SAME_TOOL_CALLS = 2           # Stop if same tool called N+ times (same name, regardless of args)
+MAX_SAME_TOOL_CALLS = 3           # Stop if same tool called N+ times (same name, regardless of args)
 
 MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across all tools)
 

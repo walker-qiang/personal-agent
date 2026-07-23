@@ -81,8 +81,8 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # react_tool → back to react_llm (loop)
-    graph.add_edge("react_tool", "react_llm")
+    # react_tool → react_evaluate (check early stop / sufficiency before next LLM call)
+    graph.add_edge("react_tool", "react_evaluate")
 
     # react_evaluate → conditional: not done → react_llm (loop), done → aggregate
     graph.add_conditional_edges(

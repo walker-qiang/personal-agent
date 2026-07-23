@@ -250,6 +250,14 @@ def _react_execute_tool_calls(
             arguments = {}
 
         if name not in agent_tools.tool_names():
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps(
+                    {"error": f"工具 {name} 不存在"},
+                    ensure_ascii=False,
+                ),
+            })
             continue
 
         call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
@@ -258,6 +266,14 @@ def _react_execute_tool_calls(
             name, arguments, call_key, accumulated, new_tool_results,
             _called_in_batch, cfg,
         ):
+            new_messages.append({
+                "role": "tool",
+                "tool_call_id": tc_raw.get("id", ""),
+                "content": json.dumps(
+                    {"skipped": True, "reason": "工具调用被防重复机制拦截，请基于已有结果回答或尝试其他工具"},
+                    ensure_ascii=False,
+                ),
+            })
             continue
 
         _called_in_batch.add(call_key)
@@ -564,6 +580,22 @@ def react_evaluate_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     if early_reason:
         logger.info("ReAct early stop at iter %d: %s", iteration, early_reason)
         return _build_react_final_answer(react, tool_results, llm, iteration)
+
+    # Check force_summarize — all tool calls were deduped, prompt LLM to summarize
+    if react.get("force_summarize"):
+        if not tool_results:
+            return _build_react_final_answer(react, tool_results, llm, iteration)
+        new_messages = list(messages) + [{
+            "role": "user",
+            "content": "所有工具调用均为重复。请基于已有结果为用户总结，不要继续调用工具。",
+        }]
+        logger.info("ReAct force_summarize at iter %d: prompting LLM to summarize", iteration)
+        return {
+            "react": {**react, "messages": new_messages, "iteration": iteration,
+                      "force_summarize": False},
+            "tool_results": [],
+            "tool_call_count": 0,
+        }
 
     # Check refusal
     last_msg = messages[-1] if messages else {}

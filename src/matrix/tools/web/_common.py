@@ -54,6 +54,19 @@ def fetch(url: str, timeout_sec: float = 10, label: str = "") -> str | None:
         return None
 
 
+def is_blocked_page(html: str | None) -> bool:
+    """Detect anti-bot block pages that return 200 OK but contain no results.
+
+    360 Search returns a small (~6KB) '访问异常页面' for Chinese queries.
+    DuckDuckGo sometimes returns a challenge page when rate-limited.
+    """
+    if not html or len(html) < 8000:
+        return True
+    if "访问异常" in html[:2000]:
+        return True
+    return False
+
+
 # ---- Skip titles (common noise from search engines) ----
 
 SKIP_TITLES = {"其他人还搜了", "最新相关消息", "相关搜索", "最新相关信息"}

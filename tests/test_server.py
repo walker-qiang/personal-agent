@@ -91,8 +91,9 @@ class TestTools:
         data = resp.json()
         assert "tools" in data
         names = {t["name"] for t in data["tools"]}
-        assert len(names) == 14
+        assert len(names) == 15
         assert "finance.holdings_summary" in names
+        assert "finance_query" in names
 
     def test_tools_call_holdings(self, client, auth_token):
         resp = client.post(
