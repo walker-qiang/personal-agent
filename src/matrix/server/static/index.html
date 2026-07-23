@@ -621,6 +621,26 @@
   }
   .input-row button:hover { background: var(--accent-hover); }
   .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Image upload button */
+  .upload-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--bg);
+    cursor: pointer; transition: border-color 0.15s, color 0.15s;
+    color: var(--text-secondary); flex-shrink: 0;
+  }
+  .upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .upload-btn svg { width: 18px; height: 18px; }
+  .file-preview {
+    display: none; align-items: center; gap: 8px; margin: 0 auto 6px;
+    max-width: 860px; padding: 6px 10px; border-radius: var(--radius);
+    background: var(--bg2); border: 1px solid var(--border); font-size: 12px;
+  }
+  .file-preview.show { display: flex; }
+  .file-preview img { width: 32px; height: 32px; border-radius: 4px; object-fit: cover; }
+  .file-preview .fp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .file-preview .fp-remove { cursor: pointer; color: var(--error); font-size: 14px; padding: 2px 6px; }
   .error-block { background: rgba(239,68,68,0.1); border: 1px solid var(--error); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; color: var(--error); margin: 8px 0; }
   .duration { font-size: 11px; color: var(--text-secondary); margin-top: 6px; opacity: 0.6; }
 
@@ -916,8 +936,19 @@
   </aside>
 </div>
 <footer>
+  <div class="file-preview" id="filePreview">
+    <img id="fpThumb" src="" alt="">
+    <span class="fp-name" id="fpName"></span>
+    <span class="fp-remove" onclick="clearFile()">✕</span>
+  </div>
   <div class="input-row">
     <input type="text" id="input" placeholder="输入问题..." autofocus>
+    <button class="upload-btn" id="uploadBtn" onclick="document.getElementById('fileInput').click()" title="上传图片">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+      </svg>
+    </button>
+    <input type="file" id="fileInput" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif" style="display:none" onchange="uploadFile(this)">
     <button id="send" onclick="send()">发送</button>
     <div class="footer-model" id="footerModel" onclick="toggleModelMenu()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -2012,7 +2043,92 @@ function formatMoney(v) {
   return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// ---- File upload ----
+async function uploadFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  // 10MB limit
+  if (file.size > 10 * 1024 * 1024) {
+    showError('文件大小不能超过 10MB');
+    input.value = '';
+    return;
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const token = getToken();
+    const resp = await fetch('/api/upload', {
+      method: 'POST',
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+      body: formData,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || '上传失败 (' + resp.status + ')');
+    }
+    const data = await resp.json();
+    pendingFileId = data.file_id;
+    // Show preview
+    const preview = document.getElementById('filePreview');
+    const thumb = document.getElementById('fpThumb');
+    const name = document.getElementById('fpName');
+    if (data.is_image) {
+      // Use base64 data directly as thumbnail
+      const mime = data.mime_type || 'image/png';
+      thumb.src = 'data:' + mime + ';base64,' + data.base64;
+      thumb.style.display = 'block';
+    } else {
+      thumb.style.display = 'none';
+    }
+    name.textContent = data.filename + ' (' + (data.size / 1024).toFixed(1) + 'KB)';
+    preview.classList.add('show');
+  } catch (e) {
+    showError('上传失败: ' + e.message);
+  } finally {
+    input.value = '';
+  }
+}
+
+function clearFile() {
+  pendingFileId = null;
+  document.getElementById('filePreview').classList.remove('show');
+  document.getElementById('fpThumb').src = '';
+}
+
+function showError(msg) {
+  const chat = document.getElementById('chat');
+  const inner = document.getElementById('chatInner');
+  const div = document.createElement('div');
+  div.className = 'error-block';
+  div.textContent = msg;
+  inner.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// Paste image support
+document.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        // Create a File with proper name
+        const named = new File([file], 'pasted-' + Date.now() + '.png', { type: file.type });
+        const dt = new DataTransfer();
+        dt.items.add(named);
+        document.getElementById('fileInput').files = dt.files;
+        uploadFile(document.getElementById('fileInput'));
+        e.preventDefault();
+        break;
+      }
+    }
+  }
+});
+
 // ---- Send message ----
+let pendingFileId = null;  // uploaded file_id awaiting to be sent with message
+
 function send() {
   if (sending) return;
   const input = document.getElementById('input');
@@ -2020,6 +2136,11 @@ function send() {
   if (!msg) return;
   input.value = '';
   sending = true;
+
+  // Capture and clear pending file
+  const fileId = pendingFileId;
+  pendingFileId = null;
+  document.getElementById('filePreview').classList.remove('show');
 
   // Reset right panel
   resetRPanel();
@@ -2049,6 +2170,7 @@ function send() {
     message: encodeURIComponent(msg),
     session_id: SESSION,
   });
+  if (fileId) params.set('file_id', fileId);
   // EventSource doesn't support custom headers, pass token as query param
   const token = getToken();
   const streamUrl = '/chat/stream?' + params.toString() + (token ? '&token=' + encodeURIComponent(token) : '');
