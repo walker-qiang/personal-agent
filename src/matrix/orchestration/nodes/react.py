@@ -25,6 +25,7 @@ from ._helpers import (
     _build_history_context,
     _build_react_final_answer,
     _build_tools_for_llm,
+    _check_domain_tool_sufficiency,
     _check_early_stop,
     _classify_query_factuality,
     _evaluate_sufficiency,
@@ -612,6 +613,28 @@ def react_evaluate_node(state: AgentState, *, config: RunnableConfig) -> dict[st
                 "tool_results": [],
                 "tool_call_count": 0,
             }
+
+    # Domain-tool sufficiency fast-path: if a domain-specific tool (weather,
+    # finance_query) already returned valid data but the LLM keeps calling
+    # tools, inject a "stop and answer" prompt. This prevents the LLM from
+    # looping on redundant tool calls (e.g. calling weather("Shenzhen") after
+    # weather("深圳") already returned perfect data).
+    if (iteration >= 2 and tool_results
+            and not react.get("domain_sufficiency_prompted")):
+        if last_msg.get("role") == "assistant" and last_msg.get("tool_calls"):
+            if _check_domain_tool_sufficiency(question, tool_results):
+                new_messages = list(messages) + [{
+                    "role": "user",
+                    "content": "工具已返回足够的数据。请直接基于以上工具结果回答用户的问题，不要再调用任何工具。",
+                }]
+                logger.info("ReAct: domain tool sufficiency at iter %d, prompting LLM to answer", iteration)
+                return {
+                    "react": {**react, "messages": new_messages, "iteration": iteration,
+                              "consecutive_no_progress": consecutive_no_progress + 1,
+                              "domain_sufficiency_prompted": True},
+                    "tool_results": [],
+                    "tool_call_count": 0,
+                }
 
     # Periodic evaluator
     if iteration > 0 and iteration % EVALUATOR_INTERVAL == 0 and tool_results:

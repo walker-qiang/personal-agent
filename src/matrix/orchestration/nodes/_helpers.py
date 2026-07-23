@@ -43,7 +43,7 @@ MAX_SAME_TOOL_CALLS = 3           # Stop if same tool called N+ times (same name
 
 MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across all tools)
 
-EVALUATOR_INTERVAL = 3            # Run evaluator every N iterations
+EVALUATOR_INTERVAL = 2            # Run evaluator every N iterations
 
 # ── Query factuality classifier ──────────────────────────────────────────────
 
@@ -469,11 +469,13 @@ def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) ->
 # ---- Goal-driven Evaluator ----
 
 
-EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的信息是否已经足够回答用户的问题。
+EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的工具结果是否已经足够回答用户的问题。
 
 评估标准：
-- SUFFICIENT（充分）：所有回答问题的关键数据已获取，agent 的回答直接针对用户问题，不需要更多工具调用
-- INSUFFICIENT（不充分）：关键数据缺失、agent 拒绝回答、答案含糊其辞、或重要事实陈述缺乏工具结果支撑
+- SUFFICIENT（充分）：工具结果中已包含回答用户问题所需的关键数据（如天气数据、股价、新闻详情等），无需更多工具调用
+- INSUFFICIENT（不充分）：关键数据缺失，仍需更多工具调用才能回答
+
+重要：只需判断工具结果是否包含足够数据。agent 可能尚未生成最终回答（仍在调用工具），这不影响充分性判断——只要工具结果中有足够数据即为 SUFFICIENT。
 
 返回 JSON 对象：{{"sufficient": true/false, "reason": "简短原因（中文）"}}"""
 
@@ -577,6 +579,32 @@ def _check_early_stop(
         return f"工具总调用 {len(tool_results)} 次已达上限，应已收集足够信息"
 
     return None
+
+
+
+# Domain-specific tools that return structured data — when they return valid
+# results, the data is very likely sufficient to answer the user's question.
+_DOMAIN_SUFFICIENCY_TOOLS = {"weather", "finance_query"}
+
+
+def _check_domain_tool_sufficiency(
+    question: str,
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    """Check if domain-specific tools have returned valid data.
+
+    Lightweight heuristic: if weather or finance_query returned non-error
+    results with actual data, the information is likely sufficient for the
+    user's question. This avoids waiting for the LLM-based evaluator and
+    prevents the LLM from looping on redundant tool calls.
+    """
+    for tr in tool_results:
+        name = tr.get("name", "")
+        if name in _DOMAIN_SUFFICIENCY_TOOLS and "error" not in tr:
+            result = tr.get("result", {})
+            if isinstance(result, dict) and result:
+                return True
+    return False
 
 
 
@@ -791,10 +819,17 @@ def _build_react_final_answer(
     if not answer:
         for msg in reversed(messages):
             if msg.get("role") == "assistant" and msg.get("content"):
+                # Skip messages that were preludes to tool calls — their content
+                # is just thinking/commentary (e.g. "我来重新查询..."), not an
+                # actual answer to the user's question.
+                if msg.get("tool_calls"):
+                    continue
                 answer = msg["content"]
                 break
 
-    # If still no answer but we have tool results, ask the LLM to summarize
+    # If still no answer but we have tool results, ask the LLM to summarize.
+    # This covers early-stop scenarios where the LLM was stuck in a tool-calling
+    # loop and never produced a text-only answer.
     if not answer and tool_results:
         answer = _llm_summarize_from_results(question, tool_results, messages, llm)
 
