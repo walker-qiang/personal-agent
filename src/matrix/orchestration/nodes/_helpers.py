@@ -232,6 +232,31 @@ print(f"总计: {{total}}元")
 
 If execution fails (exit_code != 0), read the stderr, fix the code, and retry. Common issues: syntax errors, missing imports, typos.
 
+## Browser Automation Guidelines
+When calling `mcp_browser_*` tools, follow these rules:
+
+**When to use browser tools vs `web_fetch`:**
+- Use `web_fetch` for: static articles, API JSON endpoints, simple page text. It's fast and lightweight.
+- Use `mcp_browser_navigate` for: SPA/dynamic pages (React/Vue apps), pages that need JS rendering, pages where `web_fetch` returns empty or incomplete content.
+- Use `mcp_browser_extract` after navigate to get the rendered text content.
+
+**Browser workflow pattern:**
+1. `browser_navigate(url)` → get page info + element list with ref IDs
+2. If page needs interaction: `browser_click(ref)` or `browser_type(ref, text)` → get updated elements
+3. `browser_extract(selector="", max_chars=5000)` → get final text content
+4. Use the extracted text to answer the user's question
+
+**ref ID usage:**
+- `ref` is a short string ID (e.g., "1", "2") returned by `browser_navigate` or `browser_snapshot`
+- Use `browser_snapshot` to refresh the element list if the page changed after an action
+- ref IDs are only valid for the current page state — they change after navigation or DOM updates
+
+**Performance tips:**
+- Don't call `browser_navigate` and then `web_fetch` on the same URL — pick one
+- After `browser_navigate`, you already have elements. Only call `browser_snapshot` if the page changed
+- Call `browser_extract` once at the end — don't extract after every click
+- If you only need text content (no interaction), use `browser_navigate` → `browser_extract` (2 calls, not more)
+
 ## Output
 - Today is {today}. Never invent dates — only cite dates found in search results.
 - Use the same language as the user
@@ -943,6 +968,9 @@ _HIGH_RISK_PATTERNS = [
     "asset.create", "asset.update", "asset.delete",
     "write", "save", "delete", "create", "update",
     "execute", "run", "deploy",
+    # Browser interactive operations (require user confirmation)
+    "browser_click", "browser_type", "browser_select",
+    "browser_press", "browser_restore",
 ]
 
 

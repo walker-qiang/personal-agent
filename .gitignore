@@ -33,3 +33,6 @@ htmlcov/
 # Node
 node_modules/tsconfig.tsbuildinfo
 config/mcp_servers.json
+
+# Browser state (contains cookies/session data)
+var/mcp/browser_state.json

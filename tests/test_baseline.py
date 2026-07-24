@@ -76,20 +76,20 @@ class TestDatasetValidation:
         with open(dataset_path) as f:
             data = json.load(f)
         assert "cases" in data
-        assert len(data["cases"]) == 20
+        assert len(data["cases"]) == 23
 
     def test_all_cases_parse(self):
-        """All 20 cases can be parsed into EvalCase objects."""
+        """All 23 cases can be parsed into EvalCase objects."""
         dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
         if not dataset_path.exists():
             pytest.skip("eval_dataset.json not found")
         with open(dataset_path) as f:
             data = json.load(f)
         cases = [EvalCase.from_dict(c) for c in data["cases"]]
-        assert len(cases) == 20
+        assert len(cases) == 23
         # Verify case IDs are unique
         ids = {c.case_id for c in cases}
-        assert len(ids) == 20
+        assert len(ids) == 23
 
     def test_case_id_prefixes(self):
         """Case IDs follow naming conventions by category."""
@@ -98,7 +98,7 @@ class TestDatasetValidation:
             pytest.skip("eval_dataset.json not found")
         with open(dataset_path) as f:
             data = json.load(f)
-        prefixes = ["conv_", "finance_", "web_", "media_", "multi_", "edge_"]
+        prefixes = ["conv_", "finance_", "web_", "media_", "multi_", "edge_", "browser_"]
         for case in data["cases"]:
             assert any(case["case_id"].startswith(p) for p in prefixes), \
                 f"Case {case['case_id']} doesn't match any prefix"

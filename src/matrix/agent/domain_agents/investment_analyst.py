@@ -24,6 +24,10 @@ INVESTMENT_ANALYST = AgentDefinition(
         "web_search",
         "web_fetch",
         "code.run_python",
+        "mcp_browser_navigate",
+        "mcp_browser_snapshot",
+        "mcp_browser_extract",
+        "mcp_browser_screenshot",
     ],
     # General skills: available from skills/common/ (flat structure: all in personal-assets/技能/)
     general_skills=[

@@ -1,6 +1,6 @@
 {
-  "description": "Evaluation dataset — 20 cases covering conversation, finance, search, media, multi-step, and edge cases.",
-  "version": "1.0",
+  "description": "Evaluation dataset — 23 cases covering conversation, finance, search, media, browser automation, multi-step, and edge cases.",
+  "version": "1.1",
   "cases": [
     {
       "case_id": "conv_greeting",
@@ -279,6 +279,48 @@
         "forbidden_tools": []
       },
       "tags": ["edge_case", "gibberish"],
+      "difficulty": "hard",
+      "risk": "low"
+    },
+    {
+      "case_id": "browser_dynamic_extract",
+      "user_input": "用浏览器打开 https://example.com 并提取页面内容",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["mcp_browser_navigate"],
+        "forbidden_tools": []
+      },
+      "tags": ["browser", "extraction", "dynamic"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "browser_search_interact",
+      "user_input": "打开百度搜索'Python教程'并提取搜索结果",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["mcp_browser_navigate"],
+        "forbidden_tools": []
+      },
+      "tags": ["browser", "interaction", "search"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "browser_vs_fetch_selection",
+      "user_input": "抓取这个SPA页面的内容: https://react-app.example.com/dashboard",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["browser", "tool_selection", "spa"],
       "difficulty": "hard",
       "risk": "low"
     }
