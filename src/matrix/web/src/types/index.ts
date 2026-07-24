@@ -63,6 +63,8 @@ export interface Message {
   duration?: string;
   error?: string;
   isStreaming?: boolean;
+  thinking?: string[];
+  progress?: string[];
 }
 
 export interface SSEEvent {

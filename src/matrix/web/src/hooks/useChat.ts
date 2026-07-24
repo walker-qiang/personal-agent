@@ -14,11 +14,19 @@ export interface UseChatReturn {
   send: (message: string, sessionId: string, fileId?: string) => void;
   sending: boolean;
   clearMessages: () => void;
+  switchSession: (sessionId: string | null) => void;
   confirmRequired: boolean;
   confirmActions: ConfirmAction[];
   confirmSessionId: string;
   confirm: (decision: 'approve' | 'skip') => void;
   dismissConfirm: () => void;
+}
+
+// Per-session state: messages + EventSource
+interface SessionState {
+  messages: Message[];
+  eventSource: EventSource | null;
+  sending: boolean;
 }
 
 export function useChat(): UseChatReturn {
@@ -27,26 +35,77 @@ export function useChat(): UseChatReturn {
   const [confirmRequired, setConfirmRequired] = useState(false);
   const [confirmActions, setConfirmActions] = useState<ConfirmAction[]>([]);
   const [confirmSessionId, setConfirmSessionId] = useState('');
-  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Per-session state map: sessionId -> { messages, eventSource, sending }
+  const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
+  // Current active session ID
+  const activeSessionRef = useRef<string | null>(null);
+  // Pending confirm session ref
   const pendingSessionRef = useRef<string>('');
 
-  // cleanup on unmount
+  // Helper: update messages for a specific session (or current if no sessionId)
+  const updateSessionMessages = useCallback((
+    sessionId: string | null,
+    updater: (prev: Message[]) => Message[],
+  ) => {
+    const sid = sessionId ?? activeSessionRef.current;
+    if (!sid) {
+      setMessages(prev => updater(prev));
+      return;
+    }
+    const state = sessionStatesRef.current.get(sid);
+    if (state) {
+      state.messages = updater(state.messages);
+      // Only update React state if this is the active session
+      if (sid === activeSessionRef.current) {
+        setMessages(state.messages);
+      }
+    } else {
+      // Fallback: update React state directly
+      setMessages(prev => updater(prev));
+    }
+  }, []);
+
+  // Helper: update sending state for a session
+  const updateSessionSending = useCallback((sessionId: string, value: boolean) => {
+    const state = sessionStatesRef.current.get(sessionId);
+    if (state) {
+      state.sending = value;
+      if (sessionId === activeSessionRef.current) {
+        setSending(value);
+      }
+    }
+  }, []);
+
+  // Helper: get or create session state
+  const getOrCreateSession = useCallback((sessionId: string): SessionState => {
+    let state = sessionStatesRef.current.get(sessionId);
+    if (!state) {
+      state = { messages: [], eventSource: null, sending: false };
+      sessionStatesRef.current.set(sessionId, state);
+    }
+    return state;
+  }, []);
+
+  // cleanup on unmount: close all EventSource connections
   useEffect(() => {
     return () => {
-      eventSourceRef.current?.close();
+      sessionStatesRef.current.forEach(state => {
+        state.eventSource?.close();
+      });
+      sessionStatesRef.current.clear();
     };
   }, []);
 
-  const setupEventListeners = useCallback((es: EventSource, isResume: boolean = false) => {
+  const setupEventListeners = useCallback((es: EventSource, sessionId: string, isResume: boolean = false) => {
     const assistantId = isResume ? crypto.randomUUID() : '';
     if (isResume) {
-      const assistantMsg: Message = {
+      updateSessionMessages(sessionId, (prev) => [...prev, {
         id: assistantId,
         role: 'assistant',
         content: '',
         isStreaming: true,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      }]);
     }
 
     // token
@@ -57,7 +116,7 @@ export function useChat(): UseChatReturn {
           typeof parsed === 'string'
             ? parsed
             : parsed.content || parsed.data?.content || '';
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -82,7 +141,7 @@ export function useChat(): UseChatReturn {
       try {
         const parsed = JSON.parse(event.data);
         const toolCall: ToolCall = parsed.data || parsed;
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -104,7 +163,7 @@ export function useChat(): UseChatReturn {
       try {
         const parsed = JSON.parse(event.data);
         const toolResult: ToolResult = parsed.data || parsed;
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -126,7 +185,7 @@ export function useChat(): UseChatReturn {
       try {
         const parsed = JSON.parse(event.data);
         const step: AgentStep = parsed.data || parsed;
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -138,6 +197,54 @@ export function useChat(): UseChatReturn {
           }
           return updated;
         });
+      } catch {
+        // ignore
+      }
+    });
+
+    // thinking
+    es.addEventListener('thinking', (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const content: string = parsed.content || parsed.data?.content || '';
+        if (content) {
+          updateSessionMessages(sessionId, (prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            const last = updated[lastIdx];
+            if (last && last.role === 'assistant') {
+              updated[lastIdx] = {
+                ...last,
+                thinking: [...(last.thinking || []), content],
+              };
+            }
+            return updated;
+          });
+        }
+      } catch {
+        // ignore
+      }
+    });
+
+    // progress
+    es.addEventListener('progress', (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const msg: string = parsed.message || parsed.data?.message || '';
+        if (msg) {
+          updateSessionMessages(sessionId, (prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            const last = updated[lastIdx];
+            if (last && last.role === 'assistant') {
+              updated[lastIdx] = {
+                ...last,
+                progress: [...(last.progress || []), msg],
+              };
+            }
+            return updated;
+          });
+        }
       } catch {
         // ignore
       }
@@ -157,10 +264,11 @@ export function useChat(): UseChatReturn {
         // ignore
       }
       es.close();
-      eventSourceRef.current = null;
-      setSending(false);
+      const state = sessionStatesRef.current.get(sessionId);
+      if (state) state.eventSource = null;
+      updateSessionSending(sessionId, false);
       // Mark last assistant message as not streaming
-      setMessages((prev) => {
+      updateSessionMessages(sessionId, (prev) => {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         const last = updated[lastIdx];
@@ -177,7 +285,7 @@ export function useChat(): UseChatReturn {
         const parsed = JSON.parse(event.data);
         const duration: string | undefined =
           parsed.duration || parsed.data?.duration;
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -194,8 +302,9 @@ export function useChat(): UseChatReturn {
         // ignore
       }
       es.close();
-      eventSourceRef.current = null;
-      setSending(false);
+      const state = sessionStatesRef.current.get(sessionId);
+      if (state) state.eventSource = null;
+      updateSessionSending(sessionId, false);
     });
 
     // error
@@ -210,7 +319,7 @@ export function useChat(): UseChatReturn {
       } catch {
         // use default
       }
-      setMessages((prev) => {
+      updateSessionMessages(sessionId, (prev) => {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         const last = updated[lastIdx];
@@ -224,14 +333,15 @@ export function useChat(): UseChatReturn {
         return updated;
       });
       es.close();
-      eventSourceRef.current = null;
-      setSending(false);
+      const state = sessionStatesRef.current.get(sessionId);
+      if (state) state.eventSource = null;
+      updateSessionSending(sessionId, false);
     });
 
     // EventSource connection error
     es.onerror = () => {
       if (es.readyState === EventSource.CLOSED) {
-        setMessages((prev) => {
+        updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
           const last = updated[lastIdx];
@@ -245,15 +355,33 @@ export function useChat(): UseChatReturn {
           return updated;
         });
         es.close();
-        eventSourceRef.current = null;
-        setSending(false);
+        const state = sessionStatesRef.current.get(sessionId);
+        if (state) state.eventSource = null;
+        updateSessionSending(sessionId, false);
       }
     };
-  }, []);
+  }, [updateSessionMessages, updateSessionSending]);
 
   const send = useCallback(
     (message: string, sessionId: string, fileId?: string) => {
-      eventSourceRef.current?.close();
+      // Close only the current session's EventSource (not others)
+      const currentSession = activeSessionRef.current;
+      if (currentSession) {
+        const state = sessionStatesRef.current.get(currentSession);
+        if (state?.eventSource) {
+          state.eventSource.close();
+          state.eventSource = null;
+        }
+      }
+
+      const sid = sessionId || currentSession || '';
+      if (!sid) return;
+
+      // Ensure session state exists
+      const sessionState = getOrCreateSession(sid);
+      activeSessionRef.current = sid;
+
+      // Update React state for the active session
       setSending(true);
       setConfirmRequired(false);
 
@@ -270,34 +398,64 @@ export function useChat(): UseChatReturn {
         isStreaming: true,
       };
 
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      // Update session messages
+      sessionState.messages = [...sessionState.messages, userMsg, assistantMsg];
+      sessionState.sending = true;
+      setMessages(sessionState.messages);
 
-      const url = buildStreamUrl(message, sessionId, fileId);
+      const url = buildStreamUrl(message, sid, fileId);
       const es = new EventSource(url);
-      eventSourceRef.current = es;
-      setupEventListeners(es);
+      sessionState.eventSource = es;
+      setupEventListeners(es, sid);
     },
-    [setupEventListeners],
+    [getOrCreateSession, setupEventListeners],
   );
+
+  const switchSession = useCallback((sessionId: string | null) => {
+    // Save current session's React-visible state is already in the map
+    // (updates via updateSessionMessages keep the map in sync)
+
+    if (!sessionId) {
+      // New session: clear visible state but keep background sessions alive
+      activeSessionRef.current = null;
+      setMessages([]);
+      setSending(false);
+      setConfirmRequired(false);
+      return;
+    }
+
+    // Switch to target session
+    activeSessionRef.current = sessionId;
+    const state = getOrCreateSession(sessionId);
+    setMessages(state.messages);
+    setSending(state.sending);
+    setConfirmRequired(false);
+  }, [getOrCreateSession]);
 
   const confirm = useCallback(
     (decision: 'approve' | 'skip') => {
-      eventSourceRef.current?.close();
-      setSending(true);
-      setConfirmRequired(false);
-
       const sid = pendingSessionRef.current;
       if (!sid) {
         setSending(false);
         return;
       }
 
+      // Close current EventSource for that session
+      const state = sessionStatesRef.current.get(sid);
+      if (state?.eventSource) {
+        state.eventSource.close();
+        state.eventSource = null;
+      }
+
+      setSending(true);
+      setConfirmRequired(false);
+
       const token = localStorage.getItem('mx_token') || '';
       const es = new EventSource(
         `/chat/confirm?session_id=${encodeURIComponent(sid)}&decision=${decision}&token=${encodeURIComponent(token)}`,
       );
-      eventSourceRef.current = es;
-      setupEventListeners(es, true);
+      if (state) state.eventSource = es;
+      setupEventListeners(es, sid, true);
     },
     [setupEventListeners],
   );
@@ -309,12 +467,23 @@ export function useChat(): UseChatReturn {
   }, []);
 
   const clearMessages = useCallback(() => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    setSending(false);
+    // Only clear the current visible state, don't touch background sessions
+    activeSessionRef.current = null;
     setMessages([]);
+    setSending(false);
     setConfirmRequired(false);
   }, []);
 
-  return { messages, send, sending, clearMessages, confirmRequired, confirmActions, confirmSessionId, confirm, dismissConfirm };
+  return {
+    messages,
+    send,
+    sending,
+    clearMessages,
+    switchSession,
+    confirmRequired,
+    confirmActions,
+    confirmSessionId,
+    confirm,
+    dismissConfirm,
+  };
 }

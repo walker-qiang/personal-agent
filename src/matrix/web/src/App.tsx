@@ -18,7 +18,7 @@ import type { SkillItem, FileInfo } from './types';
 
 const App: React.FC = () => {
   const { authenticated, username, login, register, logout, error: authError } = useAuth();
-  const { messages, send, sending, clearMessages, confirmRequired, confirmActions, confirm, dismissConfirm } = useChat();
+  const { messages, send, sending, switchSession, confirmRequired, confirmActions, confirm, dismissConfirm } = useChat();
   const { sessions, currentId, setCurrentId, load: loadSessions, create: createSession, remove: removeSession } = useSessions();
   const { skills, load: loadSkills, create: createSkill, update: updateSkill, remove: removeSkill } = useSkills();
 
@@ -111,16 +111,16 @@ const App: React.FC = () => {
   }, [handleSend]);
 
   const handleNewSession = useCallback(async () => {
-    clearMessages();
+    switchSession(null);
     setCurrentId(null);
     setRightPanel({ todos: [], artifacts: [], refs: [] });
-  }, [clearMessages, setCurrentId]);
+  }, [switchSession, setCurrentId]);
 
   const handleSelectSession = useCallback((id: string) => {
     setCurrentId(id);
-    clearMessages();
+    switchSession(id);
     setRightPanel({ todos: [], artifacts: [], refs: [] });
-  }, [setCurrentId, clearMessages]);
+  }, [setCurrentId, switchSession]);
 
   if (!authenticated) {
     return <LoginOverlay onLogin={login} onRegister={register} error={authError || undefined} />;
