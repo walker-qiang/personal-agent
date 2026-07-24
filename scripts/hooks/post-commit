@@ -1,0 +1,48 @@
+#!/bin/bash
+# post-commit hook: 自动触发智能评估（非阻塞）
+#
+# 提交后自动检测变更内容，如果涉及 agent/skill/prompt 变更，
+# 在后台启动 smart-check.sh 并输出提示。
+#
+# 这是非阻塞的 — 不会影响 git commit 的速度。
+# 评估结果会写入 .eval-last-run.log
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+LOG_FILE="$REPO_ROOT/.eval-last-run.log"
+
+# 检查是否有需要评估的变更
+CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+
+if [ -z "$CHANGED_FILES" ]; then
+    exit 0
+fi
+
+NEEDS_EVAL=false
+
+while IFS= read -r file; do
+    case "$file" in
+        src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*|\
+        ../personal-assets/技能/*|skills/*)
+            NEEDS_EVAL=true; break ;;
+    esac
+done <<< "$CHANGED_FILES"
+
+if [ "$NEEDS_EVAL" = true ]; then
+    echo ""
+    echo "📋 检测到 agent/skill 变更，正在后台启动评估..."
+    echo "   结果将写入: .eval-last-run.log"
+    echo "   手动查看: bash scripts/smart-check.sh"
+    echo ""
+
+    # 非阻塞后台运行
+    nohup bash "$REPO_ROOT/scripts/smart-check.sh" > "$LOG_FILE" 2>&1 &
+    EVAL_PID=$!
+    echo "   评估进程 PID: $EVAL_PID"
+    echo ""
+    echo "   完成后可用以下命令查看结果:"
+    echo "     cat .eval-last-run.log | tail -30"
+fi
+
+exit 0

@@ -25,6 +25,11 @@ build/
 .coverage
 htmlcov/
 
+# Evaluation runtime
+.eval-tracker
+.eval-last-run.log
+.eval-status
+
 # Node
 node_modules/tsconfig.tsbuildinfo
 config/mcp_servers.json

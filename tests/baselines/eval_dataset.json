@@ -1,0 +1,286 @@
+{
+  "description": "Evaluation dataset — 20 cases covering conversation, finance, search, media, multi-step, and edge cases.",
+  "version": "1.0",
+  "cases": [
+    {
+      "case_id": "conv_greeting",
+      "user_input": "你好",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["conversation", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "conv_capability",
+      "user_input": "你能帮我做什么？",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["conversation", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "conv_thanks",
+      "user_input": "谢谢你的帮助",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["conversation", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "finance_holdings",
+      "user_input": "查询我的当前持仓",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.holdings_summary"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "holdings"],
+      "difficulty": "easy",
+      "risk": "medium"
+    },
+    {
+      "case_id": "finance_assets",
+      "user_input": "我有哪些资产？",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.asset_lookup"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "assets"],
+      "difficulty": "easy",
+      "risk": "medium"
+    },
+    {
+      "case_id": "finance_snapshot_history",
+      "user_input": "查看我的资产快照历史",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.snapshot_history"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "snapshots"],
+      "difficulty": "medium",
+      "risk": "medium"
+    },
+    {
+      "case_id": "finance_recent_snapshots",
+      "user_input": "最近5条快照记录",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.recent_snapshots"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "snapshots"],
+      "difficulty": "medium",
+      "risk": "medium"
+    },
+    {
+      "case_id": "finance_bucket_allocation",
+      "user_input": "我的桶配置对比",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.bucket_allocation"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "allocation"],
+      "difficulty": "medium",
+      "risk": "medium"
+    },
+    {
+      "case_id": "finance_portfolio_risk",
+      "user_input": "分析我的投资组合风险",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "portfolio", "analysis"],
+      "difficulty": "hard",
+      "risk": "high"
+    },
+    {
+      "case_id": "web_search_general",
+      "user_input": "搜索Python异步编程最佳实践",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["web_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["search", "web"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "web_news_finance",
+      "user_input": "搜索最新的财经新闻",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["news_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["search", "news", "finance"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "web_weather",
+      "user_input": "今天北京天气怎么样",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["weather"],
+        "forbidden_tools": []
+      },
+      "tags": ["weather", "web"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "web_stock_query",
+      "user_input": "查询贵州茅台的实时行情",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance_query"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "stock", "web"],
+      "difficulty": "medium",
+      "risk": "medium"
+    },
+    {
+      "case_id": "media_image_gen",
+      "user_input": "帮我生成一张日落的图片",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["agnes.generate_image"],
+        "forbidden_tools": []
+      },
+      "tags": ["media", "image"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "multi_holdings_and_news",
+      "user_input": "查询我的持仓并搜索最新市场新闻",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["multi-step", "finance", "news"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "multi_portfolio_analysis",
+      "user_input": "分析我的投资组合并给出调整建议",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["multi-step", "finance", "analysis"],
+      "difficulty": "hard",
+      "risk": "high"
+    },
+    {
+      "case_id": "edge_invalid_stock",
+      "user_input": "查询不存在的股票代码 ZZZ999",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "error_handling"],
+      "difficulty": "hard",
+      "risk": "low"
+    },
+    {
+      "case_id": "edge_english_input",
+      "user_input": "What is my current portfolio?",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "english"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "edge_out_of_scope",
+      "user_input": "帮我订一张机票",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "out_of_scope"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "edge_gibberish",
+      "user_input": "asdfjkl 12345 xyz",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "gibberish"],
+      "difficulty": "hard",
+      "risk": "low"
+    }
+  ]
+}

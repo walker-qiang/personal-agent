@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -379,7 +380,7 @@ class TestReflexionConfig:
         from matrix.config import load_config
         monkeypatch.setenv("REFLEXION_MAX_ATTEMPTS", "3")
         monkeypatch.setenv("JWT_SECRET", "test-secret-for-unit-test")
-        monkeypatch.chdir("/Users/liqiang/code/personal-system/personal-agent")
+        monkeypatch.chdir(str(Path(__file__).parent.parent))
         config = load_config()
         assert config.reflexion_max_attempts == 3
 
@@ -388,7 +389,7 @@ class TestReflexionConfig:
         from matrix.config import load_config
         monkeypatch.setenv("REFLEXION_MAX_ATTEMPTS", "0")
         monkeypatch.setenv("JWT_SECRET", "test-secret-for-unit-test")
-        monkeypatch.chdir("/Users/liqiang/code/personal-system/personal-agent")
+        monkeypatch.chdir(str(Path(__file__).parent.parent))
         config = load_config()
         assert config.reflexion_max_attempts == 0
 
@@ -397,7 +398,7 @@ class TestReflexionConfig:
         from matrix.config import load_config
         monkeypatch.setenv("REFLEXION_MAX_ATTEMPTS", "99")
         monkeypatch.setenv("JWT_SECRET", "test-secret-for-unit-test")
-        monkeypatch.chdir("/Users/liqiang/code/personal-system/personal-agent")
+        monkeypatch.chdir(str(Path(__file__).parent.parent))
         config = load_config()
         assert config.reflexion_max_attempts == 5  # clamped to max
 

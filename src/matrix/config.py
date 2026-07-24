@@ -58,6 +58,13 @@ ENV_REFLEXION_MAX_ATTEMPTS = "REFLEXION_MAX_ATTEMPTS"
 ENV_OTEL_EXPORTER_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
 ENV_OTEL_EXPORT = "OTEL_EXPORT"
 
+# Code sandbox config
+ENV_CODE_SANDBOX_ENABLED = "MATRIX_CODE_SANDBOX_ENABLED"
+ENV_CODE_SANDBOX_TIMEOUT_SEC = "MATRIX_CODE_SANDBOX_TIMEOUT_SEC"
+ENV_CODE_SANDBOX_MAX_MEMORY_MB = "MATRIX_CODE_SANDBOX_MAX_MEMORY_MB"
+ENV_CODE_SANDBOX_MAX_OUTPUT_CHARS = "MATRIX_CODE_SANDBOX_MAX_OUTPUT_CHARS"
+ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
+
 # ---- Defaults ----
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
@@ -141,6 +148,11 @@ class AgentConfig:
     reflexion_max_attempts: int = 2  # 0 disables Reflexion loop
     otel_exporter_endpoint: str = ""  # OTLP endpoint (e.g. http://localhost:4318/v1/traces)
     otel_export: bool = False  # Enable OTLP export
+    code_sandbox_enabled: bool = False  # Code execution sandbox (default off)
+    code_sandbox_timeout_sec: int = 30  # Execution timeout
+    code_sandbox_max_memory_mb: int = 512  # Memory limit
+    code_sandbox_max_output_chars: int = 10000  # Output truncation
+    code_sandbox_network: bool = False  # Network access in sandbox
 
     @property
     def active_api_key(self) -> str:
@@ -268,6 +280,23 @@ def load_config() -> AgentConfig:
     otel_endpoint = os.environ.get(ENV_OTEL_EXPORTER_ENDPOINT, "").strip()
     otel_export = os.environ.get(ENV_OTEL_EXPORT, "").strip().lower() in ("1", "true", "yes")
 
+    # Code sandbox config
+    code_sandbox_enabled = os.environ.get(
+        ENV_CODE_SANDBOX_ENABLED, ""
+    ).strip().lower() in ("1", "true", "yes")
+    code_sandbox_timeout_sec = clamp_int_env(
+        ENV_CODE_SANDBOX_TIMEOUT_SEC, 30, 5, 120
+    )
+    code_sandbox_max_memory_mb = clamp_int_env(
+        ENV_CODE_SANDBOX_MAX_MEMORY_MB, 512, 128, 4096
+    )
+    code_sandbox_max_output_chars = clamp_int_env(
+        ENV_CODE_SANDBOX_MAX_OUTPUT_CHARS, 10000, 1000, 50000
+    )
+    code_sandbox_network = os.environ.get(
+        ENV_CODE_SANDBOX_NETWORK, ""
+    ).strip().lower() in ("1", "true", "yes")
+
     return AgentConfig(
         root_path=root,
         cache_path=cache_path,
@@ -307,6 +336,11 @@ def load_config() -> AgentConfig:
         reflexion_max_attempts=reflexion_max,
         otel_exporter_endpoint=otel_endpoint,
         otel_export=otel_export,
+        code_sandbox_enabled=code_sandbox_enabled,
+        code_sandbox_timeout_sec=code_sandbox_timeout_sec,
+        code_sandbox_max_memory_mb=code_sandbox_max_memory_mb,
+        code_sandbox_max_output_chars=code_sandbox_max_output_chars,
+        code_sandbox_network=code_sandbox_network,
     )
 
 

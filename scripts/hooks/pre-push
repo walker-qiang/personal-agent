@@ -1,0 +1,134 @@
+#!/bin/bash
+# pre-push hook: Layer 1 Fast Gate + Smart Change Detection
+#
+# Always runs:
+#   - Unit tests (fail-fast)
+#   - Skill format validation
+#
+# Additionally detects what changed and prints recommendations:
+#   - Agent code changed (src/matrix/)       → recommend Layer 2 regression
+#   - Skills/knowledge changed (技能/)        → recommend Layer 2 regression
+#   - Prompts or LLM config changed          → recommend Layer 3 quality
+#
+# Bypass with: git push --no-verify (not recommended)
+
+set -e
+
+# Resolve repo root (personal-agent/)
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---- 1. Unit tests (fail-fast) ----
+echo "▶ Running unit tests..."
+python -m pytest tests/ -x -q 2>&1 | tail -5
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo ""
+    echo "✗ Unit tests failed. Push blocked."
+    echo "  Fix the failures or use 'git push --no-verify' to bypass."
+    exit 1
+fi
+
+# ---- 2. Skill format validation ----
+echo "▶ Validating skills..."
+python -m matrix.evaluation.cli check-skills 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "✗ Skill validation failed. Push blocked."
+    echo "  Fix the errors or use 'git push --no-verify' to bypass."
+    exit 1
+fi
+
+echo ""
+echo "✓ Layer 1 checks passed."
+echo ""
+
+# ---- 2.5 Check last evaluation status ----
+STATUS_FILE="$REPO_ROOT/.eval-status"
+if [ -f "$STATUS_FILE" ]; then
+    EVAL_STATUS=$(grep "^status:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
+    EVAL_COMMIT=$(grep "^commit:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
+    EVAL_REGRESSION=$(grep "^regression:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
+    EVAL_QUALITY=$(grep "^quality:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
+
+    if [ "$EVAL_STATUS" = "failed" ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  ⚠️  上次评估发现问题 (commit ${EVAL_COMMIT})"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        if [ "$EVAL_REGRESSION" = "failed" ]; then
+            echo "  ✗ Layer 2 回归: 检测到回归"
+        fi
+        if [ "$EVAL_QUALITY" = "failed" ]; then
+            echo "  ✗ Layer 3 质量: 检测到质量下降"
+        fi
+        echo ""
+        echo "  查看详情: cat .eval-last-run.log | tail -30"
+        echo "  修复后重跑: bash scripts/smart-check.sh --force"
+        echo "  确认无需修复直接推送: git push --no-verify"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+fi
+
+# ---- 3. Smart change detection ----
+# Determine which files changed in this push
+CHANGED_FILES=$(git diff --name-only HEAD@{1} HEAD 2>/dev/null || git diff --name-only --cached HEAD 2>/dev/null || git diff --name-only origin/$(git rev-parse --abbrev-ref HEAD)...HEAD 2>/dev/null || echo "")
+
+if [ -z "$CHANGED_FILES" ]; then
+    # Fallback: use diff against remote
+    CHANGED_FILES=$(git diff --name-only $(git rev-parse --abbrev-ref HEAD) 2>/dev/null || echo "")
+fi
+
+if [ -z "$CHANGED_FILES" ]; then
+    exit 0
+fi
+
+AGENT_CODE_CHANGED=false
+SKILL_KB_CHANGED=false
+PROMPT_LLM_CHANGED=false
+EVAL_INFRA_CHANGED=false
+
+while IFS= read -r file; do
+    case "$file" in
+        src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*)
+            AGENT_CODE_CHANGED=true ;;
+        ../personal-assets/技能/*|skills/*)
+            SKILL_KB_CHANGED=true ;;
+        src/matrix/agent/commander.py|src/matrix/agent/domain_agents/*|src/matrix/orchestration/nodes/_helpers.py)
+            PROMPT_LLM_CHANGED=true ;;
+        tests/baselines/*|src/matrix/evaluation/*)
+            EVAL_INFRA_CHANGED=true ;;
+    esac
+done <<< "$CHANGED_FILES"
+
+# Print recommendations based on what changed
+RECOMMENDATIONS=""
+
+if [ "$AGENT_CODE_CHANGED" = true ] || [ "$SKILL_KB_CHANGED" = true ]; then
+    RECOMMENDATIONS="${RECOMMENDATIONS}  ▶ python -m matrix.evaluation.cli regression\n"
+fi
+
+if [ "$PROMPT_LLM_CHANGED" = true ]; then
+    RECOMMENDATIONS="${RECOMMENDATIONS}  ▶ python -m matrix.evaluation.cli quality\n"
+fi
+
+if [ -n "$RECOMMENDATIONS" ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  📋 变更检测 — 建议运行以下检查:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [ "$AGENT_CODE_CHANGED" = true ]; then
+        echo "  ⚡ Agent 代码已变更 (src/matrix/)"
+    fi
+    if [ "$SKILL_KB_CHANGED" = true ]; then
+        echo "  📚 Skill/知识库已变更 (技能/)"
+    fi
+    if [ "$PROMPT_LLM_CHANGED" = true ]; then
+        echo "  🧠 Prompt/LLM 逻辑已变更"
+    fi
+    echo ""
+    printf "$RECOMMENDATIONS"
+    echo ""
+    echo "  或一键运行智能检查: bash scripts/smart-check.sh"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+fi
+
+exit 0

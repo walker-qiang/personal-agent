@@ -91,7 +91,8 @@ class TestTools:
         data = resp.json()
         assert "tools" in data
         names = {t["name"] for t in data["tools"]}
-        assert len(names) == 15
+        # Tool count varies based on config (e.g., code sandbox is conditionally registered)
+        assert len(names) >= 14
         assert "finance.holdings_summary" in names
         assert "finance_query" in names
 

@@ -23,6 +23,7 @@ INVESTMENT_ANALYST = AgentDefinition(
         "news_search",
         "web_search",
         "web_fetch",
+        "code.run_python",
     ],
     # General skills: available from skills/common/ (flat structure: all in personal-assets/技能/)
     general_skills=[

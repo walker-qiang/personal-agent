@@ -420,22 +420,8 @@ class ChatService:
             return {"ok": True, "recorded": content, "total_insights": len(self._wm_insights[user_id])}
         return {"ok": False, "error": f"Unknown action: {action}"}
 
-    def _handle_step_control(self, action: str, reason: str = "") -> dict:
-        """Handle step_control tool calls from the LLM.
-
-        The LLM explicitly signals its execution state instead of the system
-        guessing from text content. This eliminates the ambiguity between
-        'completed', 'thinking', 'confused', and 'explaining'.
-        """
-        valid = {"complete", "skip", "need_info"}
-        if action not in valid:
-            return {"ok": False, "error": f"Unknown action: {action}", "valid_actions": list(valid)}
-
-        logger.info("step_control: action=%s reason=%s", action, reason[:100] if reason else "")
-        return {"ok": True, "action": action, "reason": reason, "message": f"Step control: {action}"}
-
     def _register_internal_tools(self) -> None:
-        """Register context management tools (P0-P2: get_stored_data, working_memory, step_control).
+        """Register context management tools (P0-P2: get_stored_data, working_memory).
 
         Extracted from __init__ to keep the constructor focused on wiring.
         """
@@ -471,28 +457,6 @@ class ChatService:
                 "required": ["action", "content"],
             },
             handler=self._handle_working_memory,
-        ))
-        self.tools.register(ToolDefinition(
-            name="step_control",
-            description=(
-                "Explicitly signal your current execution state. Use this instead of "
-                "relying on the system to guess your intent from text content.\n"
-                "- complete: The current step is finished successfully. Use with reason "
-                "to summarize what was accomplished.\n"
-                "- skip: Skip this step because it's unnecessary (e.g., prerequisites "
-                "not met, data already available).\n"
-                "- need_info: You need more information before you can proceed. "
-                "Describe what's missing."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["complete", "skip", "need_info"], "description": "Your execution state"},
-                    "reason": {"type": "string", "description": "Brief explanation of why you're in this state"},
-                },
-                "required": ["action"],
-            },
-            handler=self._handle_step_control,
         ))
 
     def _cleanup_stale_checkpoint(self, thread_id: str, call_id: str) -> None:

@@ -68,18 +68,25 @@ class TestSkillDefinition:
 
 
 class TestLoadSkills:
+    # Skills are stored in personal-assets/技能/ (durable source of truth).
+    # Tests reference it via relative path from personal-agent/ root.
+    SKILLS_DIR = Path("../personal-assets/技能")
+
     def test_loads_from_skill_dirs(self):
-        """Test loading skills from the investment skills directory."""
-        skills_dir = Path("skills/investment")
+        """Test loading skills from personal-assets/技能/ directory."""
+        skills_dir = self.SKILLS_DIR
         if not skills_dir.exists():
             return  # Skip if dir doesn't exist in test context
         skills = load_skills(skills_dir)
-        assert len(skills) == 3
+        assert len(skills) >= 3
         names = {s.name for s in skills}
-        assert names == {"anomaly-diagnosis", "portfolio-review", "allocation-check"}
+        # Core investment skills should be present
+        assert "anomaly-diagnosis" in names
+        assert "portfolio-review" in names
+        assert "allocation-check" in names
 
     def test_anomaly_diagnosis_has_workflow(self):
-        skills_dir = Path("skills/investment")
+        skills_dir = self.SKILLS_DIR
         if not skills_dir.exists():
             return
         skills = load_skills(skills_dir)
@@ -90,7 +97,7 @@ class TestLoadSkills:
         assert anomaly.workflow[2]["tool"] == "finance.bucket_allocation"
 
     def test_allocation_check_has_workflow(self):
-        skills_dir = Path("skills/investment")
+        skills_dir = self.SKILLS_DIR
         if not skills_dir.exists():
             return
         skills = load_skills(skills_dir)

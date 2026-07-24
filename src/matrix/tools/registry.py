@@ -13,6 +13,7 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
         self._guard: object | None = None  # ToolGuard or None
+        self._code_guard: object | None = None  # CodeGuard or None
         self._injection_guard: object | None = None  # IndirectInjectionGuard
 
     def register(self, tool: ToolDefinition) -> None:
@@ -42,7 +43,13 @@ class ToolRegistry:
             ok, reason = self._guard.check(name, args)
             if not ok:
                 raise ToolGuardError(f"tool blocked: {reason}")
-        # ---- END TOOL GUARD ----
+        # ---- CODE GUARD (pre-execution, code tools only) ----
+        if self._code_guard:
+            from ..guardrails.tool_guard import ToolGuardError
+            ok, reason = self._code_guard.check(name, args)
+            if not ok:
+                raise ToolGuardError(f"code blocked: {reason}")
+        # ---- END GUARDS ----
         tool = self._tools[name]
         result = tool.handler(**args)
 
@@ -63,6 +70,10 @@ class ToolRegistry:
     def set_guard(self, guard: object) -> None:
         """Attach a ToolGuard instance for pre-execution safety checks."""
         self._guard = guard
+
+    def set_code_guard(self, guard: object) -> None:
+        """Attach a CodeGuard instance for code-specific pre-execution checks."""
+        self._code_guard = guard
 
     def set_injection_guard(self, guard: object) -> None:
         """Attach an IndirectInjectionGuard for post-execution result scanning."""

@@ -124,6 +124,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("rag: initialization failed (will run without RAG): %s", exc)
 
+    # ---- CODE SANDBOX ----
+    if config.code_sandbox_enabled:
+        from ..tools.code import register_all as register_code_tools
+
+        code_guard = register_code_tools(
+            tools_registry,
+            timeout_sec=config.code_sandbox_timeout_sec,
+            max_memory_mb=config.code_sandbox_max_memory_mb,
+            max_output_chars=config.code_sandbox_max_output_chars,
+            network_enabled=config.code_sandbox_network,
+        )
+        tools_registry.set_code_guard(code_guard)
+        logger.info(
+            "code: sandbox enabled (timeout=%ds, memory=%dMB)",
+            config.code_sandbox_timeout_sec,
+            config.code_sandbox_max_memory_mb,
+        )
+    # ---- END CODE SANDBOX ----
+
     # ---- MCP CLIENT ----
     # Connect to external MCP servers and register their tools
     app.state.mcp_client = None

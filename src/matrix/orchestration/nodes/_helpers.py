@@ -137,15 +137,6 @@ When you discover a critical piece of information (a specific value, ID, constra
 record it using the `working_memory` tool with action="add_insight". This ensures the insight
 remains available even if the conversation history is compressed.
 
-## Step Control
-
-You have a `step_control` tool to explicitly signal your execution state:
-- Use `step_control(action="complete")` when you have finished the current step successfully.
-- Use `step_control(action="skip")` when this step is unnecessary or already done.
-- Use `step_control(action="need_info")` when you need more information to proceed.
-
-This eliminates ambiguity — the system no longer needs to guess whether you're done, thinking, or stuck.
-
 ## Honesty Rules — READ FIRST
 **You MUST NOT fabricate data.** If a tool result does not contain the specific information the user asked for, you MUST clearly state that you could not find it. Fabricating plausible-sounding details is the worst possible failure.
 
@@ -205,6 +196,41 @@ When calling `agnes.generate_image` or `agnes.generate_video`, follow these rule
 **Video generation note:**
 - Video generation is asynchronous and takes 2-3 minutes. The tool will wait for completion automatically.
 - After calling the tool, show the result with: ![描述](video_url)
+
+## Code Execution Guidelines
+When calling `code.run_python`, follow these rules:
+
+**When to use code execution:**
+- Data processing: calculate returns, aggregate holdings, compute ratios
+- Numerical analysis: statistical calculations, percentage changes, comparisons
+- Format conversion: transform tool results into tables or structured formats
+- Multi-step calculations that are error-prone to do mentally
+
+**When NOT to use code execution:**
+- Simple arithmetic (e.g., "35000 / 100 = 350") — do it inline
+- When a direct tool call already provides the answer
+- For web searches or data retrieval — use the appropriate tools instead
+
+**Code writing rules:**
+- Use `print()` to output results — the sandbox captures stdout
+- Available libraries: Python standard library only (json, csv, math, statistics, datetime, etc.)
+- Do NOT use `os.system`, `subprocess`, `shutil.rmtree`, or other system calls
+- Do NOT attempt file operations outside the sandbox
+- Keep code concise and focused on the specific calculation
+- If you need data from a previous tool result, embed it directly in the code as a variable
+
+**Example:**
+```python
+# Calculate portfolio return
+holdings = {{"股票": 150000, "债券": 80000, "现金": 20000}}
+total = sum(holdings.values())
+for asset, value in holdings.items():
+    pct = value / total * 100
+    print(f"{{asset}}: {{value}}元 ({{pct:.1f}}%)")
+print(f"总计: {{total}}元")
+```
+
+If execution fails (exit_code != 0), read the stderr, fix the code, and retry. Common issues: syntax errors, missing imports, typos.
 
 ## Output
 - Today is {today}. Never invent dates — only cite dates found in search results.
@@ -788,14 +814,12 @@ def _llm_summarize_from_results(
 
     summary_text = "\n\n".join(result_summary_parts)
 
-    summary_msg = [
-        {"role": "system", "content": "你是一个有帮助的助手。请基于提供的工具搜索结果，直接回答用户的问题。不要调用工具，直接回答。使用中文。"},
-        {"role": "user", "content": f"用户问题：{question}\n\n以下是工具搜索结果：\n\n{summary_text}\n\n请基于以上结果回答用户的问题。"},
-    ]
+    system_prompt = "你是一个有帮助的助手。请基于提供的工具搜索结果，直接回答用户的问题。不要调用工具，直接回答。使用中文。"
+    user_content = f"用户问题：{question}\n\n以下是工具搜索结果：\n\n{summary_text}\n\n请基于以上结果回答用户的问题。"
 
     try:
-        response = llm.invoke(summary_msg)
-        return response.content.strip() if hasattr(response, "content") else str(response)
+        response = llm.complete(system_prompt, [{"role": "user", "content": user_content}])
+        return response.strip() if isinstance(response, str) else str(response)
     except Exception:
         logger.exception("_llm_summarize_from_results: LLM call failed")
         return "抱歉，系统暂时无法处理您的问题。请稍后重试。"
@@ -817,11 +841,9 @@ def _build_react_final_answer(
     # (which may be set directly by error paths in react_llm_node)
     answer = react.get("answer", "")
     if not answer:
+        # Pass 1: prefer text-only assistant messages (no tool_calls at all)
         for msg in reversed(messages):
             if msg.get("role") == "assistant" and msg.get("content"):
-                # Skip messages that were preludes to tool calls — their content
-                # is just thinking/commentary (e.g. "我来重新查询..."), not an
-                # actual answer to the user's question.
                 if msg.get("tool_calls"):
                     continue
                 answer = msg["content"]

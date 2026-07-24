@@ -1,0 +1,197 @@
+{
+  "version": "2026-07-24-v0341",
+  "created_at": "2026-07-24T03:41:36.226035+00:00",
+  "git_commit": "01a1c64",
+  "summary": {
+    "total": 20,
+    "avg_quality_score": 0.7691666666666666,
+    "dimensions": {
+      "accuracy": 0.8333333333333335,
+      "completeness": 0.6861111111111112,
+      "relevance": 0.836111111111111,
+      "conciseness": 0.9166666666666669
+    }
+  },
+  "case_scores": {
+    "conv_greeting": {
+      "overall": 1.0,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    },
+    "conv_capability": {
+      "overall": 0.72,
+      "dimensions": {
+        "accuracy": 0.5,
+        "completeness": 0.9,
+        "relevance": 0.8,
+        "conciseness": 0.9
+      }
+    },
+    "conv_thanks": {
+      "overall": 1.0,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    },
+    "finance_holdings": {
+      "overall": 0.255,
+      "dimensions": {
+        "accuracy": 0.2,
+        "completeness": 0.1,
+        "relevance": 0.3,
+        "conciseness": 0.8
+      }
+    },
+    "finance_assets": {
+      "overall": 0.45,
+      "dimensions": {
+        "accuracy": 0.5,
+        "completeness": 0.2,
+        "relevance": 0.8,
+        "conciseness": 0.9
+      }
+    },
+    "finance_snapshot_history": {
+      "overall": 0.47,
+      "dimensions": {
+        "accuracy": 0.5,
+        "completeness": 0.3,
+        "relevance": 0.8,
+        "conciseness": 0.9
+      }
+    },
+    "finance_recent_snapshots": {
+      "overall": 0.96,
+      "dimensions": {
+        "accuracy": 0.95,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 0.9
+      }
+    },
+    "finance_bucket_allocation": {
+      "overall": 0.0,
+      "dimensions": {
+        "accuracy": 0.0,
+        "completeness": 0.0,
+        "relevance": 0.0,
+        "conciseness": 1.0
+      }
+    },
+    "finance_portfolio_risk": {
+      "overall": 0.0,
+      "dimensions": {
+        "accuracy": 0.0,
+        "completeness": 0.0,
+        "relevance": 0.0,
+        "conciseness": 0.5
+      }
+    },
+    "web_search_general": {
+      "overall": 0.98,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 0.9
+      }
+    },
+    "web_news_finance": {
+      "overall": 0.52,
+      "dimensions": {
+        "accuracy": 0.5,
+        "completeness": 0.4,
+        "relevance": 0.6,
+        "conciseness": 0.8
+      }
+    },
+    "web_weather": {
+      "overall": 0.96,
+      "dimensions": {
+        "accuracy": 0.95,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 0.9
+      }
+    },
+    "web_stock_query": {
+      "overall": 0.43,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 0.2,
+        "relevance": 0.5,
+        "conciseness": 0.9
+      }
+    },
+    "media_image_gen": {
+      "overall": 1.0,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    },
+    "multi_holdings_and_news": {
+      "overall": 0.91,
+      "dimensions": {
+        "accuracy": 0.9,
+        "completeness": 0.85,
+        "relevance": 0.95,
+        "conciseness": 0.9
+      }
+    },
+    "multi_portfolio_analysis": {
+      "overall": 0.45,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 0.0,
+        "relevance": 0.5,
+        "conciseness": 0.8
+      }
+    },
+    "edge_invalid_stock": {
+      "overall": 1.0,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    },
+    "edge_english_input": {
+      "overall": 0.765,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 0.5,
+        "relevance": 0.8,
+        "conciseness": 0.9
+      }
+    },
+    "edge_out_of_scope": {
+      "overall": 0.975,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 0.9,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    },
+    "edge_gibberish": {
+      "overall": 1.0,
+      "dimensions": {
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "relevance": 1.0,
+        "conciseness": 1.0
+      }
+    }
+  }
+}
