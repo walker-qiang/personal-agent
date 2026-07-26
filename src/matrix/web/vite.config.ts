@@ -4,7 +4,9 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: '../server/static',
+    // Output to react-app subdirectory to avoid overwriting
+    // the pure HTML frontend (static/index.html, marked.min.js)
+    outDir: '../server/static/react-app',
     emptyOutDir: true,
   },
   server: {

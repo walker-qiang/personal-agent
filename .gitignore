@@ -31,7 +31,13 @@ htmlcov/
 .eval-status
 
 # Node
-node_modules/tsconfig.tsbuildinfo
+node_modules/
+tsconfig.tsbuildinfo
+
+# React build output (must not overwrite pure HTML frontend)
+src/matrix/server/static/react-app/
+src/matrix/server/static/assets/
+
 config/mcp_servers.json
 
 # Browser state (contains cookies/session data)
