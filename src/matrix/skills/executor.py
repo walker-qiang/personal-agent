@@ -69,6 +69,22 @@ def execute_skill(
             result = tools.call(tool_name, arguments)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
+            # call() returns {"error": ...} on failures (Phase 2 pipeline)
+            if isinstance(result, dict) and "error" in result:
+                errors.append(f"Step {step_num} ({tool_name}): {result['error']}")
+                step_outputs[step_key] = {"error": result["error"]}
+                if trace:
+                    trace.record({
+                        "ok": False,
+                        "skill": skill.name,
+                        "step": step_num,
+                        "tool": tool_name,
+                        "error": result["error"][:300],
+                        "elapsed_ms": elapsed_ms,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    })
+                continue
+
             # Store output for downstream steps to reference
             step_outputs[step_key] = {"output": result}
 
@@ -88,7 +104,7 @@ def execute_skill(
                     "elapsed_ms": elapsed_ms,
                     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 })
-        except FinanceToolError as err:
+        except Exception as err:
             errors.append(f"Step {step_num} ({tool_name}): {err}")
             step_outputs[step_key] = {"error": str(err)}
             if trace:

@@ -78,12 +78,14 @@ class TestSnapshotHistory:
         assert result["snapshots"][0]["balance_cents"] == 15000
 
     def test_requires_ast_prefix(self, registry):
-        with pytest.raises(FinanceToolError, match="ast_\\*"):
-            registry.call("finance.snapshot_history", {"asset_id": "not-an-ast-id"})
+        result = registry.call("finance.snapshot_history", {"asset_id": "not-an-ast-id"})
+        assert "error" in result
+        assert "ast_" in result["error"]
 
     def test_raises_for_unknown_asset(self, registry):
-        with pytest.raises(FinanceToolError, match="asset not found"):
-            registry.call("finance.snapshot_history", {"asset_id": "ast_nonexistent"})
+        result = registry.call("finance.snapshot_history", {"asset_id": "ast_nonexistent"})
+        assert "error" in result
+        assert "未找到" in result["error"] or "not found" in result["error"].lower()
 
 
 class TestRecentSnapshots:
@@ -129,5 +131,6 @@ class TestErrorHandling:
     def test_rejects_missing_cache(self, tmp_dir):
         registry = ToolRegistry()
         register_all(registry, tmp_dir / "missing.sqlite")
-        with pytest.raises(FinanceToolError, match="finance cache does not exist"):
-            registry.call("finance.holdings_summary")
+        result = registry.call("finance.holdings_summary")
+        assert "error" in result
+        assert "不存在" in result["error"] or "does not exist" in result["error"]

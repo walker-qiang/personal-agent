@@ -1,10 +1,25 @@
-"""Tool registry: declarative registration, discovery, and invocation."""
+"""Tool registry: declarative registration, discovery, and invocation.
+
+Five-step execution pipeline (inspired by Pi-Agent):
+  1. prepareArguments — compatibility shim for LLM provider quirks
+  2. validateArguments — lightweight schema type checking
+  3. beforeToolCall — guards (ToolGuard, CodeGuard)
+  4. execute — handler invocation + output truncation
+  5. afterToolCall — IndirectInjectionGuard sanitization
+
+All errors are encoded as {"error": "..."} dicts, never raised.
+This lets the LLM see the error and decide the next step.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from .base import FinanceToolError, ToolDefinition
+
+logger = logging.getLogger("matrix.tools.registry")
 
 
 class ToolRegistry:
@@ -31,41 +46,142 @@ class ToolRegistry:
         return set(self._tools.keys())
 
     def call(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Validate and invoke a tool by name."""
+        """Invoke a tool through the five-step pipeline.
+
+        Returns a result dict. Errors are encoded as {"error": "..."}.
+        Never raises — the caller (ReAct loop) can rely on getting a dict back.
+        """
         args = arguments or {}
         if not isinstance(args, dict):
-            raise FinanceToolError("arguments must be an object")
-        if name not in self._tools:
-            raise FinanceToolError(f"unknown tool: {name}")
-        # ---- TOOL GUARD (pre-execution) ----
+            return {"error": "arguments must be an object"}
+
+        tool = self._tools.get(name)
+        if tool is None:
+            return {"error": f"工具 {name} 不存在。可用工具: {', '.join(sorted(self._tools.keys())[:10])}"}
+
+        # Step 1: prepareArguments
+        args = self._prepare_arguments(tool, args)
+
+        # Step 2: validateArguments
+        ok, reason = self._validate_arguments(tool, args)
+        if not ok:
+            return {"error": f"参数验证失败: {reason}"}
+
+        # Step 3: beforeToolCall — ToolGuard + CodeGuard
+        # Guards raise ToolGuardError on block, preserving the contract
+        # that ReAct's circuit breaker and test suite rely on.
         if self._guard:
             from ..guardrails.tool_guard import ToolGuardError
             ok, reason = self._guard.check(name, args)
             if not ok:
                 raise ToolGuardError(f"tool blocked: {reason}")
-        # ---- CODE GUARD (pre-execution, code tools only) ----
+
         if self._code_guard:
             from ..guardrails.tool_guard import ToolGuardError
             ok, reason = self._code_guard.check(name, args)
             if not ok:
                 raise ToolGuardError(f"code blocked: {reason}")
-        # ---- END GUARDS ----
-        tool = self._tools[name]
-        result = tool.handler(**args)
 
-        # ---- INDIRECT INJECTION GUARD (post-execution) ----
+        # Step 4: execute + truncate
+        try:
+            result = tool.handler(**args)
+        except FinanceToolError as err:
+            return {"error": self._format_error(name, args, err)}
+        except (TypeError, ValueError) as err:
+            return {"error": self._format_error(name, args, err)}
+        except Exception as err:
+            return {"error": self._format_error(name, args, err)}
+
+        # Apply truncation to structured results
+        if isinstance(result, dict):
+            from .truncate import truncate_result
+            result = truncate_result(result)
+
+        # Step 5: afterToolCall — IndirectInjectionGuard
         if self._injection_guard:
             try:
                 result = self._injection_guard.check_and_sanitize(name, result)
             except Exception as exc:
-                # Never let the guard crash the tool pipeline
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "injection_guard error (tool=%s): %s", name, exc,
                 )
-        # ---- END INDIRECT INJECTION GUARD ----
 
         return result
+
+    # ---- Pipeline steps ----
+
+    @staticmethod
+    def _prepare_arguments(tool: ToolDefinition, args: dict[str, Any]) -> dict[str, Any]:
+        """Step 1: compatibility shim for LLM provider parameter quirks.
+
+        - Drops fields not in the tool's input_schema
+        - Restores stringified arrays back to real arrays
+        """
+        props = tool.input_schema.get("properties", {})
+        cleaned: dict[str, Any] = {}
+        for key, value in args.items():
+            if key not in props:
+                continue
+            expected_type = props[key].get("type", "")
+            if expected_type == "array" and isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        cleaned[key] = parsed
+                        continue
+                except json.JSONDecodeError:
+                    pass
+            cleaned[key] = value
+        return cleaned
+
+    @staticmethod
+    def _validate_arguments(tool: ToolDefinition, args: dict[str, Any]) -> tuple[bool, str]:
+        """Step 2: lightweight schema validation.
+
+        Checks required fields and basic type matching without a full
+        JSON Schema validator.
+        """
+        schema = tool.input_schema
+
+        # Required fields
+        for req in schema.get("required", []):
+            if req not in args:
+                return False, f"缺少必需参数: {req}"
+
+        # Type checking
+        props = schema.get("properties", {})
+        type_map = {
+            "string": str,
+            "integer": int,
+            "number": (int, float),
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+        for key, value in args.items():
+            expected = props.get(key, {}).get("type", "")
+            if expected and expected in type_map:
+                # bool is subclass of int in Python, handle separately
+                if expected == "integer" and isinstance(value, bool):
+                    return False, f"参数 {key} 类型错误: 期望 integer, 得到 boolean"
+                if expected == "boolean" and not isinstance(value, bool):
+                    return False, f"参数 {key} 类型错误: 期望 boolean, 得到 {type(value).__name__}"
+                if expected != "boolean" and not isinstance(value, type_map[expected]):
+                    if expected == "number" and isinstance(value, bool):
+                        return False, f"参数 {key} 类型错误: 期望 number, 得到 boolean"
+                    if expected != "number" or not isinstance(value, (int, float)):
+                        return False, f"参数 {key} 类型错误: 期望 {expected}, 得到 {type(value).__name__}"
+        return True, ""
+
+    @staticmethod
+    def _format_error(name: str, args: dict[str, Any], err: Exception) -> str:
+        """Format an error message with enough context for the LLM to self-correct."""
+        args_preview = json.dumps(args, ensure_ascii=False, default=str)[:200]
+        err_type = type(err).__name__
+        err_msg = str(err)[:300]
+        return f"工具 {name} 执行失败 [{err_type}]: {err_msg}。参数: {args_preview}"
+
+    # ---- Guard setters (unchanged) ----
 
     def set_guard(self, guard: object) -> None:
         """Attach a ToolGuard instance for pre-execution safety checks."""
@@ -84,11 +200,7 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def get_capabilities_summary(self) -> dict[str, list[str]]:
-        """Return a summary of tool capabilities grouped by capability tag.
-
-        Returns:
-            {capability: [tool_name, ...]}
-        """
+        """Return a summary of tool capabilities grouped by capability tag."""
         summary: dict[str, list[str]] = {}
         for tool in self._tools.values():
             for cap in tool.capabilities:

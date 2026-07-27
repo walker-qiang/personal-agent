@@ -126,7 +126,7 @@ class TestTools:
             headers=_auth_headers(auth_token),
         )
         assert resp.status_code == 400
-        assert "unknown tool" in resp.json()["error"]
+        assert "不存在" in resp.json()["error"] or "unknown" in resp.json()["error"].lower()
 
     def test_tools_call_missing_tool(self, client, auth_token):
         resp = client.post(

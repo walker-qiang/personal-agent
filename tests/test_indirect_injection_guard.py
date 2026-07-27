@@ -246,7 +246,7 @@ class TestIntegrationWithToolRegistry:
         registry.register(ToolDefinition(
             name="web_search",
             description="Search the web",
-            input_schema={"query": {"type": "string"}},
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
             handler=fake_search,
         ))
         return registry
@@ -282,7 +282,7 @@ class TestIntegrationWithToolRegistry:
         registry.register(ToolDefinition(
             name="web_search",
             description="Search the web",
-            input_schema={"query": {"type": "string"}},
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
             handler=clean_search,
         ))
 
@@ -332,7 +332,7 @@ class TestEdgeCases:
         registry.register(ToolDefinition(
             name="web_search",
             description="Search",
-            input_schema={"query": {"type": "string"}},
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
             handler=search,
         ))
 

@@ -13,6 +13,40 @@ class FinanceToolError(Exception):
     """Raised for invalid read-only finance tool calls."""
 
 
+def tool_error(
+    tool_name: str,
+    operation: str,
+    reason: str,
+    suggestion: str = "",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Construct a structured tool error return value.
+
+    Error messages should give the LLM enough context to self-correct:
+    - what went wrong (specific, not just "failed")
+    - why it went wrong (if determinable)
+    - how to fix it (if a suggestion can be made)
+
+    Args:
+        tool_name: Name of the tool that failed.
+        operation: What the tool was trying to do (e.g. "查询持仓").
+        reason: Specific failure reason.
+        suggestion: Suggested fix for the LLM.
+        context: Relevant context (parameter summaries, etc.).
+
+    Returns:
+        {"error": "[tool_name] operation失败: reason。建议: suggestion。上下文: ..."}
+    """
+    parts = [f"[{tool_name}] {operation}失败: {reason}"]
+    if suggestion:
+        parts.append(f"建议: {suggestion}")
+    if context:
+        import json
+        ctx_preview = json.dumps(context, ensure_ascii=False, default=str)[:200]
+        parts.append(f"上下文: {ctx_preview}")
+    return {"error": "。".join(parts)}
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     """Immutable definition of a registered tool.

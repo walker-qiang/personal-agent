@@ -5,9 +5,10 @@ Compresses conversation history into a structured handoff document that
 replaces the original messages, targeting ~30% of the window.
 
 Design principles:
-- Structured handoff: four fixed sections (goals, history, abandoned, refs)
+- Structured handoff: five fixed sections (goal, history, abandoned, critical, refs)
+- Token-based backward cut point (keeps ~20K tokens of recent context)
 - Never cut from a tool message (preserves assistant-tool pairing)
-- Minimum 6 messages preserved, minimum 2 messages deleted
+- Incremental update: merges with previous summary on repeated compactions
 - Compiled data ref index to prevent ref loss after compression
 - Uses pipeline LLM to avoid consuming main LLM's context
 """
@@ -19,18 +20,22 @@ import logging
 from typing import Any
 
 from ..llm import LLMClient
+from ..llm.truncate import estimate_tokens
 
 logger = logging.getLogger("matrix.context")
 
 # Thresholds
-COMPACTION_THRESHOLD = 0.85   # Trigger when usage >= 85% of window
-COMPACTION_TARGET = 0.30      # Target to compress to ~30% of window
-MIN_PRESERVE_MESSAGES = 6     # Minimum messages to keep after compression
-MIN_DELETE_MESSAGES = 2       # Minimum messages to delete (avoid trivial compactions)
-CONTEXT_WINDOW_TOKENS = 128000  # Default context window
+COMPACTION_THRESHOLD = 0.85
+COMPACTION_TARGET = 0.30
+MIN_PRESERVE_MESSAGES = 6
+MIN_DELETE_MESSAGES = 2
+CONTEXT_WINDOW_TOKENS = 128000
+
+# Token-based cut point: keep at least this many tokens of recent messages
+KEEP_RECENT_TOKENS = 20000
 
 
-# Compaction prompt: instructs the LLM to produce a structured handoff
+# Compaction prompt: 5 sections (added critical_context)
 COMPACTION_SYSTEM_PROMPT = """You are a conversation summarizer. Your task is to compress a long conversation history into a structured handoff document.
 
 The output MUST be a JSON object with exactly these fields:
@@ -45,8 +50,9 @@ The output MUST be a JSON object with exactly these fields:
     }
   ],
   "abandoned_paths": [
-    "~~Approach description~~: Reason it was abandoned. Include only if there were failed attempts."
+    "Approach description: Reason it was abandoned. Include only if there were failed attempts."
   ],
+  "critical_context": "Critical information that must not be forgotten: specific values, constraints, user preferences, configuration details. List as bullet points.",
   "data_references": [
     {"refId": "xxx", "tool": "tool_name", "summary": "What this data contains"}
   ]
@@ -56,21 +62,45 @@ CRITICAL RULES:
 1. Preserve ALL concrete values: numbers, dates, prices, IDs, names — do NOT generalize them
 2. For execution_history, group by logical phases, not by individual messages
 3. abandoned_paths should only include approaches that were explicitly tried and failed
-4. data_references: include every __refId found in tool results
-5. Keep the user_goal concise but exact — it's the anchor for future reasoning
-6. Output ONLY the JSON object, no other text"""
+4. critical_context: anything that losing would cause the agent to repeat work or make wrong assumptions
+5. data_references: include every __refId found in tool results
+6. Keep the user_goal concise but exact — it's the anchor for future reasoning
+7. Output ONLY the JSON object, no other text"""
+
+
+# Incremental update prompt
+UPDATE_SYSTEM_PROMPT = """You are updating an existing conversation summary with new information.
+
+You will receive:
+1. A previous summary (JSON)
+2. New conversation messages to incorporate
+
+Your task is to produce an updated JSON summary with the same structure:
+
+{
+  "user_goal": "Keep the same as previous, unless the user explicitly changed direction.",
+  "execution_history": [...],  // Merge: keep existing phases, add new ones
+  "abandoned_paths": [...],    // Accumulate: keep existing, add new if any
+  "critical_context": "...",   // Merge: keep existing critical info, add new
+  "data_references": [...]     // Accumulate: keep existing refs, add new ones
+}
+
+CRITICAL RULES:
+1. Do NOT remove information from the previous summary unless it's explicitly contradicted
+2. Preserve ALL concrete values from both previous summary and new messages
+3. For execution_history, append new phases rather than rewriting old ones
+4. Output ONLY the JSON object, no other text"""
 
 
 def build_compaction_messages(
     messages: list[dict[str, Any]],
     user_goal: str,
+    previous_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a compact prompt for the compaction LLM.
 
-    We extract the most relevant parts of the conversation to give the
-    compaction LLM enough context to produce a useful handoff.
+    If previous_summary is provided, uses incremental update prompt.
     """
-    # Build a compact representation of the conversation
     conversation_parts: list[str] = []
 
     for i, msg in enumerate(messages):
@@ -91,7 +121,6 @@ def build_compaction_messages(
                     f"[ASSISTANT #{i}] {str(content)[:300]}"
                 )
         elif role == "tool":
-            # Extract refId if present
             content_str = str(content)[:500]
             ref_hint = ""
             if "__refId" in content_str or "__stored" in content_str:
@@ -99,6 +128,19 @@ def build_compaction_messages(
             conversation_parts.append(f"[TOOL #{i}]{ref_hint} {content_str}")
 
     conversation_text = "\n".join(conversation_parts)
+
+    if previous_summary is not None:
+        return [
+            {"role": "system", "content": UPDATE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Previous summary:\n{json.dumps(previous_summary, ensure_ascii=False, indent=2)}\n\n"
+                    f"New conversation to incorporate:\n\n{conversation_text}\n\n"
+                    "Generate the updated summary JSON."
+                ),
+            },
+        ]
 
     return [
         {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
@@ -114,16 +156,11 @@ def build_compaction_messages(
 
 
 def build_handoff_message(handoff: dict[str, Any]) -> dict[str, Any]:
-    """Convert a structured handoff dict into a single system message.
-
-    This replaces the compressed conversation history in the LLM context.
-    """
+    """Convert a structured handoff dict into a single system message."""
     parts = ["## Conversation Handoff\n"]
 
-    # 1. User's original goal
     parts.append(f"### User Goal\n{handoff.get('user_goal', '')}\n")
 
-    # 2. Execution history
     history = handoff.get("execution_history", [])
     if history:
         parts.append("### What Was Done")
@@ -133,16 +170,18 @@ def build_handoff_message(handoff: dict[str, Any]) -> dict[str, Any]:
             outcome = phase.get("outcome", "")
             parts.append(f"\n**{phase_name}**: {actions}")
             if outcome:
-                parts.append(f"  → Result: {outcome}")
+                parts.append(f"  -> Result: {outcome}")
 
-    # 3. Abandoned paths
     abandoned = handoff.get("abandoned_paths", [])
     if abandoned:
         parts.append("\n\n### Approaches Already Tried (Do Not Retry)")
         for path in abandoned:
             parts.append(f"- {path}")
 
-    # 4. Data references
+    critical = handoff.get("critical_context", "")
+    if critical:
+        parts.append(f"\n\n### Critical Context (Do Not Forget)\n{critical}")
+
     refs = handoff.get("data_references", [])
     if refs:
         parts.append("\n\n### External Data References (use get_stored_data)")
@@ -161,11 +200,57 @@ def build_handoff_message(handoff: dict[str, Any]) -> dict[str, Any]:
     return {"role": "system", "content": "\n".join(parts)}
 
 
+def find_cut_point(
+    messages: list[dict[str, Any]],
+    keep_tokens: int = KEEP_RECENT_TOKENS,
+) -> int:
+    """Find the cut point using token-based backward traversal.
+
+    Walks from the latest message backward, accumulating tokens until
+    reaching keep_tokens. Then finds the nearest valid cut point
+    (not a tool message) at or after that position.
+
+    Returns the index of the first message to KEEP (0-based).
+    Messages before this index will be compressed.
+    """
+    if len(messages) <= MIN_PRESERVE_MESSAGES + MIN_DELETE_MESSAGES:
+        return -1  # Not enough to compress
+
+    accumulated = 0
+    target_idx = len(messages) - 1
+
+    for i in range(len(messages) - 1, -1, -1):
+        msg_tokens = estimate_tokens(str(messages[i].get("content", "")))
+        accumulated += msg_tokens
+        if accumulated >= keep_tokens:
+            target_idx = i
+            break
+        target_idx = i
+
+    # Find nearest valid cut point (not a tool message) at or after target_idx
+    cut = target_idx
+    while cut < len(messages) and messages[cut].get("role") == "tool":
+        cut += 1
+
+    # Ensure minimum delete
+    if cut < MIN_DELETE_MESSAGES:
+        cut = MIN_DELETE_MESSAGES
+        while cut < len(messages) and messages[cut].get("role") == "tool":
+            cut += 1
+
+    # Ensure minimum preserve
+    if len(messages) - cut < MIN_PRESERVE_MESSAGES:
+        return -1  # Can't preserve enough
+
+    return cut
+
+
 def compact_messages(
     messages: list[dict[str, Any]],
     user_goal: str,
     llm: LLMClient,
     context_window: int = CONTEXT_WINDOW_TOKENS,
+    previous_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compress conversation history into a structured handoff.
 
@@ -174,25 +259,14 @@ def compact_messages(
         user_goal: The user's original request (anchor).
         llm: Pipeline LLM for compaction (not the main LLM).
         context_window: Context window size in tokens.
+        previous_summary: If provided, do incremental update instead of from-scratch.
 
     Returns:
         A new message list with the handoff replacing compressed messages.
-        At least MIN_PRESERVE_MESSAGES remain.
     """
-    if len(messages) <= MIN_PRESERVE_MESSAGES + MIN_DELETE_MESSAGES:
+    cut_point = find_cut_point(messages)
+    if cut_point < 0:
         return messages  # Not enough to compress
-
-    # Find a safe cut point: cannot cut from a tool message
-    target_keep = MIN_PRESERVE_MESSAGES
-    cut_point = len(messages) - target_keep
-
-    # Ensure we don't cut from a tool message
-    while cut_point > 0 and messages[cut_point].get("role") == "tool":
-        cut_point -= 1
-        target_keep = len(messages) - cut_point
-
-    if cut_point <= MIN_DELETE_MESSAGES:
-        return messages  # Not enough messages before the safe cut point
 
     to_compress = messages[:cut_point]
     to_keep = list(messages[cut_point:])
@@ -202,8 +276,7 @@ def compact_messages(
         len(to_compress), len(to_keep), user_goal[:80],
     )
 
-    # Build compaction prompt and call pipeline LLM
-    compaction_msgs = build_compaction_messages(to_compress, user_goal)
+    compaction_msgs = build_compaction_messages(to_compress, user_goal, previous_summary)
 
     try:
         handoff = llm.complete_json(
@@ -212,18 +285,23 @@ def compact_messages(
         if not isinstance(handoff, dict) or "user_goal" not in handoff:
             logger.warning("Compaction JSON missing user_goal, falling back to truncation")
             return _fallback_truncate(messages, cut_point, to_keep)
+
+        # Merge data_references from previous summary
+        if previous_summary and "data_references" in previous_summary:
+            existing_refs = {r.get("refId") for r in handoff.get("data_references", [])}
+            for ref in previous_summary["data_references"]:
+                if ref.get("refId") not in existing_refs:
+                    handoff.setdefault("data_references", []).append(ref)
+
     except Exception as e:
         logger.warning("Compaction LLM call failed: %s, falling back to truncation", e)
         return _fallback_truncate(messages, cut_point, to_keep)
 
     handoff_msg = build_handoff_message(handoff)
-
-    # Build new message list: handoff + preserved messages
-    # Insert handoff as a system message at the beginning
     result = [handoff_msg] + to_keep
 
     logger.info(
-        "compaction_complete: %d messages → %d messages (handoff + %d preserved)",
+        "compaction_complete: %d messages -> %d messages (handoff + %d preserved)",
         len(messages), len(result), len(to_keep),
     )
 

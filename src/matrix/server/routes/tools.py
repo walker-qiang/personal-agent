@@ -39,10 +39,11 @@ async def tools_call(request: Request) -> JSONResponse:
         started = time.perf_counter()
         result = registry.call(tool, arguments)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+        is_error = isinstance(result, dict) and "error" in result
         trace.record(
             {
                 "event_type": "tool_call",
-                "ok": True,
+                "ok": not is_error,
                 "tool_name": tool,
                 "arguments": arguments,
                 "result": str(result)[:500],
@@ -50,6 +51,8 @@ async def tools_call(request: Request) -> JSONResponse:
                 "ts": timestamp(),
             }
         )
+        if is_error:
+            return JSONResponse({"tool": tool, "error": result["error"]}, status_code=400)
         return JSONResponse({"tool": tool, "result": result})
     except FinanceToolError as err:
         _trace_error(request, str(err))

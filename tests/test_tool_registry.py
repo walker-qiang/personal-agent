@@ -49,13 +49,14 @@ class TestToolRegistry:
         assert result["holding_count"] == 2
         assert result["total_balance_cents"] == 35000
 
-    def test_call_unknown_tool_raises(self, tmp_cache_path):
+    def test_call_unknown_tool_returns_error(self, tmp_cache_path):
         registry = ToolRegistry()
         register_all(registry, tmp_cache_path)
-        with pytest.raises(FinanceToolError, match="unknown tool"):
-            registry.call("finance.unknown")
+        result = registry.call("finance.unknown")
+        assert "error" in result
+        assert "不存在" in result["error"]
 
-    def test_call_with_non_dict_arguments_raises(self):
+    def test_call_with_non_dict_arguments_returns_error(self):
         registry = ToolRegistry()
         td = ToolDefinition(
             name="test.tool",
@@ -64,8 +65,9 @@ class TestToolRegistry:
             handler=lambda: {"ok": True},
         )
         registry.register(td)
-        with pytest.raises(FinanceToolError, match="arguments must be an object"):
-            registry.call("test.tool", "not-a-dict")  # type: ignore
+        result = registry.call("test.tool", "not-a-dict")  # type: ignore
+        assert "error" in result
+        assert "object" in result["error"]
 
     def test_get_returns_tool_or_none(self, tmp_cache_path):
         registry = ToolRegistry()
@@ -98,3 +100,101 @@ class TestToolDefinition:
         r = repr(td)
         assert "lambda" not in r
         assert "handler" not in r
+
+class TestToolPipeline:
+    """Tests for the five-step pipeline (Phase 2)."""
+
+    def test_prepare_arguments_drops_unknown_fields(self):
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.echo",
+            description="echo back args",
+            input_schema={
+                "type": "object",
+                "properties": {"x": {"type": "integer"}},
+                "required": ["x"],
+            },
+            handler=lambda x: {"x": x},
+        )
+        registry.register(td)
+        # Extra field "y" should be dropped
+        result = registry.call("test.echo", {"x": 42, "y": "extra"})
+        assert result == {"x": 42}
+
+    def test_prepare_arguments_restores_stringified_array(self):
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.array",
+            description="accept array",
+            input_schema={
+                "type": "object",
+                "properties": {"items": {"type": "array"}},
+            },
+            handler=lambda items: {"count": len(items)},
+        )
+        registry.register(td)
+        # Some LLMs serialize arrays as strings
+        result = registry.call("test.array", {"items": "[1, 2, 3]"})
+        assert result == {"count": 3}
+
+    def test_validate_arguments_missing_required(self):
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.required",
+            description="requires x",
+            input_schema={
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            },
+            handler=lambda x: {"x": x},
+        )
+        registry.register(td)
+        result = registry.call("test.required", {})
+        assert "error" in result
+        assert "缺少必需参数" in result["error"]
+
+    def test_validate_arguments_wrong_type(self):
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.typed",
+            description="typed param",
+            input_schema={
+                "type": "object",
+                "properties": {"n": {"type": "integer"}},
+            },
+            handler=lambda n: {"doubled": n * 2},
+        )
+        registry.register(td)
+        result = registry.call("test.typed", {"n": "not-a-number"})
+        assert "error" in result
+        assert "类型错误" in result["error"]
+
+    def test_execute_error_returns_error_dict(self):
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.failing",
+            description="always fails",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda: (_ for _ in ()).throw(ValueError("boom")),
+        )
+        registry.register(td)
+        result = registry.call("test.failing")
+        assert "error" in result
+        assert "boom" in result["error"]
+        assert "test.failing" in result["error"]
+
+    def test_truncate_applied_to_result(self):
+        from matrix.tools.truncate import truncate_result
+        # Simulate a tool returning a large list
+        registry = ToolRegistry()
+        td = ToolDefinition(
+            name="test.big",
+            description="returns big data",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda: {"holdings": [{"id": i} for i in range(100)]},
+        )
+        registry.register(td)
+        result = registry.call("test.big")
+        assert len(result["holdings"]) == 50
+        assert result["_holdings_original_count"] == 100

@@ -13,7 +13,10 @@ from ..base import FinanceToolError
 def connect_readonly(cache_path: Path) -> sqlite3.Connection:
     """Open a read-only SQLite connection to the finance cache."""
     if not cache_path.exists():
-        raise FinanceToolError(f"finance cache does not exist: {cache_path}")
+        raise FinanceToolError(
+            f"持仓数据库不存在: {cache_path}。"
+            f"请检查 MATRIX_CACHE_PATH 环境变量，或确认 personal-os 已同步数据。"
+        )
     uri = f"file:{quote(str(cache_path.resolve()), safe='/:')}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
@@ -28,7 +31,10 @@ def clamp_int(value: Any, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        raise FinanceToolError("limit must be an integer") from None
+        raise FinanceToolError(
+            f"limit 参数必须是整数，得到 {type(value).__name__}: {value}。"
+            f"请传入 1 到 200 之间的整数。"
+        ) from None
     if parsed < minimum:
         return minimum
     if parsed > maximum:

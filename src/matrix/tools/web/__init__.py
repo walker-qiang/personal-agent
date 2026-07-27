@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..registry import ToolRegistry
+from ..truncate import truncate_result
 from . import fetch, finance, news_search, search, weather
 
 
@@ -15,7 +16,7 @@ def register_all(registry: ToolRegistry) -> None:
             name=search.tool_definition.name,
             description=search.tool_definition.description,
             input_schema=search.tool_definition.input_schema,
-            handler=search.web_search,
+            handler=lambda **kw: truncate_result(search.web_search(**kw)),
         )
     )
     registry.register(
@@ -23,7 +24,7 @@ def register_all(registry: ToolRegistry) -> None:
             name=news_search.tool_definition.name,
             description=news_search.tool_definition.description,
             input_schema=news_search.tool_definition.input_schema,
-            handler=news_search.news_search,
+            handler=lambda **kw: truncate_result(news_search.news_search(**kw)),
         )
     )
     registry.register(
@@ -31,7 +32,7 @@ def register_all(registry: ToolRegistry) -> None:
             name=finance.tool_definition.name,
             description=finance.tool_definition.description,
             input_schema=finance.tool_definition.input_schema,
-            handler=finance.finance_query,
+            handler=lambda **kw: truncate_result(finance.finance_query(**kw)),
         )
     )
     registry.register(

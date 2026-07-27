@@ -100,13 +100,15 @@ def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
         return {"error": f"获取网页失败: {err}", "text": ""}
 
     text = _extract_text(html)
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n\n... (内容已截断)"
+    from ..truncate import truncate_head
+    tr = truncate_head(text, max_bytes=max_chars * 4)  # chars to bytes approx
+    text = tr.content
 
     return {
         "url": url,
         "text": text,
         "length": len(text),
+        "truncated": tr.truncated,
     }
 
 

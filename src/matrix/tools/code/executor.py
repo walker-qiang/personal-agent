@@ -104,12 +104,15 @@ class SandboxExecutor:
                 error_type = type(e).__name__
                 error_message = str(e)
 
-            # Truncate output to prevent flooding the LLM context
-            if len(stdout) > self._max_output_chars:
-                stdout = stdout[: self._max_output_chars] + "\n... [truncated]"
+            # Truncate output using unified truncation module
+            from ..truncate import truncate_tail
+            stdout_tr = truncate_tail(stdout, max_bytes=self._max_output_chars)
+            stderr_tr = truncate_tail(stderr, max_bytes=self._max_output_chars)
+            if stdout_tr.truncated:
+                stdout = stdout_tr.content
                 truncated = True
-            if len(stderr) > self._max_output_chars:
-                stderr = stderr[: self._max_output_chars] + "\n... [truncated]"
+            if stderr_tr.truncated:
+                stderr = stderr_tr.content
                 truncated = True
 
             elapsed_ms = round((time.perf_counter() - started) * 1000)

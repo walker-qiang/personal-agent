@@ -103,6 +103,52 @@ async def get_messages(request: Request, session_id: str):
     return {"messages": messages}
 
 
+@router.post("/sessions/{session_id}/branch")
+async def branch_session(request: Request, session_id: str):
+    """Branch a session from a specific message.
+
+    Moves the session's leaf_id to the specified message, creating a
+    fork point. New messages will be appended as children of that message.
+    Existing messages on the old branch are preserved.
+    """
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    payload = await request.json()
+    from_message_id = str(payload.get("from_message_id", "")).strip()
+    if not from_message_id:
+        return JSONResponse(
+            {"error": "from_message_id is required"}, status_code=400,
+        )
+    ok = store.branch(session_id, from_message_id)
+    if not ok:
+        return JSONResponse(
+            {"error": f"Message {from_message_id} not found in session {session_id}"},
+            status_code=404,
+        )
+    return {"session_id": session_id, "leaf_id": from_message_id, "branched": True}
+
+
+@router.get("/sessions/{session_id}/branches")
+async def get_branches(request: Request, session_id: str):
+    """List all fork points in a session tree."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    branches = store.get_branches(session_id)
+    return {"session_id": session_id, "branches": branches}
+
+
+@router.get("/sessions/{session_id}/leaf")
+async def get_leaf(request: Request, session_id: str):
+    """Get the current leaf_id for a session."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    leaf_id = store.get_leaf_id(session_id)
+    return {"session_id": session_id, "leaf_id": leaf_id}
+
+
 # ---- Skills CRUD (adapts to multi-agent skills structure) ----
 
 def _get_skills_domain_dir(request: Request, domain: str = "investment") -> Path:

@@ -51,6 +51,7 @@ from ._helpers import (
 from .react import _react_execute_tool_calls
 from ..anti_hallucination import verify_all_claims, build_verified_output, _strip_all_verification_tags
 from ..state import AgentState
+from ..context_loader import enrich_system_prompt
 from ...context.compaction import compact_messages
 
 logger = logging.getLogger("matrix.orchestration")
@@ -357,6 +358,11 @@ def _run_domain_agent_react(
     # Pinned working memory + DataBus index
     wm = cfg.get("working_memory", {})
     system_prompt = _inject_working_memory(system_prompt, wm, cfg.get("history", []))
+
+    # Phase 5: Enrich with project context (AGENTS.md) + skills清单
+    system_prompt = enrich_system_prompt(
+        system_prompt, agent_def=agent_def, agent_registry=cfg.get("agent_registry"),
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
@@ -712,10 +718,15 @@ After calling all needed tools, output your final answer with <answer>...</answe
             if tool_name in tools.tool_names():
                 try:
                     result = tools.call(tool_name, args)
-                    tool_results.append({
-                        "name": tool_name, "arguments": args, "result": result,
-                    })
-                except (FinanceToolError, TypeError) as err:
+                    if isinstance(result, dict) and "error" in result:
+                        tool_results.append({
+                            "name": tool_name, "arguments": args, "error": result["error"],
+                        })
+                    else:
+                        tool_results.append({
+                            "name": tool_name, "arguments": args, "result": result,
+                        })
+                except Exception as err:
                     tool_results.append({
                         "name": tool_name, "arguments": args, "error": str(err),
                     })

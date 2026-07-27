@@ -25,7 +25,7 @@ def snapshot_history(
     """Return effective snapshot history for one durable asset id."""
     path = Path(cache_path) if cache_path else Path("var/cache/finance.sqlite")
     if not asset_id.startswith("ast_"):
-        raise FinanceToolError("asset_id must be a durable ast_* id")
+        raise FinanceToolError(f"asset_id 必须以 ast_ 开头（durable asset id），得到: {asset_id}。请先用 finance.asset_lookup 查找正确的 asset_id。")
     limit = clamp_int(limit, 1, 200)
     where = ["a.fact_id = ?"]
     params: list[Any] = [asset_id]
@@ -46,7 +46,7 @@ def snapshot_history(
             [asset_id],
         ).fetchone()
         if asset is None:
-            raise FinanceToolError(f"asset not found: {asset_id}")
+            raise FinanceToolError(f"未找到资产: {asset_id}。请用 finance.asset_lookup 确认该 asset_id 是否存在。")
         rows = conn.execute(
             f"""SELECT s.fact_id, a.fact_id AS asset_fact_id, a.code, a.name,
                        s.snapshot_date, s.balance_cents, s.expected_yield_pct,

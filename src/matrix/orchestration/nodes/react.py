@@ -46,6 +46,7 @@ from ._helpers import (
     EVALUATOR_INTERVAL,
 )
 from ..state import AgentState
+from ..context_loader import enrich_system_prompt
 
 logger = logging.getLogger("matrix.orchestration")
 
@@ -100,6 +101,9 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         system_prompt, state.get("working_memory", {}), state.get("messages", []),
     )
     system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), state.get("messages", []))
+
+    # Phase 5: Enrich with project context (AGENTS.md) + skills清单
+    system_prompt = enrich_system_prompt(system_prompt, agent_def=agent_def, agent_registry=agent_registry)
 
     react = {
         "messages": react_messages,
@@ -403,6 +407,26 @@ def _execute_single_tool(
         tool_result = agent_tools.call(name, arguments)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
+        # call() returns {"error": ...} on tool execution failures (Phase 2 pipeline).
+        # Check for error key to drive circuit breaker and tracing.
+        if isinstance(tool_result, dict) and "error" in tool_result:
+            _trace(cfg, {
+                "session_id": session_id,
+                "event_type": "tool_call",
+                "node_name": node_name,
+                "agent_id": agent_id,
+                "ok": False, "tool_name": name, "arguments": arguments,
+                "error": tool_result["error"][:300], "elapsed_ms": elapsed_ms, "ts": _now_ts(),
+                "parent_span_id": span_id,
+            })
+            if push_events:
+                _push_event(cfg, "tool_result", {"name": name, "error": tool_result["error"][:200]})
+            breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
+            if breaker is not None:
+                breaker.record_failure(name)
+            return False, {"name": name, "arguments": arguments,
+                           "error": tool_result["error"], "elapsed_ms": elapsed_ms}
+
         # L1: ToolResultRefStore — externalize large results
         if ref_store is not None and ref_store.should_store(tool_result):
             stored = ref_store.store(name, tool_result)
@@ -453,7 +477,7 @@ def _execute_single_tool(
             breaker.record_success(name)
         return True, {"name": name, "arguments": arguments, "result": tool_result, "elapsed_ms": elapsed_ms}
 
-    except (FinanceToolError, TypeError) as err:
+    except Exception as err:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         _trace(cfg, {
             "session_id": session_id,

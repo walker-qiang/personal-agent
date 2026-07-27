@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title       TEXT NOT NULL DEFAULT '',
     provider    TEXT NOT NULL DEFAULT '',
     model       TEXT NOT NULL DEFAULT '',
+    leaf_id     TEXT,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
     msg_count   INTEGER NOT NULL DEFAULT 0
@@ -34,6 +36,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  TEXT NOT NULL DEFAULT '',
+    parent_id   TEXT,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     user_id     TEXT NOT NULL DEFAULT '',
     role        TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
@@ -43,6 +47,12 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_messages_message_id
+    ON messages(message_id);
+
+CREATE INDEX IF NOT EXISTS idx_messages_parent_id
+    ON messages(parent_id);
 
 CREATE TABLE IF NOT EXISTS user_profile (
     user_id     TEXT NOT NULL,
@@ -119,6 +129,38 @@ class SessionStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at)"
         )
+
+        # Phase 7: Session tree — add message_id, parent_id, leaf_id
+        msg_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()]
+        if "message_id" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN message_id TEXT NOT NULL DEFAULT ''")
+        if "parent_id" not in msg_cols:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
+        # Backfill message_id for existing rows
+        self._conn.execute(
+            "UPDATE messages SET message_id = 'm' || CAST(id AS TEXT) WHERE message_id = ''"
+        )
+        # Backfill parent_id: each message's parent is the previous message in the same session
+        self._conn.execute("""
+            UPDATE messages SET parent_id = (
+                SELECT m2.message_id FROM messages m2
+                WHERE m2.session_id = messages.session_id
+                  AND m2.id < messages.id
+                ORDER BY m2.id DESC LIMIT 1
+            ) WHERE parent_id IS NULL
+        """)
+
+        sess_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "leaf_id" not in sess_cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN leaf_id TEXT")
+        # Backfill leaf_id: last message in each session
+        self._conn.execute("""
+            UPDATE sessions SET leaf_id = (
+                SELECT message_id FROM messages
+                WHERE messages.session_id = sessions.id
+                ORDER BY messages.id DESC LIMIT 1
+            ) WHERE leaf_id IS NULL
+        """)
 
     def close(self) -> None:
         with self._lock:
@@ -310,37 +352,127 @@ class SessionStore:
 
     # ---- Message CRUD ----
 
-    def save_message(self, session_id: str, role: str, content: str, user_id: str = "") -> None:
+    def save_message(self, session_id: str, role: str, content: str, user_id: str = "") -> str:
+        """Append a message to the session tree.
+
+        Returns the message_id of the newly created message.
+        The message's parent_id is the session's current leaf_id.
+        """
         now = time.time()
+        msg_id = uuid.uuid4().hex[:12]
         with self._lock:
             conn = self._get_conn()
+            # Get current leaf_id for parent
+            row = conn.execute(
+                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+            ).fetchone()
+            parent_id = row[0] if row else None
+
             # Upsert session
             conn.execute(
-                "INSERT INTO sessions (id, user_id, title, created_at, updated_at, msg_count) "
-                "VALUES (?, ?, ?, ?, ?, 1) "
+                "INSERT INTO sessions (id, user_id, title, created_at, updated_at, msg_count, leaf_id) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  updated_at=excluded.updated_at, "
-                "  msg_count=sessions.msg_count + 1",
-                (session_id, user_id, "", now, now),
+                "  msg_count=sessions.msg_count + 1, "
+                "  leaf_id=excluded.leaf_id",
+                (session_id, user_id, "", now, now, msg_id),
             )
             # Insert message
             conn.execute(
-                "INSERT INTO messages (session_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (session_id, user_id, role, content, now),
+                "INSERT INTO messages (message_id, parent_id, session_id, user_id, role, content, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, parent_id, session_id, user_id, role, content, now),
             )
             conn.commit()
+        return msg_id
 
     def get_history(self, session_id: str, max_turns: int = 8) -> list[dict[str, str]]:
-        """Return the last N turns of conversation history (most recent first)."""
+        """Return conversation history by traversing from leaf to root.
+
+        Walks the parent_id chain from the session's leaf_id backward,
+        collecting up to max_turns*2 messages, then reverses to
+        chronological order.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            # Get current leaf_id
+            row = conn.execute(
+                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+            ).fetchone()
+            if row is None:
+                return []
+
+            leaf_id = row[0]
+            if not leaf_id:
+                # Fallback: no leaf_id set, use linear query
+                rows = conn.execute(
+                    "SELECT role, content FROM messages "
+                    "WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+                    (session_id, max_turns * 2),
+                ).fetchall()
+                rows = list(reversed(rows))
+                return [{"role": r[0], "content": r[1]} for r in rows]
+
+            # Traverse from leaf to root
+            path: list[dict[str, str]] = []
+            current = leaf_id
+            while current and len(path) < max_turns * 2:
+                msg_row = conn.execute(
+                    "SELECT message_id, parent_id, role, content FROM messages WHERE message_id=?",
+                    (current,),
+                ).fetchone()
+                if msg_row is None:
+                    break
+                path.append({"role": msg_row[2], "content": msg_row[3]})
+                current = msg_row[1]  # parent_id
+
+            path.reverse()
+            return path
+
+    def branch(self, session_id: str, from_message_id: str) -> bool:
+        """Move the session's leaf_id back to a specific message.
+
+        This creates a fork point — new messages will be appended as
+        children of from_message_id. Existing messages on the old branch
+        are preserved (append-only).
+
+        Returns True if the branch was successful, False if the message
+        was not found in this session.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT 1 FROM messages WHERE message_id=? AND session_id=?",
+                (from_message_id, session_id),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "UPDATE sessions SET leaf_id=?, updated_at=? WHERE id=?",
+                (from_message_id, time.time(), session_id),
+            )
+            conn.commit()
+            return True
+
+    def get_leaf_id(self, session_id: str) -> str | None:
+        """Return the current leaf_id for a session."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+            ).fetchone()
+            return row[0] if row else None
+
+    def get_branches(self, session_id: str) -> list[dict[str, Any]]:
+        """Return all fork points (messages with multiple children) in a session."""
         with self._lock:
             rows = self._get_conn().execute(
-                "SELECT role, content FROM messages "
-                "WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
-                (session_id, max_turns * 2),
+                "SELECT parent_id, COUNT(*) as cnt FROM messages "
+                "WHERE session_id=? AND parent_id IS NOT NULL "
+                "GROUP BY parent_id HAVING cnt > 1",
+                (session_id,),
             ).fetchall()
-        # Reverse to restore chronological order
-        rows = list(reversed(rows))
-        return [{"role": r[0], "content": r[1]} for r in rows]
+            return [{"fork_point": r[0], "branch_count": r[1]} for r in rows]
 
     def reset(self, session_id: str) -> None:
         """Delete all messages for a session (keeps session metadata)."""

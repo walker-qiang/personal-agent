@@ -920,7 +920,12 @@ def _run_budget_and_compact(
 
 
 def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> None:
-    """Push a real-time event to the SSE queue if available."""
+    """Push a real-time event to the SSE queue if available.
+
+    Creates a structured AgentSessionEvent internally for type safety,
+    but puts (evt_type, payload) tuple on the queue for backward
+    compatibility with SSE consumers.
+    """
     q = cfg.get("event_queue")
     if q is not None:
         try:
