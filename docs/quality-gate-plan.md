@@ -17,7 +17,7 @@
 | Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge + 质量基线对比逻辑 |
 | 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
 
-**测试覆盖**：553 passed, 4 skipped, 0 failed
+**测试覆盖**：651 passed, 4 skipped, 0 failed
 
 ## 现状分析
 
@@ -25,7 +25,7 @@
 
 | 能力 | 现状 | 评估 |
 |------|------|------|
-| 单元测试 | 553 个测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
+| 单元测试 | 651 个测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
 | 评估数据集 | eval_dataset.json（20 条 case） | 已扩展，覆盖 6 大场景 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
@@ -416,7 +416,7 @@ git push
 
 | 变更类型 | 文件路径匹配 | 触发评估 |
 |----------|-------------|----------|
-| Agent 代码 | `src/matrix/agent/*`, `src/matrix/orchestration/*`, `src/matrix/chat/*`, `src/matrix/tools/*` | Layer 2 回归 |
+| Agent 代码 | `src/matrix/agent/*`, `src/matrix/orchestration/*`, `src/matrix/chat/*`, `src/matrix/tools/*`, `src/matrix/tools/base.py`, `src/matrix/tools/registry.py` | Layer 2 回归 |
 | Skill/知识库 | `personal-assets/技能/*`, `skills/*` | Layer 2 回归 |
 | Prompt/LLM 逻辑 | `commander.py`, `domain_agents/*`, `_helpers.py` | Layer 2 + Layer 3 |
 | 仅测试/文档 | `tests/*`, `docs/*`, `*.md`, `scripts/*` | 跳过 |

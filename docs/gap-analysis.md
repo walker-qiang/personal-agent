@@ -6,20 +6,28 @@
 
 ## 一、P0：规划能力 — Plan-and-Execute
 
-### 1.1 现状
+### 1.1 现状（✅ 已部分实现）
 
 当前 Commander 的规划逻辑（`orchestration/nodes/commander.py → commander_plan_node`）：
 
 ```
-用户消息 → LLM 生成 delegation_plan → 单步直接 ReAct / 多步 fan-out 委派
+用户消息 → LLM 生成 delegation_plan → DAG 路由 → delegate(s) → replan_node → aggregate
 ```
 
-**问题**：
+**已实现的能力**：
 
-1. **一次规划，终身不改**：Plan 生成后不再修正。第 2 步返回了意外结果，第 3 步计划已经错了，但系统继续执行。
-2. **无显式 DAG**：`delegation_plan` 是扁平列表 `[{step, agent_id, task}]`，没有依赖关系。所有多步计划通过 LangGraph `Send` API 并行 fan-out，但 Send 之间没有顺序保证——如果 step 2 依赖 step 1 的结果，当前架构无法表达。
-3. **规划与执行未分离**：Commander 用同一个 LLM 做规划和最终汇总。业界最佳实践是规划器用便宜模型（如 DeepSeek Flash），执行器用强模型。
-4. **Token 效率低**：每一步都需要 LLM 重新推理"现在该做什么"，而不是按计划执行。Plan-and-Execute 模式可将 LLM 调用从 ~10 次降到 1-2 次 [$TRAE_REF](https://juejin.cn/post/7663362294992764982)。
+| 能力 | 实现位置 | 说明 |
+|------|----------|------|
+| DAG 依赖解析 | `_get_ready_steps()` | 支持 `depends_on` 字段，拓扑排序并行执行无依赖步骤 |
+| 重规划节点 | `replan_node()` | 每批 delegate 完成后检查是否需要修正计划，最大 2 次 |
+| 规划与执行 LLM 分离 | `commander_plan_node` 使用 `pipeline_llm` | 规划用便宜模型，执行用强模型 |
+| 多步进度事件 | `_push_event("progress", ...)` | plan_created / step_start / step_done / step_error / replan |
+
+**仍存在的差距**：
+
+1. **数据结构未统一**：实际使用 `delegation_plan` 扁平列表（字段 `step`/`purpose`/`output_key`），而非文档设计的 `execution_plan` 嵌套结构（`dag`/`replan_gate`/`plan_type`/`expected_output`）。功能等价但命名不一致。
+2. **无独立 plan_node**：`commander_plan_node` 兼任规划与路由，未分离为独立的 `plan_node`。
+3. **重规划门控简化**：使用 `MAX_REPLAN_ATTEMPTS = 2` 常量，而非文档设计的 `replan_gate: {enabled, check_every, max_total_steps}` 结构。
 
 ### 1.2 业界参考
 
@@ -29,74 +37,30 @@
 
 **LangGraph 的 Plan-and-Execute**：`plan_and_execute` agent 将任务分解为 DAG 子任务，执行器按拓扑排序执行，准确率从 ReAct 的 85% 提升到 92%。
 
-### 1.3 优化设计
+### 1.3 优化设计（实现状态）
 
-#### 1.3.1 新增节点：`plan_node`
+#### 1.3.1 新增节点：`plan_node`（❌ 未实现）
+
+> 实际由 `commander_plan_node` 兼任，未分离为独立节点。
 
 在 `commander_plan_node` 之后、`delegate` 之前插入独立的规划节点。
 
 **输入**：`user_message`、`messages`（历史）、`working_memory`
 
-**输出**：
-```python
-execution_plan = {
-    "dag": [
-        {
-            "step_id": 1,
-            "agent_id": "investment-analyst",
-            "task": "查询当前持仓",
-            "depends_on": [],           # 前置步骤 ID 列表
-            "skill_name": "",
-            "expected_output": "持仓列表及市值",
-        },
-        {
-            "step_id": 2,
-            "agent_id": "investment-analyst",
-            "task": "分析持仓异动",
-            "depends_on": [1],          # 依赖 step 1 的结果
-            "skill_name": "",
-            "expected_output": "异动标的及原因",
-        },
-        {
-            "step_id": 3,
-            "agent_id": "investment-analyst",
-            "task": "生成调仓建议",
-            "depends_on": [2],
-            "skill_name": "",
-            "expected_output": "具体调仓方案",
-        },
-    ],
-    "replan_gate": {
-        "enabled": True,
-        "check_every": 1,               # 每步执行后检查
-        "max_total_steps": 10,
-    },
-    "plan_type": "dag",                 # "linear" | "dag" | "single"
-}
-```
+#### 1.3.2 新增节点：`replan_node`（✅ 已实现）
 
-**规划 LLM 分离**：plan_node 使用 `pipeline_llm`（更便宜的模型），temperature=0.1。
-
-#### 1.3.2 新增节点：`replan_node`
+> 已实现于 `commander.py` 第 776 行，通过 `REPLAN_PROMPT` + `MAX_REPLAN_ATTEMPTS = 2` 控制。
 
 在每步 delegate 执行后检查是否需要重规划。
 
 **触发条件**（任一满足即触发）：
-1. 步骤输出与 `expected_output` 严重不匹配（LLM 判断）
+1. 步骤输出与预期严重不匹配（LLM 判断）
 2. 工具调用全部失败
 3. 步骤返回的 `error` 字段非空
 
-**重规划逻辑**：
-```
-replan_node:
-  1. 收集已完成步骤的输出
-  2. 收集当前步骤的失败信息
-  3. LLM 评估：剩余步骤是否仍然有效？
-  4. 如果计划需要修订 → 生成新的 execution_plan（仅含未完成步骤）
-  5. 如果计划仍然有效 → 继续执行
-```
+#### 1.3.3 图结构调整（✅ 已实现，名称不同）
 
-#### 1.3.3 图结构调整
+> 实际图结构：`commander_plan → _route_dag_first → [Send("delegate") × N] → replan_node → _route_after_replan → aggregate`。实现了 DAG 拓扑排序和并行执行，但无独立的 `plan_node` 和 `execute_next_step` 节点。
 
 ```
 __start__
@@ -104,42 +68,43 @@ __start__
     ▼
 commander_plan
     │
-    ▼
-plan_node (NEW)          ← 生成 execution_plan（DAG）
-    │
     ├── plan_type == "single" → react_prepare → react_loop → aggregate
     │
     └── plan_type in ("dag", "linear") →
         │
         ▼
-    execute_next_step      ← 拓扑排序，取出下一批可执行步骤
+    _route_dag_first         ← 拓扑排序，取出下一批可执行步骤
         │
         ├── 无依赖步骤 → [Send("delegate") × N 并行]
         │
         └── 有依赖步骤 → Send("delegate", 1) 顺序执行
             │
             ▼
-        replan_node (NEW)   ← 每步执行后检查
+        replan_node (✅)      ← 每批执行后检查
             │
-            ├── 需要重规划 → plan_node（循环）
+            ├── 需要重规划 → commander_plan（循环）
             │
-            └── 继续 → execute_next_step（循环）
+            └── 继续 → _route_after_replan（循环）
                 │
                 └── 所有步骤完成 → aggregate
 ```
 
-#### 1.3.4 新增 `AgentState` 字段
+#### 1.3.4 新增 `AgentState` 字段（✅ 已实现）
 
 ```python
-# 替换现有 delegation_plan
-execution_plan: dict | None           # {dag, replan_gate, plan_type}
-completed_steps: Annotated[list, operator.add]  # 已完成步骤的输出
-step_outputs: dict[str, Any]          # step_id → 步骤输出
+# 已实现于 state.py
+delegation_plan: list[dict]            # 扁平列表，字段: step/agent_id/task/depends_on/output_key/skill_name/purpose
+completed_steps: Annotated[list, operator.add]  # 已完成步骤号
+replan_attempts: int                   # 重规划次数（最大 2）
+needs_replan: bool                     # 是否需要重规划
+plan_type: str                         # "agent" | "subtask"
 ```
 
 ---
 
-## 二、P0：记忆系统 — 失败日志 + 分层记忆
+## 二、P0：记忆系统 — 失败日志 + 分层记忆（❌ 未实现）
+
+> **状态：本方案完全未实现。** 失败日志表、store 方法、分层记忆 Tier 2 均未落地。仅作为设计参考保留。
 
 ### 2.1 现状
 
@@ -253,7 +218,9 @@ def get_profile_formatted(user_id: str, current_query: str = "") -> str:
 
 ---
 
-## 三、P1：多 Agent 协作 — 扇出-聚合
+## 三、P1：多 Agent 协作 — 扇出-聚合（❌ 未实现）
+
+> **状态：`mode` 字段（fan_out/pipeline/hierarchical）未实现。** 当前通过 `depends_on` 数组隐式实现 DAG 拓扑排序和并行执行，功能等价但无显式模式选择。
 
 ### 3.1 现状
 
@@ -330,7 +297,9 @@ execution_plan = {
 
 ---
 
-## 四、P1：反思回路 — 工具锚定 Critic
+## 四、P1：反思回路 — 工具锚定 Critic（❌ 未实现）
+
+> **状态：`DeterministicVerifier` 类未实现。** 现有 `anti_hallucination.py` 有 `verify_all_claims()` 通用验证，但缺少特定领域的确定性数值/代码/搜索验证器。
 
 ### 4.1 现状
 
@@ -429,7 +398,9 @@ LangSmith 提供完整的执行追踪能力：可视图回放每次 Agent 决策
 
 ---
 
-## 六、P2：成本/Token 监控
+## 六、P2：成本/Token 监控（❌ 未实现）
+
+> **状态：未实现。** 无 Token 使用量统计、无成本核算、无预算历史记录。
 
 ### 6.1 现状
 
@@ -462,19 +433,139 @@ CREATE TABLE token_usage (
 
 ---
 
-## 七、实施路线图
+## 七、P2：执行进度监控（✅ 已实现）
 
-### Phase 1（1-2 周）：P0 项
+> **实现于 `orchestration/nodes/commander.py`**，通过 `_push_event(cfg, "progress", ...)` 发出结构化进度事件。
 
-| 任务 | 文件改动 | 预估 |
+### 7.1 设计目标
+
+在多步 Plan-and-Execute 执行过程中，前端需要实时展示执行进度，让用户了解当前执行到哪一步、每步的状态。
+
+### 7.2 事件类型
+
+| 事件类型 | 触发节点 | 触发条件 | 说明 |
+|----------|----------|----------|------|
+| `plan_created` | `commander_plan_node` | 计划 > 1 步 | 计划制定完成，包含步骤列表 |
+| `step_start` | `delegate_node` | 计划 > 1 步 | 步骤开始执行 |
+| `step_done` | `delegate_node` | 计划 > 1 步，执行成功 | 步骤完成，含结果预览 |
+| `step_error` | `delegate_node` | 计划 > 1 步，执行失败 | 步骤失败，含错误信息 |
+| `replan` | `replan_node` | 计划需要修正 | 触发重规划，含原因和尝试次数 |
+
+### 7.3 事件结构
+
+```python
+# plan_created
+{"type": "plan_created", "plan_type": "agent", "total_steps": 3,
+ "steps": [{"step": 1, "agent": "investment-analyst", "task": "...", "depends_on": []}],
+ "message": "已制定 3 步执行计划，开始执行..."}
+
+# step_start / step_done / step_error
+{"type": "step_start", "step": 1, "total": 3, "agent": "investment-analyst",
+ "task": "获取持仓数据", "message": "步骤 1/3: 获取持仓数据 — 执行中"}
+
+# replan
+{"type": "replan", "reason": "数据缺失需调整", "attempt": 1,
+ "message": "执行计划需要修正（第 1 次），正在重新规划..."}
+```
+
+### 7.4 传输机制
+
+通过 `configurable.event_queue`（`queue.Queue`）传递，前端 SSE 流中 `type: "progress"` 事件。无 event_queue 时静默丢弃，不崩溃。
+
+---
+
+## 八、P3：工具能力声明（✅ 已实现）
+
+> **实现于 `tools/base.py`、`tools/registry.py`、`agent/registry.py`、`orchestration/nodes/_helpers.py`**。
+
+### 8.1 设计目标
+
+让 Commander 在规划时能够根据任务需求匹配合适的 Agent，而不是盲目委派。每个工具声明自己的能力标签，Agent 汇总其下所有工具的能力后暴露给 Commander。
+
+### 8.2 核心实现
+
+**`ToolDefinition.capabilities`**：每个工具声明能力标签列表。
+
+```python
+ToolDefinition(
+    name="finance.holdings_summary",
+    capabilities=["market_data", "portfolio_analysis"],
+    ...
+)
+```
+
+**`ToolRegistry.get_capabilities_summary()`**：按能力分组汇总。
+
+```python
+# 返回 {"market_data": ["finance.holdings", "finance.quotes"], "web_search": ["web_search"]}
+```
+
+**`AgentRegistry.agents_for_commander(full_tools)`**：自动计算每个 Agent 的能力并注入 Commander 规划 prompt。
+
+```python
+# 返回 [{"id": "investment-analyst", "capabilities": {"market_data": [...], ...}}, ...]
+```
+
+**`COMMANDER_PLAN_PROMPT`**：增加能力匹配指引。
+
+```
+- 选择专家时，参考其 capabilities 字段判断该专家是否能完成对应任务
+  - 如需要行情数据，应选择拥有 market_data 能力的专家
+  - 如需要生成图片，应选择拥有 image_generation 能力的专家
+```
+
+### 8.3 已声明的能力标签
+
+| 能力标签 | 工具 |
+|----------|------|
+| `market_data` | finance.holdings_summary, finance.quotes, web.finance |
+| `portfolio_analysis` | finance.holdings_summary, finance.bucket_allocation, finance.assets |
+| `web_search` | web_search, web_fetch, web.news_search, web.weather |
+| `image_generation` | agnes.generate_image |
+| `video_generation` | agnes.generate_video |
+| `code_execution` | code.run_python |
+| `data_cache` | get_stored_data |
+| `memory` | session_memory_tool |
+
+---
+
+## 九、P2：熔断器 CircuitBreaker（✅ 已实现）
+
+> **实现于 `orchestration/nodes/_helpers.py`**，在 `react.py` 的 `_react_execute_tool_calls()` 中集成。
+
+### 9.1 设计目标
+
+防止工具连续失败时浪费 Token 和 API 配额。工具连续失败 3 次后自动熔断 30 秒，期间该工具从 LLM 可见工具列表中移除。
+
+### 9.2 核心实现
+
+```python
+class CircuitBreaker:
+    def record_failure(self, tool_name: str) -> None
+    def record_success(self, tool_name: str) -> None
+    def is_blocked(self, tool_name: str) -> bool
+```
+
+**集成点**：`_prune_tools()` 在每次 LLM 调用前检查熔断器，移除被阻塞的工具。
+
+---
+
+## 十、实施路线图
+
+### Phase 1（1-2 周）：P0 项（部分完成）
+
+| 任务 | 文件改动 | 状态 |
 |------|----------|------|
-| 新增 `plan_node` | `orchestration/nodes/plan.py` (新) | 2 天 |
-| 新增 `replan_node` | `orchestration/nodes/replan.py` (新) | 1 天 |
-| 图结构调整 | `orchestration/graph.py` | 1 天 |
-| 新增 failure_log 表 | `store.py` | 0.5 天 |
-| 失败日志写入 | `orchestration/nodes/react.py` | 0.5 天 |
-| 失败日志检索注入 | `orchestration/nodes/_helpers.py` | 1 天 |
-| 分层记忆 | `store.py` + `_service.py` | 1 天 |
+| 新增 `plan_node` | `orchestration/nodes/plan.py` (新) | ❌ 未实现（commander_plan_node 兼任） |
+| 新增 `replan_node` | `orchestration/nodes/replan.py` (新) | ✅ 已实现于 `commander.py` |
+| 图结构调整 (DAG 路由) | `orchestration/graph.py` | ✅ 已实现（`_route_dag_first` / `_route_after_replan`） |
+| 新增 failure_log 表 | `store.py` | ❌ 未实现 |
+| 失败日志写入 | `orchestration/nodes/react.py` | ❌ 未实现 |
+| 失败日志检索注入 | `orchestration/nodes/_helpers.py` | ❌ 未实现 |
+| 分层记忆 | `store.py` + `_service.py` | ❌ 未实现 |
+| 进度监控 | `orchestration/nodes/commander.py` | ✅ 已实现（5 种进度事件） |
+| 工具能力声明 | `tools/base.py` + `registry.py` + `agent/registry.py` | ✅ 已实现（8 种能力标签） |
+| 熔断器 | `orchestration/nodes/_helpers.py` + `react.py` | ✅ 已实现 |
 
 ### Phase 2（2-4 周）：P1 项
 
@@ -494,7 +585,7 @@ CREATE TABLE token_usage (
 
 ---
 
-## 八、风险与注意事项
+## 十一、风险与注意事项
 
 1. **Plan-and-Execute 的过度规划风险**：简单问题（如"今天天气"）不需要 DAG 分解。`plan_node` 必须能识别简单问题并直接走 single 路径。
 2. **重规划可能无限循环**：必须设置 `max_total_steps` 硬上限，防止计划反复修订。
