@@ -109,6 +109,12 @@ class SessionStore:
                 "ALTER TABLE user_profile ADD COLUMN created_at REAL NOT NULL DEFAULT 0"
             )
 
+        # sessions: add hidden column if missing
+        if "hidden" not in cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
+            )
+
         # Create idx_sessions_user after user_id column is guaranteed to exist
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at)"
@@ -163,21 +169,40 @@ class SessionStore:
 
     # ---- Session CRUD ----
 
-    def list_sessions(self, user_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
-        """Return recent sessions for a user, ordered by updated_at desc."""
+    def list_sessions(self, user_id: str = "", limit: int = 20,
+                      include_hidden: bool = False) -> list[dict[str, Any]]:
+        """Return recent sessions for a user, ordered by updated_at desc.
+
+        By default excludes hidden (archived) sessions. Set include_hidden=True
+        to show all sessions.
+        """
         with self._lock:
             if user_id:
-                rows = self._get_conn().execute(
-                    "SELECT id, title, created_at, updated_at, msg_count "
-                    "FROM sessions WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
-                    (user_id, limit),
-                ).fetchall()
+                if include_hidden:
+                    rows = self._get_conn().execute(
+                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                        "FROM sessions WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+                        (user_id, limit),
+                    ).fetchall()
+                else:
+                    rows = self._get_conn().execute(
+                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                        "FROM sessions WHERE user_id=? AND hidden=0 ORDER BY updated_at DESC LIMIT ?",
+                        (user_id, limit),
+                    ).fetchall()
             else:
-                rows = self._get_conn().execute(
-                    "SELECT id, title, created_at, updated_at, msg_count "
-                    "FROM sessions ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                if include_hidden:
+                    rows = self._get_conn().execute(
+                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                        "FROM sessions ORDER BY updated_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                else:
+                    rows = self._get_conn().execute(
+                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                        "FROM sessions WHERE hidden=0 ORDER BY updated_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
         return [
             {
                 "id": r[0],
@@ -185,6 +210,7 @@ class SessionStore:
                 "created_at": r[2],
                 "updated_at": r[3],
                 "turn_count": r[4] // 2,
+                "hidden": bool(r[5]),
             }
             for r in rows
         ]
@@ -192,7 +218,7 @@ class SessionStore:
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._get_conn().execute(
-                "SELECT id, title, created_at, updated_at, msg_count FROM sessions WHERE id=?",
+                "SELECT id, title, created_at, updated_at, msg_count, hidden FROM sessions WHERE id=?",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -203,6 +229,7 @@ class SessionStore:
             "created_at": row[2],
             "updated_at": row[3],
             "turn_count": row[4] // 2,
+            "hidden": bool(row[5]),
         }
 
     def delete_session(self, session_id: str) -> bool:
@@ -210,6 +237,35 @@ class SessionStore:
             cur = self._get_conn().execute("DELETE FROM sessions WHERE id=?", (session_id,))
             self._get_conn().commit()
             return cur.rowcount > 0
+
+    def batch_delete_sessions(self, session_ids: list[str]) -> int:
+        """Delete multiple sessions and their messages. Returns count deleted."""
+        if not session_ids:
+            return 0
+        with self._lock:
+            conn = self._get_conn()
+            placeholders = ",".join("?" for _ in session_ids)
+            cur = conn.execute(
+                f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def batch_set_hidden(self, session_ids: list[str], hidden: bool = True) -> int:
+        """Set hidden (archive) state for multiple sessions. Returns count updated."""
+        if not session_ids:
+            return 0
+        val = 1 if hidden else 0
+        with self._lock:
+            conn = self._get_conn()
+            placeholders = ",".join("?" for _ in session_ids)
+            cur = conn.execute(
+                f"UPDATE sessions SET hidden=? WHERE id IN ({placeholders})",
+                (val, *session_ids),
+            )
+            conn.commit()
+            return cur.rowcount
 
     def update_title(self, session_id: str, title: str) -> None:
         """Set the session title (e.g. from first user message)."""

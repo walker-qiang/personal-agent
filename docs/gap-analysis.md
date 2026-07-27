@@ -552,7 +552,7 @@ class CircuitBreaker:
 
 ## 十、实施路线图
 
-### Phase 1（1-2 周）：P0 项（部分完成）
+### Phase 1：P0 项（部分完成）
 
 | 任务 | 文件改动 | 状态 |
 |------|----------|------|
@@ -567,7 +567,7 @@ class CircuitBreaker:
 | 工具能力声明 | `tools/base.py` + `registry.py` + `agent/registry.py` | ✅ 已实现（8 种能力标签） |
 | 熔断器 | `orchestration/nodes/_helpers.py` + `react.py` | ✅ 已实现 |
 
-### Phase 2（2-4 周）：P1 项
+### Phase 2：P1 项
 
 | 任务 | 说明 |
 |------|------|
@@ -575,7 +575,7 @@ class CircuitBreaker:
 | 工具锚定 Critic | 增强反幻觉验证在反思环节的应用 |
 | 确定性验证器 | 数值/代码/搜索的确定性验证 |
 
-### Phase 3（长期）：P2 项
+### Phase 3：P2 项
 
 | 任务 | 说明 |
 |------|------|

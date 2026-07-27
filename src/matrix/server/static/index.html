@@ -187,6 +187,48 @@
   .sb-session-item .del { display: none; font-size: 11px; padding: 2px; cursor: pointer; opacity: 0.4; flex-shrink: 0; }
   .sb-session-item:hover .del { display: block; }
   .sb-session-item .del:hover { opacity: 1; color: var(--error); }
+  /* Session checkbox */
+  .sb-session-item .cb {
+    display: none;
+    width: 14px; height: 14px;
+    flex-shrink: 0; cursor: pointer;
+    accent-color: var(--primary);
+  }
+  .sb-session-item:hover .cb, .sb-session-item.show-cb .cb { display: block; }
+  .sb-session-item.show-cb:hover .del { display: none; }
+  .sb-session-item.hidden-session { opacity: 0.5; }
+  .sb-session-item.hidden-session .title { font-style: italic; }
+  /* Batch toolbar */
+  .batch-toolbar {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: rgba(99,102,241,0.06);
+    border-radius: 6px;
+    margin: 0 8px 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .batch-toolbar.show { display: flex; }
+  .batch-toolbar .sel-count { flex: 1; font-weight: 500; }
+  .batch-toolbar button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    line-height: 1.5;
+  }
+  .batch-toolbar button:hover { background: var(--bg-hover); color: var(--text); }
+  .batch-toolbar button.danger { color: var(--error); border-color: var(--error); }
+  .batch-toolbar button.danger:hover { background: rgba(239,68,68,0.08); }
+  /* Archive toggle */
+  .archive-toggle { font-size: 11px; cursor: pointer; opacity: 0.5; }
+  .archive-toggle:hover { opacity: 1; }
+  .archive-toggle.active { opacity: 0.8; color: var(--primary); }
   /* ---- Right Panel ---- */
   .rpanel {
     width: 0;
@@ -924,8 +966,16 @@
       <div class="sb-section-hd">
         <span>会话</span>
         <span class="sb-actions">
+          <span class="archive-toggle" id="archiveToggle" onclick="toggleArchive()" title="显示已归档">已归档</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" onclick="loadSessions()"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </span>
+      </div>
+      <div class="batch-toolbar" id="batchToolbar">
+        <span class="sel-count" id="selCount">已选 0 项</span>
+        <button onclick="batchArchive()">归档</button>
+        <button onclick="batchUnarchive()">取消归档</button>
+        <button class="danger" onclick="batchDelete()">删除</button>
+        <button onclick="cancelBatch()">取消</button>
       </div>
       <div class="sb-list" id="sessionList">
         <div class="no-sessions">暂无会话</div>
@@ -1359,8 +1409,12 @@ function switchModel(providerId, modelId) {
 }
 
 // ---- Session management ----
+let showArchive = false;
+let selectedSessions = new Set();
+
 function loadSessions() {
-  fetch('/sessions?token=' + encodeURIComponent(getToken()))
+  const url = '/sessions?token=' + encodeURIComponent(getToken()) + '&include_hidden=' + showArchive;
+  fetch(url)
     .then(r => r.json())
     .then(data => {
       const list = document.getElementById('sessionList');
@@ -1372,16 +1426,133 @@ function loadSessions() {
       const msgIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:14px;height:14px;opacity:0.4;flex-shrink:0"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
       list.innerHTML = sessions.map(s => {
         const active = s.id === SESSION ? ' active' : '';
+        const hiddenCls = s.hidden ? ' hidden-session' : '';
         const title = escapeHtml(s.title || s.id.slice(0, 8) + '...');
         const count = s.turn_count ? s.turn_count + '轮' : '';
-        return '<div class="sb-session-item' + active + '" data-sid="' + s.id + '" onclick="selectSession(\'' + s.id + '\')">' +
+        const checked = selectedSessions.has(s.id) ? ' checked' : '';
+        return '<div class="sb-session-item' + active + hiddenCls + '" data-sid="' + s.id + '" onclick="onSessionClick(event, \'' + s.id + '\')">' +
+          '<input type="checkbox" class="cb" ' + checked + ' onclick="onCheckboxClick(event, \'' + s.id + '\')" />' +
           msgIcon +
           '<span class="title">' + title + '</span>' +
           '<span class="meta">' + count + '</span>' +
           '<span class="del" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')">\u00d7</span>' +
           '</div>';
       }).join('');
+      updateBatchUI();
     });
+}
+
+function onSessionClick(e, id) {
+  if (e.target.classList.contains('cb')) return;
+  if (selectedSessions.size > 0) {
+    // In batch mode, clicking toggles selection
+    toggleSelect(id);
+  } else {
+    selectSession(id);
+  }
+}
+
+function onCheckboxClick(e, id) {
+  e.stopPropagation();
+  toggleSelect(id);
+}
+
+function toggleSelect(id) {
+  if (selectedSessions.has(id)) {
+    selectedSessions.delete(id);
+  } else {
+    selectedSessions.add(id);
+  }
+  updateBatchUI();
+  refreshCheckboxes();
+}
+
+function refreshCheckboxes() {
+  document.querySelectorAll('.sb-session-item').forEach(el => {
+    const sid = el.getAttribute('data-sid');
+    const cb = el.querySelector('.cb');
+    if (cb) {
+      cb.checked = selectedSessions.has(sid);
+      if (selectedSessions.size > 0) {
+        el.classList.add('show-cb');
+      } else {
+        el.classList.remove('show-cb');
+      }
+    }
+  });
+}
+
+function updateBatchUI() {
+  const toolbar = document.getElementById('batchToolbar');
+  const selCount = document.getElementById('selCount');
+  if (selectedSessions.size > 0) {
+    toolbar.classList.add('show');
+    selCount.textContent = '已选 ' + selectedSessions.size + ' 项';
+  } else {
+    toolbar.classList.remove('show');
+    selCount.textContent = '已选 0 项';
+  }
+}
+
+function cancelBatch() {
+  selectedSessions.clear();
+  updateBatchUI();
+  refreshCheckboxes();
+}
+
+function batchArchive() {
+  if (selectedSessions.size === 0) return;
+  if (!confirm('归档 ' + selectedSessions.size + ' 个会话？')) return;
+  fetch('/sessions/batch-archive?token=' + encodeURIComponent(getToken()), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: Array.from(selectedSessions) })
+  }).then(() => {
+    selectedSessions.clear();
+    loadSessions();
+  });
+}
+
+function batchUnarchive() {
+  if (selectedSessions.size === 0) return;
+  if (!confirm('取消归档 ' + selectedSessions.size + ' 个会话？')) return;
+  fetch('/sessions/batch-unarchive?token=' + encodeURIComponent(getToken()), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: Array.from(selectedSessions) })
+  }).then(() => {
+    selectedSessions.clear();
+    loadSessions();
+  });
+}
+
+function batchDelete() {
+  if (selectedSessions.size === 0) return;
+  if (!confirm('永久删除 ' + selectedSessions.size + ' 个会话？此操作不可恢复。')) return;
+  fetch('/sessions/batch-delete?token=' + encodeURIComponent(getToken()), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: Array.from(selectedSessions) })
+  }).then(() => {
+    // If current session was deleted, create new
+    if (selectedSessions.has(SESSION)) newSession();
+    selectedSessions.clear();
+    loadSessions();
+  });
+}
+
+function toggleArchive() {
+  showArchive = !showArchive;
+  const toggle = document.getElementById('archiveToggle');
+  if (showArchive) {
+    toggle.classList.add('active');
+    toggle.textContent = '已归档 ✓';
+  } else {
+    toggle.classList.remove('active');
+    toggle.textContent = '已归档';
+  }
+  selectedSessions.clear();
+  loadSessions();
 }
 
 function newSession() {

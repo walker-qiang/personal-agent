@@ -19,7 +19,7 @@ from langgraph.types import Command
 
 from ..agent import AgentRegistry
 from ..agent.commander import COMMANDER
-from ..agent.domain_agents import INVESTMENT_ANALYST, MEDIA_GENERATOR
+from ..agent.domain_agents import CODING_ASSISTANT, INVESTMENT_ANALYST, KNOWLEDGE_MANAGER, MEDIA_GENERATOR
 from ..config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
 from ..llm import LLMClient, LLMError, build_llm_client
 from ..llm.http import set_rate_limiter
@@ -879,7 +879,9 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
     registry = AgentRegistry(skills_base_dir=config.skills_base_dir)
     registry.register_all([
         COMMANDER,
+        CODING_ASSISTANT,
         INVESTMENT_ANALYST,
+        KNOWLEDGE_MANAGER,
         MEDIA_GENERATOR,
     ])
     return registry

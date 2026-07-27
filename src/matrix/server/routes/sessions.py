@@ -13,13 +13,17 @@ def _get_user_id(request: Request) -> str:
 
 
 @router.get("/sessions")
-async def list_sessions(request: Request):
-    """List recent chat sessions for the authenticated user."""
+async def list_sessions(request: Request, include_hidden: bool = False):
+    """List recent chat sessions for the authenticated user.
+
+    Query params:
+        include_hidden: if true, include archived (hidden) sessions
+    """
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
     user_id = _get_user_id(request)
-    sessions = store.list_sessions(user_id=user_id, limit=20)
+    sessions = store.list_sessions(user_id=user_id, limit=20, include_hidden=include_hidden)
     return {"sessions": sessions}
 
 
@@ -45,6 +49,48 @@ async def delete_session(request: Request, session_id: str):
     if not deleted:
         return {"error": "session not found"}, 404
     return {"ok": True}
+
+
+@router.post("/sessions/batch-delete")
+async def batch_delete_sessions(request: Request):
+    """Delete multiple sessions and their messages."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    payload = await request.json()
+    session_ids = payload.get("session_ids", [])
+    if not isinstance(session_ids, list) or not session_ids:
+        return {"error": "session_ids must be a non-empty list"}, 400
+    count = store.batch_delete_sessions(session_ids)
+    return {"ok": True, "deleted": count}
+
+
+@router.post("/sessions/batch-archive")
+async def batch_archive_sessions(request: Request):
+    """Archive (hide) multiple sessions."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    payload = await request.json()
+    session_ids = payload.get("session_ids", [])
+    if not isinstance(session_ids, list) or not session_ids:
+        return {"error": "session_ids must be a non-empty list"}, 400
+    count = store.batch_set_hidden(session_ids, hidden=True)
+    return {"ok": True, "archived": count}
+
+
+@router.post("/sessions/batch-unarchive")
+async def batch_unarchive_sessions(request: Request):
+    """Unarchive (unhide) multiple sessions."""
+    from ...store import SessionStore
+
+    store: SessionStore = request.app.state.chat.store
+    payload = await request.json()
+    session_ids = payload.get("session_ids", [])
+    if not isinstance(session_ids, list) or not session_ids:
+        return {"error": "session_ids must be a non-empty list"}, 400
+    count = store.batch_set_hidden(session_ids, hidden=False)
+    return {"ok": True, "unarchived": count}
 
 
 @router.get("/sessions/{session_id}/messages")
