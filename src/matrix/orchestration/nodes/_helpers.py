@@ -894,15 +894,27 @@ def _run_budget_and_compact(
 
     Uses budget.py (98% threshold for free-tier models) and falls back
     to compaction when above 85%.
+
+    Supports incremental update: extracts the previous handoff from the
+    message list and passes it as previous_summary to compact_messages,
+    so repeated compactions build on the existing summary instead of
+    starting from scratch.
     """
     from matrix.context.budget import check_budget_compact
-    from matrix.context.compaction import compact_messages
+    from matrix.context.compaction import (
+        compact_messages, extract_previous_handoff, strip_previous_handoff,
+    )
 
     proceed, action = check_budget_compact(messages, system_prompt)
 
     if action == "reject":
         if pipeline_llm is not None:
-            messages = compact_messages(messages, user_goal, pipeline_llm)
+            previous = extract_previous_handoff(messages)
+            to_compress = strip_previous_handoff(messages)
+            messages = compact_messages(
+                to_compress, user_goal, pipeline_llm,
+                previous_summary=previous,
+            )
             _, action2 = check_budget_compact(messages, system_prompt)
             if action2 == "reject":
                 return (messages, True)  # rejected after compaction
@@ -910,7 +922,12 @@ def _run_budget_and_compact(
         return (messages, True)  # rejected, no pipeline_llm to try compaction
 
     if action == "compact" and pipeline_llm is not None:
-        messages = compact_messages(messages, user_goal, pipeline_llm)
+        previous = extract_previous_handoff(messages)
+        to_compress = strip_previous_handoff(messages)
+        messages = compact_messages(
+            to_compress, user_goal, pipeline_llm,
+            previous_summary=previous,
+        )
 
     return (messages, False)
 

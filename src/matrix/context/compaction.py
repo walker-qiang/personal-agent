@@ -156,8 +156,15 @@ def build_compaction_messages(
 
 
 def build_handoff_message(handoff: dict[str, Any]) -> dict[str, Any]:
-    """Convert a structured handoff dict into a single system message."""
+    """Convert a structured handoff dict into a single system message.
+
+    Embeds the raw JSON in a hidden marker so that subsequent compactions
+    can extract it for incremental update.
+    """
     parts = ["## Conversation Handoff\n"]
+
+    # Hidden JSON marker for incremental update extraction
+    parts.append(f"<!-- HANDOFF_JSON: {json.dumps(handoff, ensure_ascii=False)} -->\n")
 
     parts.append(f"### User Goal\n{handoff.get('user_goal', '')}\n")
 
@@ -306,6 +313,49 @@ def compact_messages(
     )
 
     return result
+
+
+def extract_previous_handoff(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Extract the previous handoff dict from the message list, if present.
+
+    Looks for the HANDOFF_JSON marker in the first system message.
+    Returns the parsed dict, or None if no previous handoff exists.
+    """
+    if not messages:
+        return None
+    first = messages[0]
+    if first.get("role") != "system":
+        return None
+    text = str(first.get("content", ""))
+    marker = "<!-- HANDOFF_JSON: "
+    idx = text.find(marker)
+    if idx == -1:
+        return None
+    end = text.find(" -->", idx)
+    if end == -1:
+        return None
+    json_str = text[idx + len(marker):end]
+    try:
+        result = json.loads(json_str)
+        if isinstance(result, dict) and "user_goal" in result:
+            return result
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def strip_previous_handoff(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove the previous handoff system message from the list.
+
+    Called before compaction so the old handoff doesn't get
+    re-compressed into the new one.
+    """
+    if not messages:
+        return messages
+    first = messages[0]
+    if first.get("role") == "system" and "HANDOFF_JSON" in str(first.get("content", "")):
+        return messages[1:]
+    return messages
 
 
 def _fallback_truncate(
