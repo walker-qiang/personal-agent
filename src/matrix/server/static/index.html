@@ -698,6 +698,19 @@
 }
 .branch-btn:hover { background: var(--bg-tertiary); color: var(--text); }
 .message:hover .branch-btn { opacity: 1; }
+/* Branch tree indicators */
+.sb-branch-badge {
+  display: inline-block; font-size: 10px; padding: 1px 5px;
+  border-radius: 4px; background: rgba(99,102,241,0.12);
+  color: #6366f1; margin-left: 4px; flex-shrink: 0;
+}
+.branch-info-bar {
+  padding: 6px 12px; font-size: 11px; color: var(--text-secondary);
+  background: var(--bg-tertiary); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+}
+.branch-info-bar .branch-count { color: #6366f1; font-weight: 500; }
+.branch-info-bar .branch-tip { margin-left: auto; opacity: 0.6; }
 .branch-banner {
   padding: 8px 12px; margin: 4px 0; border-radius: 8px;
   background: var(--bg-tertiary); border: 1px solid var(--border);
@@ -1434,8 +1447,23 @@ function loadSessions() {
   fetch(url)
     .then(r => r.json())
     .then(data => {
+      // Load branch counts for all sessions (batch)
+      const sessionIds = (data.sessions || []).map(s => s.id);
+      const branchPromises = sessionIds.map(sid =>
+        fetch('/sessions/' + sid + '/branches?token=' + encodeURIComponent(getToken()))
+          .then(r => r.ok ? r.json() : {branches: []})
+          .catch(() => ({branches: []}))
+      );
+      Promise.all(branchPromises).then(branchResults => {
+        const branchCounts = {};
+        branchResults.forEach((res, i) => {
+          const cnt = (res.branches || []).length;
+          if (cnt > 0) branchCounts[sessionIds[i]] = cnt;
+        });
+        renderSessionList(data.sessions || [], branchCounts);
+      });
+function renderSessionList(sessions, branchCounts) {
       const list = document.getElementById('sessionList');
-      const sessions = data.sessions || [];
       if (sessions.length === 0) {
         list.innerHTML = '<div class="no-sessions">暂无会话</div>';
         return;
@@ -1447,15 +1475,18 @@ function loadSessions() {
         const title = escapeHtml(s.title || s.id.slice(0, 8) + '...');
         const count = s.turn_count ? s.turn_count + '轮' : '';
         const checked = selectedSessions.has(s.id) ? ' checked' : '';
+        const branchBadge = branchCounts[s.id] ? '<span class="sb-branch-badge">' + branchCounts[s.id] + ' 叉</span>' : '';
         return '<div class="sb-session-item' + active + hiddenCls + '" data-sid="' + s.id + '" onclick="onSessionClick(event, \'' + s.id + '\')">' +
           '<input type="checkbox" class="cb" ' + checked + ' onclick="onCheckboxClick(event, \'' + s.id + '\')" />' +
           msgIcon +
           '<span class="title">' + title + '</span>' +
+          branchBadge +
           '<span class="meta">' + count + '</span>' +
           '<span class="del" onclick="event.stopPropagation();deleteSession(\'' + s.id + '\')">\u00d7</span>' +
           '</div>';
       }).join('');
       updateBatchUI();
+    }
     });
 }
 
@@ -1598,6 +1629,7 @@ function deleteSession(id) {
     loadProviders();
     loadSessions();
     loadHistory();
+    loadBranchInfo();
     loadSkills();
     loadMcpServers();
   }
@@ -2182,6 +2214,30 @@ function branchFromMessage(messageId, preview) {
       document.getElementById('input').focus();
     })
     .catch(err => { alert('分叉失败: ' + err.message); });
+}
+
+// ---- Branch info ----
+function loadBranchInfo() {
+  if (!SESSION) return;
+  fetch('/sessions/' + SESSION + '/branches?token=' + encodeURIComponent(getToken()))
+    .then(r => r.json())
+    .then(data => {
+      const branches = data.branches || [];
+      if (branches.length === 0) return;
+      // Show branch info bar above chat
+      const chat = document.getElementById('chat');
+      const existing = document.getElementById('branchInfoBar');
+      if (existing) existing.remove();
+      const bar = document.createElement('div');
+      bar.id = 'branchInfoBar';
+      bar.className = 'branch-info-bar';
+      const totalForks = branches.length;
+      bar.innerHTML = '<span class="branch-count">' + totalForks + ' 个分叉点</span>' +
+        '<span>此会话有多个对话分支，悬停消息可从此处分叉</span>' +
+        '<span class="branch-tip">旧分支保留在历史中</span>';
+      chat.insertBefore(bar, chat.firstChild);
+    })
+    .catch(() => {});
 }
 
 // ---- Load chat history on page load ----

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..base import FinanceToolError, ToolDefinition
+from ..base import FinanceToolError, ToolDefinition, tool_error
 from .shared import (
     asset_row,
     clamp_int,
@@ -24,6 +24,13 @@ def snapshot_history(
 ) -> dict[str, Any]:
     """Return effective snapshot history for one durable asset id."""
     path = Path(cache_path) if cache_path else Path("var/cache/finance.sqlite")
+    if not path.exists():
+        return tool_error(
+            "finance.snapshot_history", "查询快照历史",
+            f"数据库文件不存在: {path}",
+            "请检查 MATRIX_CACHE_PATH 环境变量，或确认 personal-os 已同步数据。",
+            {"cache_path": str(path)},
+        )
     if not asset_id.startswith("ast_"):
         raise FinanceToolError(f"asset_id 必须以 ast_ 开头（durable asset id），得到: {asset_id}。请先用 finance.asset_lookup 查找正确的 asset_id。")
     limit = clamp_int(limit, 1, 200)
@@ -77,6 +84,13 @@ def recent_snapshots(
 ) -> dict[str, Any]:
     """Return latest effective snapshots across active assets, optionally filtered."""
     path = Path(cache_path) if cache_path else Path("var/cache/finance.sqlite")
+    if not path.exists():
+        return tool_error(
+            "finance.recent_snapshots", "查询最新快照",
+            f"数据库文件不存在: {path}",
+            "请检查 MATRIX_CACHE_PATH 环境变量，或确认 personal-os 已同步数据。",
+            {"cache_path": str(path)},
+        )
     limit = clamp_int(limit, 1, 200)
     where = ["a.archived_at IS NULL"]
     params: list[Any] = []

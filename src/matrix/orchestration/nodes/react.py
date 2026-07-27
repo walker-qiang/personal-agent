@@ -69,6 +69,10 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         return {"error": f"Agent not found: {agent_id}"}
 
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    # Wire circuit breaker from session config into the tool registry
+    breaker = cfg.get("circuit_breaker")
+    if breaker is not None:
+        agent_tools.set_circuit_breaker(breaker)
     llm_tools = _build_tools_for_llm(agent_tools)
     history_context = _build_history_context(cfg.get("history", []))
     task_content = history_context + f"请完成以下任务：{task}"
@@ -137,6 +141,10 @@ def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
 
     agent_id = react.get("agent_id", "")
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    # Wire circuit breaker from session config into the tool registry
+    breaker = cfg.get("circuit_breaker")
+    if breaker is not None:
+        agent_tools.set_circuit_breaker(breaker)
     llm_tools = _build_tools_for_llm(agent_tools)
 
     messages = react.get("messages", [])
@@ -366,15 +374,6 @@ def _pass_tool_guards(
             logger.info("ReAct: dedup skip %s (same args key=%s...)", name, args_key[:80])
             return False
 
-    # Guard 5: circuit breaker — tool has failed too many times consecutively
-    breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
-    if breaker is not None and breaker.is_blocked(name):
-        logger.warning("circuit_breaker: blocked tool=%s, skipping", name)
-        _push_event(cfg, "progress", {
-            "message": f"工具 {name} 已被熔断（连续失败次数过多），暂时跳过",
-        })
-        return False
-
     logger.info("ReAct: dedup no-match for %s args_key=%s", name, args_key[:80])
     return True
 
@@ -471,10 +470,6 @@ def _execute_single_tool(
         })
         if push_events:
             _push_event(cfg, "tool_result", {"name": name, "result": tool_result})
-        # Circuit breaker: record success → reset failure counter
-        breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
-        if breaker is not None:
-            breaker.record_success(name)
         return True, {"name": name, "arguments": arguments, "result": tool_result, "elapsed_ms": elapsed_ms}
 
     except Exception as err:
@@ -490,10 +485,6 @@ def _execute_single_tool(
         })
         if push_events:
             _push_event(cfg, "tool_result", {"name": name, "error": str(err)[:200]})
-        # Circuit breaker: record failure → may trip the breaker
-        breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
-        if breaker is not None:
-            breaker.record_failure(name)
         return False, {"name": name, "arguments": arguments, "error": str(err), "elapsed_ms": elapsed_ms}
 
 
@@ -549,6 +540,10 @@ def react_tool_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
     agent_id = react.get("agent_id", "")
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    # Wire circuit breaker from session config into the tool registry
+    breaker = cfg.get("circuit_breaker")
+    if breaker is not None:
+        agent_tools.set_circuit_breaker(breaker)
     messages = react.get("messages", [])
 
     if not messages:

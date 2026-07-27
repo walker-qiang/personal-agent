@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..base import FinanceToolError, ToolDefinition
+from ..base import FinanceToolError, ToolDefinition, tool_error
 from .shared import asset_row, clamp_int, connect_readonly
 
 
@@ -17,6 +17,13 @@ def asset_lookup(
 ) -> dict[str, Any]:
     """Find active assets by durable id, code, or name."""
     path = Path(cache_path) if cache_path else Path("var/cache/finance.sqlite")
+    if not path.exists():
+        return tool_error(
+            "finance.asset_lookup", "查找资产",
+            f"数据库文件不存在: {path}",
+            "请检查 MATRIX_CACHE_PATH 环境变量，或确认 personal-os 已同步数据。",
+            {"cache_path": str(path)},
+        )
     limit = clamp_int(limit, 1, 100)
     where = []
     params: list[Any] = []

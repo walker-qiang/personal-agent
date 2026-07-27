@@ -30,6 +30,7 @@ class ToolRegistry:
         self._guard: object | None = None  # ToolGuard or None
         self._code_guard: object | None = None  # CodeGuard or None
         self._injection_guard: object | None = None  # IndirectInjectionGuard
+        self._circuit_breaker: object | None = None  # CircuitBreaker or None
 
     def register(self, tool: ToolDefinition) -> None:
         """Register a tool definition."""
@@ -67,9 +68,11 @@ class ToolRegistry:
         if not ok:
             return {"error": f"参数验证失败: {reason}"}
 
+        # Step 2.5: Circuit breaker check (before guards)
+        if self._circuit_breaker and self._circuit_breaker.is_blocked(name):
+            return {"error": f"工具 {name} 已被熔断（连续失败次数过多），暂时不可用。请稍后重试或使用其他工具。"}
+
         # Step 3: beforeToolCall — ToolGuard + CodeGuard
-        # Guards raise ToolGuardError on block, preserving the contract
-        # that ReAct's circuit breaker and test suite rely on.
         if self._guard:
             from ..guardrails.tool_guard import ToolGuardError
             ok, reason = self._guard.check(name, args)
@@ -86,11 +89,21 @@ class ToolRegistry:
         try:
             result = tool.handler(**args)
         except FinanceToolError as err:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure(name)
             return {"error": self._format_error(name, args, err)}
         except (TypeError, ValueError) as err:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure(name)
             return {"error": self._format_error(name, args, err)}
         except Exception as err:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure(name)
             return {"error": self._format_error(name, args, err)}
+
+        # Circuit breaker: record success
+        if self._circuit_breaker:
+            self._circuit_breaker.record_success(name)
 
         # Apply truncation to structured results
         if isinstance(result, dict):
@@ -194,6 +207,16 @@ class ToolRegistry:
     def set_injection_guard(self, guard: object) -> None:
         """Attach an IndirectInjectionGuard for post-execution result scanning."""
         self._injection_guard = guard
+
+    def set_circuit_breaker(self, breaker: object) -> None:
+        """Attach a CircuitBreaker for per-tool failure tracking.
+
+        When set, call() will:
+        - Check is_blocked() before execution (returns error dict if blocked)
+        - Call record_success() after successful execution
+        - Call record_failure() after failed execution
+        """
+        self._circuit_breaker = breaker
 
     def get(self, name: str) -> ToolDefinition | None:
         """Get a tool definition by name, or None."""

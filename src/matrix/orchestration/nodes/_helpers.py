@@ -902,7 +902,7 @@ def _run_budget_and_compact(
     """
     from matrix.context.budget import check_budget_compact
     from matrix.context.compaction import (
-        compact_messages, extract_previous_handoff, strip_previous_handoff,
+        compact_messages, extract_previous_handoff, strip_previous_handoff, strip_handoff_markers,
     )
 
     proceed, action = check_budget_compact(messages, system_prompt)
@@ -915,6 +915,7 @@ def _run_budget_and_compact(
                 to_compress, user_goal, pipeline_llm,
                 previous_summary=previous,
             )
+            messages = strip_handoff_markers(messages)
             _, action2 = check_budget_compact(messages, system_prompt)
             if action2 == "reject":
                 return (messages, True)  # rejected after compaction
@@ -929,6 +930,8 @@ def _run_budget_and_compact(
             previous_summary=previous,
         )
 
+    # Strip HANDOFF_JSON markers before sending to LLM (saves tokens)
+    messages = strip_handoff_markers(messages)
     return (messages, False)
 
 

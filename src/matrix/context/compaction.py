@@ -358,6 +358,24 @@ def strip_previous_handoff(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return messages
 
 
+def strip_handoff_markers(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove HANDOFF_JSON markers from message contents before sending to LLM.
+
+    The markers are only needed for internal round-trip extraction during
+    incremental compaction. They should not consume LLM context tokens.
+    """
+    import re
+    pattern = re.compile(r'<!-- HANDOFF_JSON: .*? -->\n?', re.DOTALL)
+    result = []
+    for msg in messages:
+        if isinstance(msg.get("content"), str):
+            cleaned = pattern.sub("", msg["content"])
+            if cleaned != msg["content"]:
+                msg = {**msg, "content": cleaned}
+        result.append(msg)
+    return result
+
+
 def _fallback_truncate(
     messages: list[dict[str, Any]],
     cut_point: int,

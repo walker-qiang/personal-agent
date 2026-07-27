@@ -225,6 +225,10 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         }
 
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
+    # Wire circuit breaker from session config into the tool registry
+    breaker = cfg.get("circuit_breaker")
+    if breaker is not None:
+        agent_tools.set_circuit_breaker(breaker)
     agent_skills = agent_registry.load_skills_for_agent(agent_id)
 
     skill_results: list[dict[str, Any]] = []
