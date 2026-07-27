@@ -48,12 +48,6 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
 
-CREATE INDEX IF NOT EXISTS idx_messages_message_id
-    ON messages(message_id);
-
-CREATE INDEX IF NOT EXISTS idx_messages_parent_id
-    ON messages(parent_id);
-
 CREATE TABLE IF NOT EXISTS user_profile (
     user_id     TEXT NOT NULL,
     key         TEXT NOT NULL,
@@ -161,6 +155,14 @@ class SessionStore:
                 ORDER BY messages.id DESC LIMIT 1
             ) WHERE leaf_id IS NULL
         """)
+
+        # Create indexes for message_id and parent_id (after columns are added)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages(parent_id)"
+        )
 
     def close(self) -> None:
         with self._lock:
