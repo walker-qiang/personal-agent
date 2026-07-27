@@ -15,12 +15,17 @@ class FinanceToolError(Exception):
 
 @dataclass(frozen=True)
 class ToolDefinition:
-    """Immutable definition of a registered tool."""
+    """Immutable definition of a registered tool.
+
+    capabilities: tags describing what this tool can do, used by the commander
+    to match tasks to tools. Examples: "market_data", "web_search", "image_generation".
+    """
 
     name: str
     description: str
     input_schema: dict[str, Any]
     handler: ToolHandler = field(repr=False)
+    capabilities: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the tool definition in the format expected by LLM planners."""

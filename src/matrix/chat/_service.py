@@ -438,6 +438,7 @@ class ChatService:
                 "Use when you see a __refId reference and need the complete data. "
                 "Pass the refId from the __refId field."
             ),
+            capabilities=["data_cache"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -454,6 +455,7 @@ class ChatService:
                 "Use this when you discover a critical piece of information (value, ID, "
                 "constraint, decision) that future steps need to know."
             ),
+            capabilities=["memory"],
             input_schema={
                 "type": "object",
                 "properties": {

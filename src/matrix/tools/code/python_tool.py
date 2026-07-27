@@ -42,9 +42,10 @@ python_tool = ToolDefinition(
         "- 内存限制：512MB\n"
         "- 文件系统：仅限临时目录\n"
         "- 可用库：Python 标准库（json, csv, math, statistics, datetime 等）\n\n"
-        "返回字段：stdout, stderr, exit_code, execution_time_ms\n"
-        "如果 exit_code != 0，请根据 stderr 修正代码后重试。"
+        "返回字段：stdout, stderr, exit_code, execution_time_ms, suggestion\n"
+        "如果 exit_code != 0，suggestion 字段会提供错误修正建议。"
     ),
+    capabilities=["code_execution"],
     input_schema={
         "type": "object",
         "properties": {

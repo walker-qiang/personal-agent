@@ -54,6 +54,7 @@ def holdings_summary(cache_path: str = "") -> dict[str, Any]:
 tool_definition = ToolDefinition(
     name="finance.holdings_summary",
     description="查询当前持仓汇总（按投资桶分类）。用于：用户问「我的持仓」「资产分布」「各个桶有多少钱」「当前收益怎么样」。每个桶显示总金额、预期收益率、实际收益率。",
+    capabilities=["portfolio_analysis"],
     input_schema={
         "type": "object",
         "properties": {},

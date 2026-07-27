@@ -82,3 +82,21 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDefinition | None:
         """Get a tool definition by name, or None."""
         return self._tools.get(name)
+
+    def get_capabilities_summary(self) -> dict[str, list[str]]:
+        """Return a summary of tool capabilities grouped by capability tag.
+
+        Returns:
+            {capability: [tool_name, ...]}
+        """
+        summary: dict[str, list[str]] = {}
+        for tool in self._tools.values():
+            for cap in tool.capabilities:
+                if cap not in summary:
+                    summary[cap] = []
+                summary[cap].append(tool.name)
+        return summary
+
+    def get_tool_capabilities(self) -> dict[str, list[str]]:
+        """Return per-tool capability mapping: {tool_name: [capability, ...]}."""
+        return {tool.name: tool.capabilities for tool in self._tools.values()}

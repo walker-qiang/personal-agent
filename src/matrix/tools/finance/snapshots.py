@@ -122,6 +122,7 @@ def recent_snapshots(
 history_tool = ToolDefinition(
     name="finance.snapshot_history",
     description="Return effective snapshot history for one durable asset id.",
+    capabilities=["portfolio_analysis"],
     input_schema={
         "type": "object",
         "required": ["asset_id"],
@@ -139,6 +140,7 @@ history_tool = ToolDefinition(
 recent_tool = ToolDefinition(
     name="finance.recent_snapshots",
     description="Return latest effective snapshots across active assets, optionally filtered by asset id, code, name, bucket, or asset type.",
+    capabilities=["portfolio_analysis"],
     input_schema={
         "type": "object",
         "properties": {

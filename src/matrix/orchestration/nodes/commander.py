@@ -66,6 +66,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])
     agent_registry: AgentRegistry = cfg["agent_registry"]
+    full_tools: ToolRegistry = cfg["full_tools"]
 
     user_msg = state["user_message"]
 
@@ -78,7 +79,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
         }
 
     agents_desc = json.dumps(
-        agent_registry.agents_for_commander(), ensure_ascii=False, indent=2
+        agent_registry.agents_for_commander(full_tools), ensure_ascii=False, indent=2
     )
 
     history_context = _build_history_context(cfg.get("history", []))
@@ -138,6 +139,20 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
 
     logger.info("commander: plan_type=%s steps=%d agents=%s", plan_type, len(plan), agent_ids_in_plan)
 
+    # P2: Emit plan creation progress event
+    if len(plan) > 1:
+        _push_event(cfg, "progress", {
+            "type": "plan_created",
+            "plan_type": plan_type,
+            "total_steps": len(plan),
+            "steps": [
+                {"step": s.get("step", 0), "agent": s.get("agent_id", ""),
+                 "task": s.get("task", "")[:60], "depends_on": s.get("depends_on", [])}
+                for s in plan
+            ],
+            "message": f"已制定 {len(plan)} 步执行计划，开始执行...",
+        })
+
     for i, step in enumerate(plan):
         if "step" not in step:
             step["step"] = i + 1
@@ -175,9 +190,30 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
     agent_id = step.get("agent_id", "")
     task = step.get("task", state["user_message"])
     skill_name = step.get("skill_name", "")
+    total_steps = len(plan)
+
+    # P2: Emit step start progress event
+    if total_steps > 1:
+        _push_event(cfg, "progress", {
+            "type": "step_start",
+            "step": step.get("step", current_step + 1),
+            "total": total_steps,
+            "agent": agent_id,
+            "task": task[:80],
+            "message": f"步骤 {step.get('step', current_step + 1)}/{total_steps}: {task[:60]} — 执行中",
+        })
 
     agent_def = agent_registry.get(agent_id)
     if agent_def is None:
+        # P2: Emit step_error for agent not found
+        if total_steps > 1:
+            sn = step.get("step", current_step + 1)
+            _push_event(cfg, "progress", {
+                "type": "step_error",
+                "step": sn, "total": total_steps, "agent": agent_id,
+                "task": task[:60], "error": f"Agent not found: {agent_id}",
+                "message": f"步骤 {sn}/{total_steps}: {task[:40]} — Agent 未找到",
+            })
         return {
             "agent_results": [{
                 "agent_id": agent_id,
@@ -198,6 +234,15 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
             skill_result = execute_skill(skill, agent_tools, cfg.get("trace"))
             skill_results = skill_result.get("results", [])
             if skill_result.get("errors"):
+                # P2: Emit step_error for skill execution failure
+                if total_steps > 1:
+                    sn = step.get("step", current_step + 1)
+                    _push_event(cfg, "progress", {
+                        "type": "step_error",
+                        "step": sn, "total": total_steps, "agent": agent_id,
+                        "task": task[:60], "error": skill_result["errors"][0][:100],
+                        "message": f"步骤 {sn}/{total_steps}: {task[:40]} — 技能执行失败",
+                    })
                 return {
                     "agent_results": [{
                         "agent_id": agent_id,
@@ -233,6 +278,26 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         "tool_results": result.get("tool_results", []),
         "error": result.get("error", ""),
     }
+
+    # P2: Emit step completion progress event
+    if total_steps > 1:
+        sn = step.get("step", current_step + 1)
+        if new_result.get("error"):
+            _push_event(cfg, "progress", {
+                "type": "step_error",
+                "step": sn, "total": total_steps, "agent": agent_id,
+                "task": task[:60], "error": new_result["error"][:100],
+                "message": f"步骤 {sn}/{total_steps}: {task[:40]} — 执行失败",
+            })
+        else:
+            _push_event(cfg, "progress", {
+                "type": "step_done",
+                "step": sn, "total": total_steps, "agent": agent_id,
+                "task": task[:60],
+                "result_preview": new_result.get("result", "")[:100],
+                "message": f"步骤 {sn}/{total_steps}: {task[:40]} — 完成",
+            })
+
     new_tool_results = result.get("tool_results", [])
 
     pending_actions = []
@@ -772,6 +837,13 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
 
     if needs_revision and revised_plan:
         logger.info("replan: plan needs revision — %s", assessment.get("reason", "no reason given"))
+        # P2: Emit replan progress event
+        _push_event(cfg, "progress", {
+            "type": "replan",
+            "reason": assessment.get("reason", "需要修正计划"),
+            "attempt": replan_attempts + 1,
+            "message": f"执行计划需要修正（第 {replan_attempts + 1} 次），正在重新规划...",
+        })
         # Normalize revised plan: ensure depends_on and output_key fields
         for i, s in enumerate(revised_plan):
             if "step" not in s:

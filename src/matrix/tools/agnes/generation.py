@@ -109,6 +109,7 @@ def generate_image(
 image_tool = ToolDefinition(
     name="agnes.generate_image",
     description="使用 Agnes Image 2.1 Flash 生成高质量图片。LLM 负责描述画面内容，代码自动追加质量关键词。",
+    capabilities=["image_generation"],
     input_schema={
         "type": "object",
         "properties": {
@@ -235,6 +236,7 @@ def generate_video(
 video_tool = ToolDefinition(
     name="agnes.generate_video",
     description="使用 Agnes Video V2.0 生成高质量视频（异步任务模式，提交后轮询等待结果，通常 2-3 分钟完成）。LLM 负责描述视频内容，代码自动追加质量关键词。",
+    capabilities=["video_generation"],
     input_schema={
         "type": "object",
         "properties": {

@@ -139,7 +139,7 @@ def _classify_query_factuality(question: str) -> float:
 
 COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回答用户的问题。
 
-可用的领域专家：
+可用的领域专家（含各自拥有的工具能力）：
 {agents}
 
 用户问题：{question}
@@ -161,6 +161,10 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
   - 如 Step3 依赖 Step1 和 Step2，则 depends_on = [1, 2]
   - 如 Step2 依赖 Step1 的结果才能执行，则 depends_on = [1]
 - output_key 字段：为该步骤的输出起一个简短英文标识，供后续依赖步骤引用
+- 选择专家时，参考其 capabilities 字段判断该专家是否能完成对应任务
+  - 如需要行情数据，应选择拥有 market_data 能力的专家
+  - 如需要生成图片，应选择拥有 image_generation 能力的专家
+  - 如某个任务需要的能力没有专家覆盖，委派给 commander 自己处理
 - 投资/金融/持仓/配置分析类问题委派给 investment-analyst
 - 图片生成、视频生成、图像创作类问题委派给 media-generator
 - 跨领域问题：投资部分委派给 investment-analyst，媒体生成委派给 media-generator，其余指挥官自己处理

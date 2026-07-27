@@ -13,6 +13,7 @@ from ..base import ToolDefinition
 tool_definition = ToolDefinition(
     name="knowledge_search",
     description="搜索个人知识库中的文档。用于：用户问「我的笔记里有没有…」「之前记录过什么…」「知识库中关于…的内容」。返回匹配度最高的文档片段。仅当用户明确询问个人知识库内容时才调用。",
+    capabilities=["knowledge_base"],
     input_schema={
         "type": "object",
         "properties": {

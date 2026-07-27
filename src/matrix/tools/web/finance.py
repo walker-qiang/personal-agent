@@ -25,6 +25,7 @@ tool_definition = ToolDefinition(
         "返回精确数值（价格、涨跌额、涨跌幅），不是新闻。"
         "⚠️ 用户问「今天股市」「大盘多少点」「苹果股价」「全球股市表现」时用此工具，不要用 news_search。"
     ),
+    capabilities=["market_data"],
     input_schema={
         "type": "object",
         "properties": {

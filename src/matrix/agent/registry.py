@@ -79,12 +79,24 @@ class AgentRegistry:
         """List all registered agents."""
         return list(self._agents.values())
 
-    def agents_for_commander(self) -> list[dict[str, str]]:
-        """Return agent descriptions for the commander's planning prompt."""
-        return [
-            {"id": a.id, "name": a.name, "description": a.description, "domain": a.domain}
-            for a in self.list_domain_agents()
-        ]
+    def agents_for_commander(self, full_tools: object | None = None) -> list[dict[str, Any]]:
+        """Return agent descriptions for the commander's planning prompt.
+
+        When full_tools (ToolRegistry) is provided, computes per-agent tool
+        capabilities so the commander can match tasks to the right agents.
+        """
+        agents = []
+        for a in self.list_domain_agents():
+            info: dict[str, Any] = {
+                "id": a.id, "name": a.name, "description": a.description, "domain": a.domain,
+            }
+            if full_tools is not None:
+                agent_tools = self.build_tool_registry(a.id, full_tools)
+                caps = agent_tools.get_capabilities_summary()
+                if caps:
+                    info["capabilities"] = caps
+            agents.append(info)
+        return agents
 
     # ---- Tool Binding ----
 

@@ -7,6 +7,7 @@ Commander + Domain Agents architecture:
 from __future__ import annotations
 
 import json
+import queue
 
 import pytest
 
@@ -80,6 +81,7 @@ def _build_registry() -> ToolRegistry:
             description="Get holdings summary",
             input_schema={"type": "object", "properties": {}, "required": []},
             handler=lambda **kw: {"holding_count": 2, "total_value": 100000},
+            capabilities=["market_data", "portfolio_analysis"],
         )
     )
     reg.register(
@@ -88,6 +90,7 @@ def _build_registry() -> ToolRegistry:
             description="Get bucket allocation",
             input_schema={"type": "object", "properties": {}, "required": []},
             handler=lambda **kw: {"buckets": [{"name": "stock", "target": 40, "current": 45}]},
+            capabilities=["portfolio_analysis"],
         )
     )
     reg.register(
@@ -96,6 +99,7 @@ def _build_registry() -> ToolRegistry:
             description="Search the web",
             input_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
             handler=lambda **kw: {"results": [{"title": "test", "url": "http://test.com"}]},
+            capabilities=["web_search"],
         )
     )
     reg.register(
@@ -104,6 +108,7 @@ def _build_registry() -> ToolRegistry:
             description="Fetch a web page",
             input_schema={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
             handler=lambda **kw: {"text": "test content"},
+            capabilities=["web_search"],
         )
     )
     return reg
@@ -497,6 +502,345 @@ class TestGraphIntegration:
         final = events[-1]
         assert len(final.get("agent_results", [])) >= 1
         assert final.get("final_answer") is not None
+
+
+# ── P3: Tool Capability Declaration ──────────────────────────────────────────
+
+class TestToolCapabilities:
+    """Tests for P3: Tool capability declaration and aggregation."""
+
+    def test_tool_definition_with_capabilities(self):
+        """ToolDefinition should store capabilities."""
+        tool = ToolDefinition(
+            name="test.tool",
+            description="A test tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: {},
+            capabilities=["market_data", "web_search"],
+        )
+        assert tool.capabilities == ["market_data", "web_search"]
+
+    def test_tool_definition_default_capabilities(self):
+        """ToolDefinition should default to empty capabilities list."""
+        tool = ToolDefinition(
+            name="test.tool",
+            description="A test tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: {},
+        )
+        assert tool.capabilities == []
+
+    def test_tool_definition_to_dict_excludes_capabilities(self):
+        """to_dict() should not include capabilities (LLM planners don't need them)."""
+        tool = ToolDefinition(
+            name="test.tool",
+            description="A test tool",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: {},
+            capabilities=["market_data"],
+        )
+        d = tool.to_dict()
+        assert "capabilities" not in d
+        assert d["name"] == "test.tool"
+
+    def test_registry_get_capabilities_summary(self):
+        """get_capabilities_summary should group tools by capability tag."""
+        reg = ToolRegistry()
+        reg.register(ToolDefinition(
+            name="finance.holdings", description="Get holdings",
+            input_schema={}, handler=lambda **kw: {},
+            capabilities=["market_data", "portfolio_analysis"],
+        ))
+        reg.register(ToolDefinition(
+            name="web_search", description="Search web",
+            input_schema={}, handler=lambda **kw: {},
+            capabilities=["web_search"],
+        ))
+        reg.register(ToolDefinition(
+            name="finance.quotes", description="Get quotes",
+            input_schema={}, handler=lambda **kw: {},
+            capabilities=["market_data"],
+        ))
+
+        summary = reg.get_capabilities_summary()
+        assert "market_data" in summary
+        assert set(summary["market_data"]) == {"finance.holdings", "finance.quotes"}
+        assert "web_search" in summary
+        assert summary["web_search"] == ["web_search"]
+        assert "portfolio_analysis" in summary
+        assert summary["portfolio_analysis"] == ["finance.holdings"]
+
+    def test_registry_get_tool_capabilities(self):
+        """get_tool_capabilities should return per-tool capability mapping."""
+        reg = ToolRegistry()
+        reg.register(ToolDefinition(
+            name="tool_a", description="A",
+            input_schema={}, handler=lambda **kw: {},
+            capabilities=["cap1", "cap2"],
+        ))
+        reg.register(ToolDefinition(
+            name="tool_b", description="B",
+            input_schema={}, handler=lambda **kw: {},
+        ))
+
+        caps = reg.get_tool_capabilities()
+        assert caps["tool_a"] == ["cap1", "cap2"]
+        assert caps["tool_b"] == []
+
+    def test_capabilities_summary_empty(self):
+        """Empty registry should return empty capability summary."""
+        reg = ToolRegistry()
+        assert reg.get_capabilities_summary() == {}
+        assert reg.get_tool_capabilities() == {}
+
+    def test_agents_for_commander_with_capabilities(self, full_tools):
+        """agents_for_commander should include capabilities when full_tools is provided."""
+        agent_reg = _build_agent_registry()
+        agents = agent_reg.agents_for_commander(full_tools)
+        # INVESTMENT_ANALYST has access to all tools → should have capabilities
+        inv_agent = next((a for a in agents if a["id"] == "investment-analyst"), None)
+        assert inv_agent is not None
+        # The test tool registry has capabilities on tools, so agent should show them
+        assert "capabilities" in inv_agent
+        caps = inv_agent["capabilities"]
+        assert "market_data" in caps
+        assert "portfolio_analysis" in caps
+        assert "web_search" in caps
+
+    def test_agents_for_commander_without_tools(self, agent_registry):
+        """agents_for_commander without full_tools should not include capabilities."""
+        agents = agent_registry.agents_for_commander()
+        inv_agent = next((a for a in agents if a["id"] == "investment-analyst"), None)
+        assert inv_agent is not None
+        assert "capabilities" not in inv_agent
+
+
+# ── P2: Execution Progress Monitoring ────────────────────────────────────────
+
+def _make_config_with_events(llm, full_tools, agent_registry):
+    """Make config with event_queue for capturing progress events."""
+    event_queue = queue.Queue()
+    config = {
+        "configurable": {
+            "llm": llm,
+            "pipeline_llm": llm,
+            "full_tools": full_tools,
+            "agent_registry": agent_registry,
+            "event_queue": event_queue,
+        },
+    }
+    return config, event_queue
+
+
+def _drain_progress_events(event_queue: queue.Queue) -> list[dict]:
+    """Drain all events from queue and return progress events."""
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+    return [e[1] for e in events if e[0] == "progress"]
+
+
+class TestProgressEvents:
+    """Tests for P2: Execution progress monitoring events."""
+
+    def test_commander_emits_plan_created_for_multi_step(self, base_state, full_tools, agent_registry):
+        """Multi-step plan should emit plan_created progress event."""
+        plan_json = json.dumps([
+            {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
+             "depends_on": [], "skill_name": "", "purpose": "获取"},
+            {"step": 2, "agent_id": "investment-analyst", "task": "分析数据",
+             "depends_on": [1], "skill_name": "", "purpose": "分析"},
+        ])
+        llm = FakeLLM([plan_json])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        result = commander_plan_node(base_state(), config=config)
+        assert len(result["delegation_plan"]) == 2
+
+        progress = _drain_progress_events(eq)
+        plan_created = [e for e in progress if e.get("type") == "plan_created"]
+        assert len(plan_created) == 1
+        assert plan_created[0]["total_steps"] == 2
+        assert plan_created[0]["plan_type"] in ("agent", "subtask")
+        assert len(plan_created[0]["steps"]) == 2
+
+    def test_commander_no_progress_for_single_step(self, base_state, full_tools, agent_registry):
+        """Single-step plan should NOT emit plan_created progress event."""
+        plan_json = json.dumps([
+            {"step": 1, "agent_id": "investment-analyst", "task": "分析",
+             "skill_name": "", "purpose": "分析"},
+        ])
+        llm = FakeLLM([plan_json])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        result = commander_plan_node(base_state(), config=config)
+        assert len(result["delegation_plan"]) == 1
+
+        progress = _drain_progress_events(eq)
+        plan_created = [e for e in progress if e.get("type") == "plan_created"]
+        assert len(plan_created) == 0
+
+    def test_commander_no_progress_for_empty_plan(self, base_state, full_tools, agent_registry):
+        """Empty plan (Commander fallback) should NOT emit plan_created."""
+        llm = FakeLLM(["[]"])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        result = commander_plan_node(base_state(), config=config)
+        assert len(result["delegation_plan"]) == 1  # fallback to commander
+
+        progress = _drain_progress_events(eq)
+        plan_created = [e for e in progress if e.get("type") == "plan_created"]
+        assert len(plan_created) == 0
+
+    def test_delegate_emits_step_start_and_done(self, base_state, full_tools, agent_registry):
+        """Multi-step plan delegate should emit step_start and step_done."""
+        llm = FakeLLM(["分析完成：持仓健康。"])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
+                 "depends_on": [], "skill_name": "", "purpose": "获取"},
+                {"step": 2, "agent_id": "investment-analyst", "task": "分析数据",
+                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
+            ],
+            current_step=0,
+        )
+        result = delegate_node(state, config=config)
+        assert len(result["agent_results"]) == 1
+
+        progress = _drain_progress_events(eq)
+        step_start = [e for e in progress if e.get("type") == "step_start"]
+        step_done = [e for e in progress if e.get("type") == "step_done"]
+
+        assert len(step_start) >= 1
+        assert step_start[0]["step"] == 1
+        assert step_start[0]["total"] == 2
+        assert len(step_done) >= 1
+        assert step_done[0]["step"] == 1
+
+    def test_delegate_no_progress_for_single_step(self, base_state, full_tools, agent_registry):
+        """Single-step plan should NOT emit step_start/step_done events."""
+        llm = FakeLLM(["分析完成。"])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "investment-analyst", "task": "分析",
+                 "skill_name": "", "purpose": "分析"},
+            ],
+            current_step=0,
+        )
+        result = delegate_node(state, config=config)
+        assert len(result["agent_results"]) == 1
+
+        progress = _drain_progress_events(eq)
+        step_events = [e for e in progress if e.get("type") in ("step_start", "step_done", "step_error")]
+        assert len(step_events) == 0
+
+    def test_delegate_emits_step_error_for_failed_agent(self, base_state, full_tools, agent_registry):
+        """Failed agent (not found) should emit step_error event."""
+        llm = FakeLLM([])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "nonexistent-agent", "task": "测试",
+                 "depends_on": [], "skill_name": "", "purpose": "测试"},
+                {"step": 2, "agent_id": "investment-analyst", "task": "分析",
+                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
+            ],
+            current_step=0,
+        )
+        result = delegate_node(state, config=config)
+        assert "error" in result["agent_results"][0]
+
+        progress = _drain_progress_events(eq)
+        step_error = [e for e in progress if e.get("type") == "step_error"]
+        assert len(step_error) >= 1
+        assert "error" in step_error[0]
+
+    def test_delegate_step_done_includes_result_preview(self, base_state, full_tools, agent_registry):
+        """step_done event should include result_preview."""
+        llm = FakeLLM(["分析完成：持仓配置合理，建议继续持有。"])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
+                 "depends_on": [], "skill_name": "", "purpose": "获取"},
+                {"step": 2, "agent_id": "investment-analyst", "task": "分析",
+                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
+            ],
+            current_step=0,
+        )
+        delegate_node(state, config=config)
+
+        progress = _drain_progress_events(eq)
+        step_done = [e for e in progress if e.get("type") == "step_done"]
+        assert len(step_done) >= 1
+        assert "result_preview" in step_done[0]
+
+    def test_replan_emits_progress_event(self, base_state, full_tools, agent_registry):
+        """Replan should emit progress event when revision is needed."""
+        revised_plan = [
+            {"step": 1, "depends_on": [], "task": "task1", "output_key": "step_1"},
+            {"step": 2, "depends_on": [1], "task": "revised task2", "output_key": "step_2"},
+        ]
+        llm = FakeLLM([
+            json.dumps({"needs_revision": True, "reason": "数据缺失需调整", "revised_plan": revised_plan}),
+        ])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "depends_on": [], "task": "task1", "output_key": "step_1"},
+                {"step": 2, "depends_on": [1], "task": "original task2", "output_key": "step_2"},
+            ],
+            completed_steps=[1],
+            agent_results=[{"task": "task1", "result": "empty", "error": ""}],
+        )
+        result = replan_node(state, config=config)
+        assert result["needs_replan"] is True
+
+        progress = _drain_progress_events(eq)
+        replan_events = [e for e in progress if e.get("type") == "replan"]
+        assert len(replan_events) == 1
+        assert replan_events[0]["reason"] == "数据缺失需调整"
+        assert replan_events[0]["attempt"] == 1
+
+    def test_replan_no_progress_when_no_revision(self, base_state, full_tools, agent_registry):
+        """Replan should NOT emit progress event when no revision needed."""
+        llm = FakeLLM([
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+        ])
+        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
+
+        state = base_state(
+            delegation_plan=[{"step": 1, "depends_on": [], "task": "task1"}],
+            completed_steps=[1],
+            agent_results=[{"task": "task1", "result": "success", "error": ""}],
+        )
+        result = replan_node(state, config=config)
+        assert result["needs_replan"] is False
+
+        progress = _drain_progress_events(eq)
+        replan_events = [e for e in progress if e.get("type") == "replan"]
+        assert len(replan_events) == 0
+
+    def test_no_progress_events_without_event_queue(self, base_state, full_tools, agent_registry):
+        """Progress events should be silently dropped when no event_queue in config."""
+        plan_json = json.dumps([
+            {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
+             "depends_on": [], "skill_name": "", "purpose": "获取"},
+            {"step": 2, "agent_id": "investment-analyst", "task": "分析数据",
+             "depends_on": [1], "skill_name": "", "purpose": "分析"},
+        ])
+        llm = FakeLLM([plan_json])
+        # No event_queue in config — should not crash
+        config = make_config(llm, full_tools, agent_registry)
+        result = commander_plan_node(base_state(), config=config)
+        assert len(result["delegation_plan"]) == 2
 
 
 # ── Plan-and-Execute: DAG Resolution ─────────────────────────────────────────
