@@ -10,10 +10,15 @@ the LLM can read full SKILL.md content on demand.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("matrix.orchestration.context")
+
+# TTL cache for project context files (avoid re-reading AGENTS.md every turn)
+_cache: dict[str, tuple[float, list[tuple[Path, str]]]] = {}
+_CACHE_TTL = 60  # seconds
 
 # File names to look for, in priority order
 _CONTEXT_FILE_NAMES = ("AGENTS.md", "CLAUDE.md")
@@ -27,6 +32,12 @@ def load_project_context_files(cwd: Path | None = None) -> list[tuple[Path, str]
     """
     if cwd is None:
         cwd = Path.cwd()
+
+    cache_key = str(cwd)
+    now = time.time()
+    cached = _cache.get(cache_key)
+    if cached and now - cached[0] < _CACHE_TTL:
+        return cached[1]
 
     results: list[tuple[Path, str]] = []
     seen_paths: set[str] = set()
@@ -50,6 +61,7 @@ def load_project_context_files(cwd: Path | None = None) -> list[tuple[Path, str]
                 except (OSError, UnicodeDecodeError):
                     pass
 
+    _cache[cache_key] = (now, results)
     return results
 
 

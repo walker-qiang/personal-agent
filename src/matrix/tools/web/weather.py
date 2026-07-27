@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 
 tool_definition = ToolDefinition(
     name="weather",
@@ -50,7 +50,7 @@ def weather(city: str, days: int = 1) -> dict[str, Any]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
-        return {"error": f"获取天气失败，请检查城市名称是否正确", "city": city}
+        return tool_error("weather_get_current", "获取天气", f"获取天气数据失败", "请检查城市名称是否正确，或尝试使用英文城市名。", {"city": city})
 
     current = (data.get("current_condition") or [{}])[0]
     forecast_days = data.get("weather", [])[:days]

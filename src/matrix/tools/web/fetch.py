@@ -9,7 +9,7 @@ import urllib.request
 import zlib
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 
 tool_definition = ToolDefinition(
     name="web_fetch",
@@ -55,9 +55,9 @@ def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
 
     # Reject empty or search-engine redirect URLs early
     if not url or not url.strip():
-        return {"error": "URL 为空，无法获取。请使用搜索结果的摘要信息直接回答，或搜索其他关键词。", "text": ""}
+        return tool_error("web_fetch", "获取网页", "URL 为空", "请使用搜索结果的摘要信息直接回答，或搜索其他关键词。")
     if _REDIRECT_URL_RE.search(url):
-        return {"error": "该 URL 是搜索引擎跳转链接，无法直接获取。请使用搜索结果的摘要信息，或搜索其他来源。", "text": ""}
+        return tool_error("web_fetch", "获取网页", f"该 URL 是搜索引擎跳转链接: {url}", "请使用搜索结果的摘要信息，或搜索其他来源。", {"url": url})
 
     req = urllib.request.Request(
         url,
@@ -73,7 +73,7 @@ def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
         with urllib.request.urlopen(req, timeout=20) as resp:
             content_type = resp.headers.get("Content-Type", "")
             if "text/html" not in content_type and "text/plain" not in content_type:
-                return {"error": f"不支持的内容类型: {content_type}", "text": ""}
+                return tool_error("web_fetch", "获取网页", f"不支持的内容类型: {content_type}", "该 URL 可能是图片或二进制文件，请尝试其他来源。", {"url": url, "content_type": content_type})
             raw = resp.read()
 
             # Handle gzip/deflate compression
@@ -97,7 +97,7 @@ def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
             if not html:
                 html = raw.decode("utf-8", errors="replace")
     except Exception as err:
-        return {"error": f"获取网页失败: {err}", "text": ""}
+        return tool_error("web_fetch", "获取网页", str(err)[:200], "请检查 URL 是否正确，或稍后重试。如果是搜索结果链接，请使用搜索摘要直接回答。", {"url": url})
 
     text = _extract_text(html)
     from ..truncate import truncate_head

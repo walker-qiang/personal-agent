@@ -219,9 +219,9 @@ def _fmt_bytes(n: int) -> str:
 # ---- Structured result truncation ----
 
 # Fields that may contain long arrays in tool results
-_ARRAY_FIELDS = ("holdings", "buckets", "snapshots", "assets", "results", "items", "news")
+_ARRAY_FIELDS = ("holdings", "buckets", "snapshots", "assets", "results", "items", "news", "images")
 # Fields that may contain long strings in tool results
-_TEXT_FIELDS = ("text", "stdout", "stderr", "content", "output", "notes", "description")
+_TEXT_FIELDS = ("text", "stdout", "stderr", "content", "output", "notes", "description", "prompt", "url")
 
 DEFAULT_MAX_ARRAY_ITEMS = 50
 

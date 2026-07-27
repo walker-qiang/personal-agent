@@ -412,7 +412,7 @@ class SessionStore:
                     (session_id, max_turns * 2),
                 ).fetchall()
                 rows = list(reversed(rows))
-                return [{"role": r[0], "content": r[1]} for r in rows]
+                return [{"role": r[0], "content": r[1], "message_id": ""} for r in rows]
 
             # Traverse from leaf to root
             path: list[dict[str, str]] = []
@@ -424,7 +424,7 @@ class SessionStore:
                 ).fetchone()
                 if msg_row is None:
                     break
-                path.append({"role": msg_row[2], "content": msg_row[3]})
+                path.append({"role": msg_row[2], "content": msg_row[3], "message_id": msg_row[0]})
                 current = msg_row[1]  # parent_id
 
             path.reverse()

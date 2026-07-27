@@ -95,14 +95,14 @@ class SandboxExecutor:
                 )
                 exit_code = -1
                 error_type = "TimeoutError"
-                error_message = f"Execution timed out after {effective_timeout}s"
+                error_message = f"Execution timed out after {effective_timeout}s. 考虑优化代码性能或增加超时时间。"
 
             except Exception as e:
                 stdout = ""
                 stderr = str(e)
                 exit_code = -1
                 error_type = type(e).__name__
-                error_message = str(e)
+                error_message = f"{type(e).__name__}: {e}. 检查代码语法和导入是否正确。"
 
             # Truncate output using unified truncation module
             from ..truncate import truncate_tail

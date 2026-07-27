@@ -31,13 +31,27 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) -> Iterator[dict[str, Any]]:
     """Drain all pending events from the queue and yield SSE events.
 
+    Handles both structured AgentEvent dataclasses and legacy (str, dict) tuples.
     If tracked is provided, tool_call keys are added to prevent double emission
     from the state-based path.
     """
     import json as _json
     while True:
         try:
-            evt_type, evt_data = q.get_nowait()
+            item = q.get_nowait()
+
+            # Normalize: dataclass -> (evt_type, evt_data) tuple
+            if hasattr(item, "to_dict") and hasattr(item, "type"):
+                d = item.to_dict()
+                evt_type = d.pop("type", "message")
+                # Remove timestamp from SSE payload
+                d.pop("timestamp", None)
+                evt_data = d
+            elif isinstance(item, tuple) and len(item) == 2:
+                evt_type, evt_data = item
+            else:
+                continue
+
             if evt_type == "tool_call":
                 if tracked is not None:
                     args_key = _json.dumps(evt_data.get("args", {}), sort_keys=True)
@@ -65,6 +79,40 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
                 yield {
                     "type": "progress",
                     "message": evt_data.get("message", ""),
+                }
+            elif evt_type == "plan_created":
+                yield {
+                    "type": "plan_created",
+                    "plan_type": evt_data.get("plan_type", ""),
+                    "total_steps": evt_data.get("total_steps", 0),
+                    "steps": evt_data.get("steps", []),
+                }
+            elif evt_type == "step_start":
+                yield {
+                    "type": "step_start",
+                    "step": evt_data.get("step", 0),
+                    "total": evt_data.get("total", 0),
+                    "agent": evt_data.get("agent", ""),
+                    "task": evt_data.get("task", ""),
+                }
+            elif evt_type == "step_done":
+                yield {
+                    "type": "step_done",
+                    "step": evt_data.get("step", 0),
+                    "total": evt_data.get("total", 0),
+                    "result_preview": evt_data.get("result_preview", ""),
+                }
+            elif evt_type == "step_error":
+                yield {
+                    "type": "step_error",
+                    "step": evt_data.get("step", 0),
+                    "error": evt_data.get("error", ""),
+                }
+            elif evt_type == "replan":
+                yield {
+                    "type": "replan",
+                    "reason": evt_data.get("reason", ""),
+                    "attempt": evt_data.get("attempt", 0),
                 }
         except queue.Empty:
             break

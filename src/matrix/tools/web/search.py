@@ -226,6 +226,6 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
         cache_set(ckey, result)
         return result
 
-    result = {"results": [], "message": "未找到相关结果，请尝试其他关键词"}
+    result = {"results": [], "message": "未找到相关结果。请尝试更具体的关键词、同义词，或换用英文搜索。"}
     cache_set(ckey, result)
     return result

@@ -5,13 +5,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 from .shared import build_bucket_summary, cents_to_yuan, connect_readonly, holding_row
 
 
 def holdings_summary(cache_path: str = "") -> dict[str, Any]:
     """Return current holdings and bucket summary."""
     path = Path(cache_path) if cache_path else Path("var/cache/finance.sqlite")
+    if not path.exists():
+        return tool_error(
+            "finance.holdings_summary", "查询持仓",
+            f"数据库文件不存在: {path}",
+            "请检查 MATRIX_CACHE_PATH 环境变量，或确认 personal-os 已同步数据。",
+            {"cache_path": str(path)},
+        )
     conn = connect_readonly(path)
     try:
         holdings_rows = conn.execute(
