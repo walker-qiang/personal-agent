@@ -45,6 +45,66 @@ MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across
 
 EVALUATOR_INTERVAL = 2            # Run evaluator every N iterations
 
+# ── Circuit breaker ──────────────────────────────────────────────────────────
+
+MAX_CONSECUTIVE_TOOL_FAILURES = 3  # Trip breaker after N consecutive failures of the same tool
+
+CIRCUIT_BREAKER_COOLDOWN_SEC = 30  # Cooldown seconds before a tripped tool can be retried
+
+
+class CircuitBreaker:
+    """Per-tool circuit breaker to prevent infinite retries on failing tools.
+
+    Tracks consecutive failures per tool name. When a tool exceeds
+    MAX_CONSECUTIVE_TOOL_FAILURES, it is "tripped" — calls to that tool
+    are blocked for CIRCUIT_BREAKER_COOLDOWN_SEC seconds.
+
+    After cooldown expires, the tool is reset and can be tried again.
+    """
+
+    def __init__(self) -> None:
+        self._failures: dict[str, int] = {}
+        self._cooldowns: dict[str, float] = {}
+
+    def record_failure(self, tool_name: str) -> bool:
+        """Record a tool failure. Returns True if the breaker just tripped."""
+        self._failures[tool_name] = self._failures.get(tool_name, 0) + 1
+        if self._failures[tool_name] >= MAX_CONSECUTIVE_TOOL_FAILURES:
+            self._cooldowns[tool_name] = time.time() + CIRCUIT_BREAKER_COOLDOWN_SEC
+            logger.warning(
+                "circuit_breaker: tripped tool=%s after %d consecutive failures",
+                tool_name, self._failures[tool_name],
+            )
+            return True
+        return False
+
+    def record_success(self, tool_name: str) -> None:
+        """Reset the failure counter for a tool after a successful call."""
+        self._failures.pop(tool_name, None)
+        self._cooldowns.pop(tool_name, None)
+
+    def is_blocked(self, tool_name: str) -> bool:
+        """Check if a tool is currently blocked by the circuit breaker."""
+        cooldown_until = self._cooldowns.get(tool_name)
+        if cooldown_until is None:
+            return False
+        if time.time() >= cooldown_until:
+            # Cooldown expired — reset the breaker
+            self._failures.pop(tool_name, None)
+            self._cooldowns.pop(tool_name, None)
+            logger.info("circuit_breaker: cooldown expired for tool=%s, resetting", tool_name)
+            return False
+        return True
+
+    def blocked_tools(self) -> set[str]:
+        """Return the set of currently blocked tool names."""
+        return {name for name in self._cooldowns if self.is_blocked(name)}
+
+    def reset(self) -> None:
+        """Reset all circuit breakers."""
+        self._failures.clear()
+        self._cooldowns.clear()
+
 # ── Query factuality classifier ──────────────────────────────────────────────
 
 
@@ -85,22 +145,70 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
 用户问题：{question}
 
 请制定执行计划，以 JSON 数组格式返回。每个步骤：
-{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "skill_name": "", "purpose": "为什么需要这个专家"}}
+{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "depends_on": [], "output_key": "结果标识", "skill_name": "", "purpose": "为什么需要这个专家"}}
 
 规则：
-- 简单问题（单步即可回答）返回空数组 []，由指挥官直接处理
-- 复杂问题（需要多个独立数据源、多步推理、对比分析）拆分为子任务数组，每个子任务独立运行
-  - 例如"对比A和B的财报"拆为：查A财报、查B财报、查股价、汇总分析
-  - 每个子任务的 task 必须具体、可独立执行，指定要查什么数据
-  - 子任务之间尽量独立无依赖，可并行执行
+- 只有闲聊/打招呼（如"你好""谢谢"）返回空数组 []
+- 任何需要多步执行的任务（如"先查A再分析B最后汇总"）必须拆分为多个子步骤，每个子步骤只做一件事
+  - 即使多个子步骤都委派给同一个专家，也必须拆开。系统会在每一步完成后传递结果
+  - 例如"分析我的持仓"拆为：Step1获取持仓数据 → Step2基于数据计算配置偏离 → Step3给出再平衡建议
+  - 例如"对比A和B的财报"拆为：Step1查A财报、Step2查B财报（并行）、Step3综合对比（依赖[1,2]）
+  - 每个子任务的 task 必须具体、可独立执行，明确要做什么
   - 最多 {max_subtasks} 个子任务
+- depends_on 字段：列出当前步骤依赖的前置步骤号（step 编号）
+  - 无依赖的步骤填 []，系统会并行执行这些步骤
+  - 有依赖的步骤会等待前置步骤全部完成后才执行
+  - 如 Step3 依赖 Step1 和 Step2，则 depends_on = [1, 2]
+  - 如 Step2 依赖 Step1 的结果才能执行，则 depends_on = [1]
+- output_key 字段：为该步骤的输出起一个简短英文标识，供后续依赖步骤引用
 - 投资/金融/持仓/配置分析类问题委派给 investment-analyst
 - 图片生成、视频生成、图像创作类问题委派给 media-generator
 - 跨领域问题：投资部分委派给 investment-analyst，媒体生成委派给 media-generator，其余指挥官自己处理
-- 每个专家只委派一次，合并相似任务
 - 如果问题匹配某个专家的技能，填写 skill_name 字段
 
 返回 JSON 数组。"""
+
+
+REPLAN_PROMPT = """你是指挥官。请检查当前执行进度，判断原计划是否需要修正。
+
+原始计划：
+{plan}
+
+已完成步骤及结果：
+{completed}
+
+用户目标：{goal}
+
+请判断：
+1. 已完成步骤的结果是否与预期偏差过大？（如关键数据缺失、结果为空）
+2. 是否有步骤失败需要重新分配或调整？
+3. 后续未执行步骤的计划是否仍然合理？（如 Step 1 返回了意外数据，Step 3 的假设可能已不成立）
+
+返回 JSON：
+{{"needs_revision": false, "reason": "", "revised_plan": []}}
+
+如果 needs_revision 为 true，revised_plan 中提供修正后的完整计划（含所有步骤，保留已完成步骤不变）。
+如果 needs_revision 为 false，revised_plan 为空数组。"""
+
+
+FALLBACK_AGGREGATE_PROMPT = """你是一个友好的助手。系统在处理用户问题时遇到了一些困难，需要你生成一条有帮助的回复。
+
+用户问题：{question}
+
+已尝试的操作：
+{attempts}
+
+遇到的问题：
+{errors}
+
+请生成一条简洁、友好的回复，要求：
+1. 用与用户相同的语言
+2. 简要说明哪些操作没有成功（不要暴露内部细节如"agent"、"tool"、"API"等技术术语）
+3. 给出 1-2 条用户可以尝试的具体建议（如换个问法、提供更多信息、稍后重试）
+4. 语气要温和、有帮助，不要显得冷漠
+5. 不超过 150 字
+
+直接返回回复内容，不需要 JSON 格式。"""
 
 
 COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家的执行结果，汇总回答用户的问题。
@@ -668,6 +776,7 @@ def _prune_tools(
     all_tools: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     iteration: int = 0,
+    circuit_breaker: Any = None,
 ) -> list[dict[str, Any]]:
     """Dynamically prune the action space based on current context.
 
@@ -679,6 +788,7 @@ def _prune_tools(
     Pruning rules:
     1. No get_stored_data when no __refId in messages
     2. No working_memory on first iteration (nothing to record yet)
+    3. No circuit-breaker-blocked tools (tool has failed too many times consecutively)
     """
     has_refs = False
     for msg in messages:
@@ -705,6 +815,11 @@ def _prune_tools(
 
         # Rule 2: hide working_memory on first iteration or after just calling it
         if name == "working_memory" and (iteration <= 0 or last_is_wm):
+            continue
+
+        # Rule 3: hide circuit-breaker-blocked tools
+        if circuit_breaker is not None and circuit_breaker.is_blocked(name):
+            logger.info("prune_tools: hiding blocked tool=%s (circuit breaker)", name)
             continue
 
         pruned.append(tool)

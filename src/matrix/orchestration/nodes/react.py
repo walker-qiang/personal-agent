@@ -39,6 +39,7 @@ from ._helpers import (
     _run_budget_and_compact,
     _trace,
     _trace_span,
+    CircuitBreaker,
     MAX_SAME_TOOL_CALLS,
     MAX_TOTAL_TOOL_CALLS,
     MAX_TOPLEVEL_REACT_ITERATIONS,
@@ -140,7 +141,8 @@ def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     iteration = react.get("iteration", 0)
 
     # P2-2: Action Space pruning
-    llm_tools = _prune_tools(llm_tools, messages, iteration=iteration)
+    llm_tools = _prune_tools(llm_tools, messages, iteration=iteration,
+                             circuit_breaker=cfg.get("circuit_breaker"))
 
     with _trace_span(cfg, "react_llm", session_id=state.get("session_id", ""),
                      agent_id=agent_id, iteration=iteration):
@@ -360,6 +362,15 @@ def _pass_tool_guards(
             logger.info("ReAct: dedup skip %s (same args key=%s...)", name, args_key[:80])
             return False
 
+    # Guard 5: circuit breaker — tool has failed too many times consecutively
+    breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
+    if breaker is not None and breaker.is_blocked(name):
+        logger.warning("circuit_breaker: blocked tool=%s, skipping", name)
+        _push_event(cfg, "progress", {
+            "message": f"工具 {name} 已被熔断（连续失败次数过多），暂时跳过",
+        })
+        return False
+
     logger.info("ReAct: dedup no-match for %s args_key=%s", name, args_key[:80])
     return True
 
@@ -436,6 +447,10 @@ def _execute_single_tool(
         })
         if push_events:
             _push_event(cfg, "tool_result", {"name": name, "result": tool_result})
+        # Circuit breaker: record success → reset failure counter
+        breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
+        if breaker is not None:
+            breaker.record_success(name)
         return True, {"name": name, "arguments": arguments, "result": tool_result, "elapsed_ms": elapsed_ms}
 
     except (FinanceToolError, TypeError) as err:
@@ -451,6 +466,10 @@ def _execute_single_tool(
         })
         if push_events:
             _push_event(cfg, "tool_result", {"name": name, "error": str(err)[:200]})
+        # Circuit breaker: record failure → may trip the breaker
+        breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
+        if breaker is not None:
+            breaker.record_failure(name)
         return False, {"name": name, "arguments": arguments, "error": str(err), "elapsed_ms": elapsed_ms}
 
 

@@ -26,6 +26,7 @@ from ..llm.http import set_rate_limiter
 from ..orchestration.anti_hallucination import _strip_all_verification_tags
 from ..orchestration import build_graph
 from ..orchestration.state import AgentState
+from ..orchestration.nodes._helpers import CircuitBreaker
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
@@ -349,6 +350,11 @@ class ChatService:
         except Exception as err:
             logger.error("stream_chat error: %s\n%s", err, traceback.format_exc())
             yield {"type": "error", "message": f"agent error: {err}"}
+            # ── Graceful degradation: always provide a user-facing message ──
+            yield {"type": "token", "content": (
+                "抱歉，系统处理您的请求时遇到了问题。\n\n"
+                "建议：稍等片刻后重新提问，或尝试换一种方式描述您的问题。"
+            )}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
             if not interrupted:
@@ -392,7 +398,7 @@ class ChatService:
             # FINAL SAFETY NET: strip any leaked verification tags (same as normal path)
             if final_answer:
                 final_answer = _strip_all_verification_tags(final_answer)
-            if final_answer and not final_answer.startswith("所有领域专家"):
+            if final_answer:
                 yield {"type": "token", "content": final_answer}
 
         except GraphInterrupt:
@@ -666,6 +672,7 @@ class ChatService:
                     "pinned": user_message,
                     "insights": list(self._wm_insights.get(user_id, [])),
                 },
+                "circuit_breaker": CircuitBreaker(),
             },
             "thread_id": sid,
         }
@@ -693,7 +700,7 @@ class ChatService:
                 self._remember(sid, text, answer, user_id=user_id)
         else:
             final_answer = final_state.get("final_answer", "")
-            # ---- FINAL SAFETY NET: strip any leaked verification tags ----
+            # ── FINAL SAFETY NET: strip any leaked verification tags ----
             # This is the last gate before output reaches the user. Regardless
             # of which internal path produced this answer (ReAct, aggregate,
             # reflection revision, commander pass-through, error fallback),
@@ -708,9 +715,11 @@ class ChatService:
                     logger.warning("output_pii_detected: flags=%s session=%s", result.flags, sid)
                 final_answer = result.sanitized
             # ---- END OUTPUT GUARD ----
-            if final_answer and not final_answer.startswith("所有领域专家"):
-                yield {"type": "token", "content": final_answer}
-                self._remember(sid, text, final_answer, user_id=user_id)
+            if not final_answer:
+                # ── Graceful degradation: no answer produced at all ──
+                final_answer = "抱歉，暂时无法生成回复。请稍后重试或换一种方式提问。"
+            yield {"type": "token", "content": final_answer}
+            self._remember(sid, text, final_answer, user_id=user_id)
 
     def _handle_hitl_interrupt(
         self, gi: Any, sid: str, graph_config: dict[str, Any],

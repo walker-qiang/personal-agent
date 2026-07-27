@@ -10,13 +10,21 @@ import json
 
 import pytest
 
-from matrix.orchestration.graph import build_graph
+from matrix.orchestration.graph import (
+    build_graph,
+    _route_dag_first,
+    _route_after_replan,
+    _plan_index,
+)
 from matrix.orchestration.nodes import (
+    _get_ready_steps,
     aggregate_node,
     commander_plan_node,
     delegate_node,
     reflection_node,
+    replan_node,
 )
+from matrix.orchestration.nodes._helpers import CircuitBreaker, _prune_tools
 from matrix.orchestration.state import AgentState
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
@@ -125,7 +133,7 @@ def agent_registry():
     return _build_agent_registry()
 
 
-def make_config(llm, full_tools, agent_registry, trace=None):
+def make_config(llm, full_tools, agent_registry, trace=None, circuit_breaker=None):
     return {
         "configurable": {
             "llm": llm,
@@ -133,6 +141,7 @@ def make_config(llm, full_tools, agent_registry, trace=None):
             "full_tools": full_tools,
             "agent_registry": agent_registry,
             "trace": trace,
+            "circuit_breaker": circuit_breaker,
         },
     }
 
@@ -270,7 +279,135 @@ class TestAggregateNode:
             ],
         )
         result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert "所有领域专家执行失败" in result.get("final_answer", "")
+        # Graceful degradation: should produce a user-friendly fallback message,
+        # NOT expose internal details like agent names or error codes
+        answer = result.get("final_answer", "")
+        assert len(answer) > 10
+        assert "所有领域专家执行失败" not in answer  # no internal details leaked
+        assert "建议" in answer or "稍后" in answer or "重试" in answer
+
+    def test_aggregate_all_errors_with_llm_fallback(self, base_state, full_tools, agent_registry):
+        """LLM generates a friendly fallback message when all agents fail."""
+        llm = FakeLLM([
+            "很抱歉，我暂时无法获取您的持仓数据。建议您检查网络连接后重新提问，或尝试询问其他问题。",
+        ])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "获取持仓", "result": "", "error": "数据源不可用"},
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        answer = result.get("final_answer", "")
+        assert len(answer) > 10
+        assert "抱歉" in answer or "暂时无法" in answer
+        assert "agent" not in answer.lower()  # no internal terms leaked
+        assert "数据源" not in answer  # no internal error details leaked
+
+    def test_aggregate_all_errors_fallback_llm_fails(self, base_state, full_tools, agent_registry):
+        """When fallback LLM also fails, hard-coded message is used."""
+        # Empty responses → LLM fallback fails → hard-coded message
+        llm = FakeLLM([])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "获取数据", "result": "", "error": "执行失败"},
+                {"agent_id": "agent2", "task": "分析数据", "result": "", "error": "工具不可用"},
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        answer = result.get("final_answer", "")
+        assert len(answer) > 10
+        assert "抱歉" in answer
+        assert "建议" in answer
+
+    def test_aggregate_all_errors_skips_reflection(self, base_state, full_tools, agent_registry):
+        """Fallback messages should skip reflection to avoid unnecessary retries."""
+        llm = FakeLLM([])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "测试", "result": "", "error": "失败"},
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result.get("skip_reflection") is True
+
+    def test_aggregate_partial_errors_uses_normal_path(self, base_state, full_tools, agent_registry):
+        """When some agents succeed, normal aggregation should be used (not fallback)."""
+        llm = FakeLLM(["当前持仓健康，共2个持仓，总价值100,000元。"])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "获取持仓", "result": "持仓数据正常", "error": "", "tool_results": []},
+                {"agent_id": "agent2", "task": "分析风险", "result": "", "error": "风险分析失败", "tool_results": []},
+            ],
+        )
+        result = aggregate_node(state, config=make_config(llm, full_tools, agent_registry))
+        answer = result.get("final_answer", "")
+        # Should use normal aggregation, not fallback
+        assert "抱歉" not in answer or "暂时" not in answer
+        assert "持仓" in answer
+
+
+# ---- Circuit Breaker Integration ----
+
+class TestCircuitBreakerIntegration:
+    def test_prune_tools_hides_blocked_tools(self):
+        """_prune_tools should hide tools that are blocked by circuit breaker."""
+        cb = CircuitBreaker()
+        # Trip web_search
+        for _ in range(3):
+            cb.record_failure("web_search")
+        assert cb.is_blocked("web_search")
+
+        tools = [
+            {"function": {"name": "web_search", "description": "Search the web"}},
+            {"function": {"name": "web_fetch", "description": "Fetch a page"}},
+            {"function": {"name": "news_search", "description": "Search news"}},
+        ]
+        pruned = _prune_tools(tools, [{"role": "user", "content": "test"}], circuit_breaker=cb)
+        pruned_names = [t["function"]["name"] for t in pruned]
+        assert "web_search" not in pruned_names
+        assert "web_fetch" in pruned_names
+        assert "news_search" in pruned_names
+
+    def test_prune_tools_allows_when_breaker_cleared(self):
+        """_prune_tools should show tools when breaker is reset."""
+        cb = CircuitBreaker()
+        cb.record_failure("web_search")
+        cb.record_failure("web_search")
+        cb.record_success("web_search")  # reset
+
+        tools = [
+            {"function": {"name": "web_search", "description": "Search the web"}},
+        ]
+        pruned = _prune_tools(tools, [{"role": "user", "content": "test"}], circuit_breaker=cb)
+        pruned_names = [t["function"]["name"] for t in pruned]
+        assert "web_search" in pruned_names
+
+    def test_prune_tools_without_breaker_passes_all(self):
+        """Without circuit_breaker, all tools should pass through."""
+        tools = [
+            {"function": {"name": "web_search", "description": "Search the web"}},
+            {"function": {"name": "web_fetch", "description": "Fetch a page"}},
+        ]
+        pruned = _prune_tools(tools, [{"role": "user", "content": "test"}])
+        pruned_names = [t["function"]["name"] for t in pruned]
+        assert "web_search" in pruned_names
+        assert "web_fetch" in pruned_names
+
+    def test_breaker_integrated_in_aggregate(self, base_state, full_tools, agent_registry):
+        """Circuit breaker is accepted in config but doesn't affect aggregate logic."""
+        cb = CircuitBreaker()
+        llm = FakeLLM(["当前持仓健康，共2个持仓。"])
+        state = base_state(
+            agent_results=[
+                {"agent_id": "agent1", "task": "获取持仓", "result": "持仓数据", "error": "", "tool_results": []},
+            ],
+        )
+        result = aggregate_node(
+            state,
+            config=make_config(llm, full_tools, agent_registry, circuit_breaker=cb),
+        )
+        assert result.get("needs_summary") is False
+        assert "持仓" in result.get("final_answer", "")
 
 
 # ---- Reflection ----
@@ -355,6 +492,466 @@ class TestGraphIntegration:
                 stream_mode="values",
                 config=make_config(llm, full_tools, agent_registry),
                 thread_id="test-graph-delegate",
+            )
+        )
+        final = events[-1]
+        assert len(final.get("agent_results", [])) >= 1
+        assert final.get("final_answer") is not None
+
+
+# ── Plan-and-Execute: DAG Resolution ─────────────────────────────────────────
+
+class TestGetReadySteps:
+    """Unit tests for _get_ready_steps — DAG dependency resolution."""
+
+    def test_no_deps_all_ready(self):
+        """All steps have no dependencies → all should be ready."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [], "task": "task2"},
+            {"step": 3, "depends_on": [], "task": "task3"},
+        ]
+        ready = _get_ready_steps(plan, [])
+        assert len(ready) == 3
+        assert {s["step"] for s in ready} == {1, 2, 3}
+
+    def test_chain_dependency_step_by_step(self):
+        """Chain: 1→2→3. Only step 1 ready initially."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+            {"step": 3, "depends_on": [2], "task": "task3"},
+        ]
+        ready = _get_ready_steps(plan, [])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 1
+
+        ready = _get_ready_steps(plan, [1])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 2
+
+        ready = _get_ready_steps(plan, [1, 2])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 3
+
+    def test_parallel_branches_then_merge(self):
+        """1,2 parallel → 3 depends on both. 1,2 both ready initially."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [], "task": "task2"},
+            {"step": 3, "depends_on": [1, 2], "task": "task3"},
+        ]
+        # Initially: 1,2 ready (parallel)
+        ready = _get_ready_steps(plan, [])
+        assert len(ready) == 2
+        assert {s["step"] for s in ready} == {1, 2}
+
+        # After step 1 done: 2 still ready, 3 still blocked
+        ready = _get_ready_steps(plan, [1])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 2
+
+        # After both 1,2 done: 3 ready
+        ready = _get_ready_steps(plan, [1, 2])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 3
+
+    def test_all_completed_none_ready(self):
+        """All steps completed → no ready steps."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+        ]
+        ready = _get_ready_steps(plan, [1, 2])
+        assert len(ready) == 0
+
+    def test_missing_depends_on_field_defaults_to_empty(self):
+        """Steps without depends_on field should be treated as no dependencies."""
+        plan = [
+            {"step": 1, "task": "task1"},  # No depends_on key
+            {"step": 2, "depends_on": [1], "task": "task2"},
+        ]
+        ready = _get_ready_steps(plan, [])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 1
+
+    def test_diamond_dependency(self):
+        """Diamond: 1→2, 1→3, 2,3→4."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+            {"step": 3, "depends_on": [1], "task": "task3"},
+            {"step": 4, "depends_on": [2, 3], "task": "task4"},
+        ]
+        ready = _get_ready_steps(plan, [])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 1
+
+        ready = _get_ready_steps(plan, [1])
+        assert len(ready) == 2
+        assert {s["step"] for s in ready} == {2, 3}
+
+        ready = _get_ready_steps(plan, [1, 2])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 3
+
+        ready = _get_ready_steps(plan, [1, 2, 3])
+        assert len(ready) == 1
+        assert ready[0]["step"] == 4
+
+    def test_plan_index_conversion(self):
+        """_plan_index converts 1-based step to 0-based index."""
+        plan = [
+            {"step": 1, "task": "task1"},
+            {"step": 2, "task": "task2"},
+            {"step": 5, "task": "task5"},  # non-sequential step numbers
+        ]
+        assert _plan_index(plan, 1) == 0
+        assert _plan_index(plan, 2) == 1
+        assert _plan_index(plan, 5) == 2
+        assert _plan_index(plan, 99) == 0  # not found → default 0
+
+
+# ── Plan-and-Execute: Replan Node ────────────────────────────────────────────
+
+class TestReplanNode:
+    """Tests for replan_node — dynamic plan revision."""
+
+    def test_replan_skips_when_no_plan(self, base_state, full_tools, agent_registry):
+        """No plan → no replan needed."""
+        llm = FakeLLM([])
+        state = base_state(delegation_plan=[], completed_steps=[])
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is False
+
+    def test_replan_skips_when_no_completed_steps(self, base_state, full_tools, agent_registry):
+        """Plan exists but no completed steps → skip."""
+        llm = FakeLLM([])
+        state = base_state(
+            delegation_plan=[{"step": 1, "depends_on": [], "task": "task1"}],
+            completed_steps=[],
+        )
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is False
+
+    def test_replan_no_revision_needed(self, base_state, full_tools, agent_registry):
+        """LLM says plan is fine → no replan."""
+        llm = FakeLLM(['{"needs_revision": false, "reason": "", "revised_plan": []}'])
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "depends_on": [], "task": "task1", "output_key": "step_1"},
+            ],
+            completed_steps=[1],
+            agent_results=[
+                {"task": "task1", "result": "success", "error": ""},
+            ],
+        )
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is False
+
+    def test_replan_triggers_revision(self, base_state, full_tools, agent_registry):
+        """LLM detects plan needs revision → replan triggered."""
+        revised_plan = [
+            {"step": 1, "depends_on": [], "task": "task1", "output_key": "step_1"},
+            {"step": 2, "depends_on": [1], "task": "revised task2", "output_key": "step_2"},
+        ]
+        llm = FakeLLM([
+            json.dumps({"needs_revision": True, "reason": "步2数据缺失需调整", "revised_plan": revised_plan}),
+        ])
+        state = base_state(
+            delegation_plan=[
+                {"step": 1, "depends_on": [], "task": "task1", "output_key": "step_1"},
+                {"step": 2, "depends_on": [1], "task": "original task2", "output_key": "step_2"},
+            ],
+            completed_steps=[1],
+            agent_results=[
+                {"task": "task1", "result": "empty result", "error": ""},
+            ],
+        )
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is True
+        assert result["replan_attempts"] == 1
+        assert len(result["delegation_plan"]) == 2
+        assert result["delegation_plan"][1]["task"] == "revised task2"
+
+    def test_replan_max_attempts_exceeded(self, base_state, full_tools, agent_registry):
+        """Max replan attempts reached → force continue."""
+        llm = FakeLLM(['{"needs_revision": true, "reason": "still bad", "revised_plan": []}'])
+        state = base_state(
+            delegation_plan=[{"step": 1, "depends_on": [], "task": "task1"}],
+            completed_steps=[1],
+            agent_results=[{"task": "task1", "result": "x", "error": ""}],
+            replan_attempts=2,  # Already at max
+        )
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is False
+
+    def test_replan_llm_error_graceful_fallback(self, base_state, full_tools, agent_registry):
+        """LLM error during replan → graceful fallback (no replan)."""
+        llm = FakeLLM(["not valid json {{{{"])
+        state = base_state(
+            delegation_plan=[{"step": 1, "depends_on": [], "task": "task1"}],
+            completed_steps=[1],
+            agent_results=[{"task": "task1", "result": "x", "error": ""}],
+        )
+        result = replan_node(state, config=make_config(llm, full_tools, agent_registry))
+        assert result["needs_replan"] is False
+
+
+# ── Plan-and-Execute: DAG Routing ────────────────────────────────────────────
+
+class TestDAGRouting:
+    """Tests for DAG routing functions."""
+
+    def test_route_dag_first_single_step(self, base_state):
+        """Single-step plan → react_prepare (backward compatible)."""
+        plan = [{"step": 1, "depends_on": [], "task": "task1"}]
+        result = _route_dag_first(base_state(delegation_plan=plan))
+        assert result == "react_prepare"
+
+    def test_route_dag_first_empty_plan(self, base_state):
+        """Empty plan → react_prepare."""
+        result = _route_dag_first(base_state(delegation_plan=[]))
+        assert result == "react_prepare"
+
+    def test_route_dag_first_parallel_no_deps(self, base_state):
+        """Multi-step plan with no dependencies → all fan out in parallel."""
+        from langgraph.types import Send
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [], "task": "task2"},
+        ]
+        result = _route_dag_first(base_state(delegation_plan=plan, completed_steps=[]))
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert all(isinstance(s, Send) for s in result)
+        assert all(s.node == "delegate" for s in result)
+
+    def test_route_dag_first_chain_only_first_ready(self, base_state):
+        """Chain dependency → only first step fans out."""
+        from langgraph.types import Send
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+            {"step": 3, "depends_on": [2], "task": "task3"},
+        ]
+        result = _route_dag_first(base_state(delegation_plan=plan, completed_steps=[]))
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].arg["current_step"] == 0
+
+    def test_route_dag_first_no_ready_steps(self, base_state):
+        """All steps blocked → aggregate (shouldn't happen normally)."""
+        plan = [
+            {"step": 1, "depends_on": [999], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+        ]
+        result = _route_dag_first(base_state(delegation_plan=plan, completed_steps=[]))
+        assert result == "aggregate"
+
+    def test_route_after_replan_triggers_replan(self, base_state):
+        """needs_replan=True → commander_plan."""
+        state = base_state(needs_replan=True)
+        result = _route_after_replan(state)
+        assert result == "commander_plan"
+
+    def test_route_after_replan_continue_next_batch(self, base_state):
+        """More ready steps → next batch of delegates."""
+        from langgraph.types import Send
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+        ]
+        result = _route_after_replan(
+            base_state(delegation_plan=plan, completed_steps=[1], needs_replan=False)
+        )
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].node == "delegate"
+
+    def test_route_after_replan_all_done(self, base_state):
+        """All steps completed → aggregate."""
+        plan = [
+            {"step": 1, "depends_on": [], "task": "task1"},
+            {"step": 2, "depends_on": [1], "task": "task2"},
+        ]
+        result = _route_after_replan(
+            base_state(delegation_plan=plan, completed_steps=[1, 2], needs_replan=False)
+        )
+        assert result == "aggregate"
+
+
+# ── Plan-and-Execute: Full Graph Integration ─────────────────────────────────
+
+class TestPlanAndExecuteGraph:
+    """Integration tests for the full Plan-and-Execute graph flow."""
+
+    def test_graph_has_all_nodes(self):
+        """Verify all 10 nodes are present in the compiled graph."""
+        graph = build_graph()
+        expected = {
+            "commander_plan", "react_prepare", "react_llm", "react_tool",
+            "react_evaluate", "delegate", "confirm", "aggregate",
+            "reflection", "replan_node",
+        }
+        actual = set(graph.nodes.keys())
+        assert actual == expected
+
+    def test_dag_chain_execution(self, base_state, full_tools, agent_registry):
+        """Chain: Step 1→2→3. Verify sequential execution through DAG routing."""
+        llm = FakeLLM([
+            # commander_plan: chain plan
+            json.dumps([
+                {"step": 1, "agent_id": "investment-analyst", "task": "获取市场数据",
+                 "depends_on": [], "output_key": "market_data", "skill_name": "", "purpose": "获取"},
+                {"step": 2, "agent_id": "investment-analyst", "task": "分析持仓",
+                 "depends_on": [1], "output_key": "analysis", "skill_name": "", "purpose": "分析"},
+                {"step": 3, "agent_id": "investment-analyst", "task": "汇总建议",
+                 "depends_on": [2], "output_key": "summary", "skill_name": "", "purpose": "汇总"},
+            ]),
+            # delegate Step 1
+            "市场数据：上证指数3300点。",
+            # replan_node: batch 1 check
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # delegate Step 2
+            "持仓分析：配置健康。",
+            # replan_node: batch 2 check
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # delegate Step 3
+            "汇总：市场平稳，持仓健康。",
+            # replan_node: batch 3 check → all done → aggregate
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # aggregate
+            "最终汇总：市场平稳，持仓健康，建议继续持有。",
+            # reflection
+            '{"ok": true}',
+        ])
+        graph = build_graph()
+        compiled = graph.compile()
+        events = list(
+            compiled.stream(
+                base_state(user_message="全面分析我的投资组合"),
+                stream_mode="values",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-dag-chain",
+            )
+        )
+        final = events[-1]
+        assert len(final.get("agent_results", [])) == 3
+        assert len(final.get("completed_steps", [])) == 3
+        assert set(final.get("completed_steps", [])) == {1, 2, 3}
+        assert "持有" in final.get("final_answer", "")
+
+    def test_dag_parallel_execution(self, base_state, full_tools, agent_registry):
+        """Parallel: 1,2 independent → 3 depends on both. Verify parallel fan-out."""
+        llm = FakeLLM([
+            # commander_plan: parallel plan
+            json.dumps([
+                {"step": 1, "agent_id": "investment-analyst", "task": "获取A股数据",
+                 "depends_on": [], "output_key": "a_shares", "skill_name": "", "purpose": "获取"},
+                {"step": 2, "agent_id": "investment-analyst", "task": "获取港股数据",
+                 "depends_on": [], "output_key": "hk_shares", "skill_name": "", "purpose": "获取"},
+                {"step": 3, "agent_id": "investment-analyst", "task": "对比分析",
+                 "depends_on": [1, 2], "output_key": "comparison", "skill_name": "", "purpose": "对比"},
+            ]),
+            # delegate Step 1 and Step 2 run in parallel
+            "A股数据：沪深300上涨。",
+            "港股数据：恒生指数持平。",
+            # replan_node: batch 1 check
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # delegate Step 3
+            "对比：A股强于港股。",
+            # replan_node: batch 2 check
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # aggregate
+            "最终：A股表现优于港股，建议关注A股机会。",
+            # reflection
+            '{"ok": true}',
+        ])
+        graph = build_graph()
+        compiled = graph.compile()
+        events = list(
+            compiled.stream(
+                base_state(user_message="对比A股和港股"),
+                stream_mode="values",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-dag-parallel",
+            )
+        )
+        final = events[-1]
+        # Verify all 3 steps completed
+        assert len(final.get("agent_results", [])) == 3
+        assert set(final.get("completed_steps", [])) == {1, 2, 3}
+
+    def test_replan_revision_in_chain(self, base_state, full_tools, agent_registry):
+        """Step 1 returns empty → replan triggers revision → new plan executed."""
+        original_plan = [
+            {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
+             "depends_on": [], "output_key": "data", "skill_name": "", "purpose": "获取"},
+            {"step": 2, "agent_id": "investment-analyst", "task": "分析数据",
+             "depends_on": [1], "output_key": "analysis", "skill_name": "", "purpose": "分析"},
+        ]
+        revised_plan = [
+            {"step": 1, "agent_id": "investment-analyst", "task": "获取数据（已重试）",
+             "depends_on": [], "output_key": "data", "skill_name": "", "purpose": "获取"},
+            {"step": 2, "agent_id": "investment-analyst", "task": "改用其他方式分析",
+             "depends_on": [1], "output_key": "analysis", "skill_name": "", "purpose": "分析"},
+        ]
+        llm = FakeLLM([
+            # commander_plan: chain plan
+            json.dumps(original_plan),
+            # delegate Step 1
+            "数据获取失败，返回空。",
+            # replan_node: detects problem → revision
+            json.dumps({"needs_revision": True, "reason": "数据为空", "revised_plan": revised_plan}),
+            # commander_plan (replan) → same plan returned
+            json.dumps(revised_plan),
+            # delegate Step 1 (retry)
+            "重新获取成功：上证指数3300。",
+            # replan_node: batch 1 check
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # delegate Step 2
+            "分析完成：市场平稳。",
+            # replan_node: all done
+            '{"needs_revision": false, "reason": "", "revised_plan": []}',
+            # aggregate
+            "最终：市场平稳。",
+            # reflection
+            '{"ok": true}',
+        ])
+        graph = build_graph()
+        compiled = graph.compile()
+        events = list(
+            compiled.stream(
+                base_state(user_message="分析市场"),
+                stream_mode="values",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-dag-replan",
+            )
+        )
+        final = events[-1]
+        assert "市场" in final.get("final_answer", "")
+
+    def test_single_step_backward_compatible(self, base_state, full_tools, agent_registry):
+        """Single-step plan still goes through react_prepare (backward compatible)."""
+        llm = FakeLLM([
+            json.dumps([  # commander_plan: single step
+                {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓",
+                 "depends_on": [], "output_key": "step_1", "skill_name": "", "purpose": "获取"},
+            ]),
+            # delegate → react_prepare path
+            "当前持仓健康。",
+            "汇总：当前持仓健康。",  # aggregate
+            '{"ok": true}',  # reflection
+        ])
+        graph = build_graph()
+        compiled = graph.compile()
+        events = list(
+            compiled.stream(
+                base_state(user_message="分析持仓"),
+                stream_mode="values",
+                config=make_config(llm, full_tools, agent_registry),
+                thread_id="test-dag-compat",
             )
         )
         final = events[-1]

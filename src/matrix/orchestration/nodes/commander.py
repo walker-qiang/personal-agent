@@ -37,12 +37,14 @@ from ._helpers import (
     COMMANDER_AGGREGATE_PROMPT,
     COMMANDER_PLAN_PROMPT,
     DOMAIN_AGENT_REACT_SYSTEM,
+    FALLBACK_AGGREGATE_PROMPT,
     MAX_PLAN_STEPS,
     MAX_REACT_ITERATIONS,
     MAX_SUBTASK_ITERATIONS,
     MAX_SUBTASKS,
     REFLECTION_PROMPT,
     REFLEXION_PROMPT,
+    REPLAN_PROMPT,
     REVISE_PROMPT,
     EVALUATOR_INTERVAL,
 )
@@ -97,21 +99,27 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     valid_ids.add("commander")
     plan = [s for s in plan if s.get("agent_id", "") in valid_ids]
 
-    merged: list[dict[str, Any]] = []
-    seen_agents: set[str] = set()
-    for s in plan:
-        aid = s.get("agent_id", "")
-        if aid in seen_agents:
-            for m in merged:
-                if m.get("agent_id") == aid:
-                    m["task"] = m["task"] + "；同时：" + s.get("task", "")
-                    if s.get("skill_name"):
-                        m["skill_name"] = s["skill_name"]
-                    break
-        else:
-            seen_agents.add(aid)
-            merged.append(s)
-    plan = merged
+    logger.info("commander: raw_plan=%s", json.dumps(plan, ensure_ascii=False)[:500])
+
+    # DAG plans have explicit depends_on relationships that must be preserved.
+    # Only merge consecutive same-agent steps without depends_on (legacy optimization).
+    has_dag_deps = any(s.get("depends_on") for s in plan)
+    if not has_dag_deps and len(plan) > 1:
+        merged: list[dict[str, Any]] = []
+        seen_agents: set[str] = set()
+        for s in plan:
+            aid = s.get("agent_id", "")
+            if aid in seen_agents:
+                for m in merged:
+                    if m.get("agent_id") == aid:
+                        m["task"] = m["task"] + "；同时：" + s.get("task", "")
+                        if s.get("skill_name"):
+                            m["skill_name"] = s["skill_name"]
+                        break
+            else:
+                seen_agents.add(aid)
+                merged.append(s)
+        plan = merged
 
     agent_ids_in_plan = {s.get("agent_id", "") for s in plan}
     is_subtask = len(plan) > 1 and len(agent_ids_in_plan) == 1
@@ -135,6 +143,10 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             step["step"] = i + 1
         if "skill_name" not in step:
             step["skill_name"] = ""
+        if "depends_on" not in step:
+            step["depends_on"] = []
+        if "output_key" not in step:
+            step["output_key"] = f"step_{step.get('step', i + 1)}"
 
     return {
         "delegation_plan": plan,
@@ -240,6 +252,7 @@ def delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any
         "tool_call_count": len(new_tool_results),
         "needs_confirmation": len(pending_actions) > 0,
         "pending_actions": pending_actions,
+        "completed_steps": [step.get("step", current_step + 1)],
     }
 
 
@@ -312,7 +325,8 @@ def _run_domain_agent_react(
 
         llm_tools = _build_tools_for_llm(tools)
         # P2-2: Action Space pruning
-        llm_tools = _prune_tools(llm_tools, messages, iteration=iteration)
+        llm_tools = _prune_tools(llm_tools, messages, iteration=iteration,
+                                 circuit_breaker=cfg.get("circuit_breaker"))
         pipeline_llm = cfg.get("pipeline_llm")
         wm = cfg.get("working_memory", {})
         user_goal = wm.get("pinned", original_question)
@@ -671,6 +685,115 @@ def _extract_answer(text: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+# ── Plan-and-Execute: DAG router + Replan ────────────────────────────────────
+
+MAX_REPLAN_ATTEMPTS = 2
+
+
+def _get_ready_steps(plan: list[dict[str, Any]], completed: list[int]) -> list[dict[str, Any]]:
+    """Find steps whose dependencies are all satisfied.
+
+    A step is "ready" if all steps in its depends_on list have been completed.
+    Steps that are already in completed_steps are excluded.
+    """
+    completed_set = set(completed)
+    ready = []
+    for s in plan:
+        step_num = s.get("step", 0)
+        if step_num in completed_set:
+            continue
+        deps = s.get("depends_on", [])
+        if all(d in completed_set for d in deps):
+            ready.append(s)
+    return ready
+
+
+def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
+    """Check execution progress and decide whether the plan needs revision.
+
+    Called after each batch of delegate nodes completes.  Evaluates:
+    1. Are results deviating from expectations?
+    2. Did any step fail?
+    3. Are remaining steps still valid given what we've learned?
+
+    Returns:
+        needs_replan=True → commander_plan regenerates the plan.
+        needs_replan=False → DAG router continues with next batch or aggregate.
+    """
+    cfg = _get_configurable(config)
+    llm = cfg.get("pipeline_llm", cfg["llm"])
+
+    plan = state.get("delegation_plan", [])
+    completed = state.get("completed_steps", [])
+    results = state.get("agent_results", [])
+    replan_attempts = state.get("replan_attempts", 0)
+
+    # Safety: if no plan or no completed steps, skip replan
+    if not plan or not completed:
+        return {"needs_replan": False}
+
+    # Safety: prevent infinite replan loops
+    if replan_attempts >= MAX_REPLAN_ATTEMPTS:
+        logger.warning("replan: max attempts (%d) reached, forcing continue", MAX_REPLAN_ATTEMPTS)
+        return {"needs_replan": False}
+
+    # Build summary of completed steps
+    completed_summary = []
+    for s in plan:
+        sn = s.get("step", 0)
+        if sn in completed:
+            # Find matching result
+            matched = [r for r in results if r.get("task") == s.get("task")]
+            completed_summary.append({
+                "step": sn,
+                "task": s.get("task", ""),
+                "result_preview": (matched[0].get("result", "")[:200] + "...") if matched else "(no result)",
+                "error": matched[0].get("error", "") if matched else "",
+            })
+
+    try:
+        assessment = llm.complete_json(
+            REPLAN_PROMPT.format(
+                plan=json.dumps(plan, ensure_ascii=False, indent=2),
+                completed=json.dumps(completed_summary, ensure_ascii=False, indent=2),
+                goal=state.get("user_message", ""),
+            ),
+            [],
+            temperature=0.1,
+        )
+        if not isinstance(assessment, dict):
+            assessment = {}
+    except (LLMError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("replan LLM/parse failed: %s", type(e).__name__)
+        return {"needs_replan": False}
+
+    needs_revision = assessment.get("needs_revision", False)
+    revised_plan = assessment.get("revised_plan", [])
+
+    if needs_revision and revised_plan:
+        logger.info("replan: plan needs revision — %s", assessment.get("reason", "no reason given"))
+        # Normalize revised plan: ensure depends_on and output_key fields
+        for i, s in enumerate(revised_plan):
+            if "step" not in s:
+                s["step"] = i + 1
+            if "depends_on" not in s:
+                s["depends_on"] = []
+            if "output_key" not in s:
+                s["output_key"] = f"step_{s.get('step', i + 1)}"
+            if "skill_name" not in s:
+                s["skill_name"] = ""
+        return {
+            "delegation_plan": revised_plan,
+            "needs_replan": True,
+            "replan_attempts": replan_attempts + 1,
+        }
+
+    if needs_revision:
+        logger.info("replan: needs_revision=true but no revised_plan provided, skipping")
+
+    return {"needs_replan": False}
+
+
 # ── Aggregate ────────────────────────────────────────────────────────────────
 
 def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
@@ -707,8 +830,44 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
 
     all_errors = all(r.get("error") for r in agent_results)
     if all_errors:
-        errors = "\n".join(f"- {r['agent_id']}: {r['error']}" for r in agent_results)
-        result = {"final_answer": f"所有领域专家执行失败：\n{errors}", "needs_summary": False}
+        # ── Graceful degradation: use LLM to generate a friendly fallback message ──
+        pipeline_llm = cfg.get("pipeline_llm", cfg["llm"])
+        attempts_lines = []
+        error_lines = []
+        for r in agent_results:
+            task_desc = r.get("task", "未知任务")[:80]
+            attempts_lines.append(f"- {task_desc}")
+            err = r.get("error", "未知错误")[:120]
+            error_lines.append(f"- {err}")
+        attempts_text = "\n".join(attempts_lines) if attempts_lines else "（无记录）"
+        errors_text = "\n".join(error_lines) if error_lines else "（无记录）"
+
+        try:
+            fallback_msg = pipeline_llm.complete(
+                FALLBACK_AGGREGATE_PROMPT.format(
+                    question=user_msg,
+                    attempts=attempts_text,
+                    errors=errors_text,
+                ),
+                [{"role": "user", "content": "请生成一条友好的回复。"}],
+                temperature=0.4,
+            )
+            fallback_msg = fallback_msg.strip() if isinstance(fallback_msg, str) else ""
+        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+            logger.warning("aggregate_node fallback LLM failed: %s", type(e).__name__)
+            fallback_msg = ""
+
+        if not fallback_msg or len(fallback_msg) < 10:
+            # Hard fallback: compose a simple message without internal details
+            fallback_msg = (
+                "抱歉，暂时无法完成您的请求。\n\n"
+                "可能的原因：网络波动或服务暂时不可用。\n\n"
+                "建议：\n"
+                "- 稍等片刻后重新提问\n"
+                "- 尝试换一种方式描述您的问题"
+            )
+
+        result = {"final_answer": fallback_msg, "needs_summary": False, "skip_reflection": True}
         if is_retry:
             result["needs_reflexion_retry"] = False
         return result

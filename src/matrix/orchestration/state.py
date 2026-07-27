@@ -88,13 +88,23 @@ class AgentState(BaseModel):
     )
     needs_reflexion_retry: bool = False  # signal from reflection → aggregate retry
 
+    # Plan-and-Execute: DAG-based execution with dynamic replanning
+    completed_steps: Annotated[list[int], operator.add] = Field(
+        default_factory=list,
+        description="Step numbers (1-based) that have completed execution",
+    )
+    needs_replan: bool = False       # signal from replan_node → commander_plan retry
+    replan_attempts: int = 0         # max replan attempts to prevent infinite loops
+
     # Error
     error: str = ""
 
     # HITL (Human-in-the-Loop)
-    needs_confirmation: bool = False
+    # operator.or_: any delegate needs confirmation → whole plan needs confirmation
+    needs_confirmation: Annotated[bool, operator.or_] = False
     confirmed: bool = False
-    pending_actions: list[dict[str, Any]] = Field(default_factory=list)
+    # operator.add: concatenate pending actions from parallel delegates
+    pending_actions: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
 
     # Working memory: pinned goal + rolling insights
     working_memory: dict[str, Any] = Field(

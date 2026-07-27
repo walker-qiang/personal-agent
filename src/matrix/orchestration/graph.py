@@ -1,12 +1,17 @@
 """Multi-agent LangGraph orchestration builder.
 
-Commander + Domain Agents architecture:
-  commander_plan → delegate (parallel via Send) → aggregate → reflection
+Commander + Domain Agents architecture with Plan-and-Execute:
+  commander_plan → _route_dag_first → delegate(s) → replan_node → aggregate → reflection
   With HITL: delegate → (confirm) → aggregate
 
-Parallel execution: when commander_plan produces a multi-agent plan,
-LangGraph Send API fans out to multiple delegate_node instances running
-concurrently.  Results are merged via operator.add reducers on AgentState.
+DAG-based execution: when commander_plan produces a multi-step plan with
+depends_on dependencies, the DAG router fans out only ready steps (whose
+dependencies are all satisfied).  After each batch completes, replan_node
+checks if the plan needs revision.
+
+Parallel execution: LangGraph Send API fans out to multiple delegate_node
+instances running concurrently.  Results are merged via operator.add reducers
+on AgentState.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 
 from .nodes import (
+    _get_ready_steps,
     _route_after_react_evaluate,
     _route_after_react_llm,
     aggregate_node,
@@ -26,6 +32,7 @@ from .nodes import (
     react_prepare_node,
     react_tool_node,
     reflection_node,
+    replan_node,
 )
 from .state import AgentState
 
@@ -33,11 +40,14 @@ from .state import AgentState
 def build_graph() -> StateGraph:
     """Build the multi-agent LangGraph state graph.
 
-    Flow:
-    __start__ → commander_plan → delegate(s) → (confirm) → aggregate → reflection → __end__
+    Flow (single-step):
+    __start__ → commander_plan → react_prepare → react_llm ⇄ react_tool
+              → react_evaluate → aggregate → reflection → __end__
 
-    Single-agent plan: direct edge to delegate.
-    Multi-agent plan:  Send-based fan-out → parallel delegate nodes → fan-in.
+    Flow (multi-step DAG):
+    __start__ → commander_plan → DAG route → delegate(s) → replan_node
+              → (replan → commander_plan) or (next batch → delegate) or aggregate
+              → reflection → __end__
     """
     graph = StateGraph(AgentState)
 
@@ -51,19 +61,21 @@ def build_graph() -> StateGraph:
     graph.add_node("confirm", confirm_node)
     graph.add_node("aggregate", aggregate_node)
     graph.add_node("reflection", reflection_node)
+    graph.add_node("replan_node", replan_node)
 
     # Start → commander_plan
     graph.set_entry_point("commander_plan")
 
     # commander_plan → conditional:
     #   single-step: react_prepare (top-level ReAct with real-time streaming)
-    #   multi-step:  delegate (Send fan-out, subgraph ReAct)
+    #   multi-step:  DAG-based fan-out via Send("delegate")
     graph.add_conditional_edges(
         "commander_plan",
-        _route_after_commander,
+        _route_dag_first,
         {
             "react_prepare": "react_prepare",
             "delegate": "delegate",
+            "aggregate": "aggregate",
         },
     )
 
@@ -94,13 +106,20 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # ---- Multi-step plan path (existing) ----
-    # delegate → confirm or aggregate
+    # ---- Multi-step DAG path (Plan-and-Execute) ----
+    # delegate → replan_node (check plan validity after each batch)
+    graph.add_edge("delegate", "replan_node")
+
+    # replan_node → conditional:
+    #   needs_replan → commander_plan (regenerate plan)
+    #   more steps ready → Send("delegate") for next batch
+    #   all done → aggregate
     graph.add_conditional_edges(
-        "delegate",
-        _route_after_delegate,
+        "replan_node",
+        _route_after_replan,
         {
-            "confirm": "confirm",
+            "commander_plan": "commander_plan",
+            "delegate": "delegate",
             "aggregate": "aggregate",
         },
     )
@@ -126,53 +145,75 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def _route_after_commander(state: AgentState):
-    """Route after commander plan.
+# ── DAG Routing ──────────────────────────────────────────────────────────────
 
-    Single-step plans:
-      → "react_prepare" (top-level ReAct loop with real-time per-node streaming)
-      The react_prepare node sets up the react context, then the
-      react_llm → react_tool → react_evaluate loop runs as top-level
-      LangGraph nodes, yielding SSE events after each node completes.
+def _route_dag_first(state: AgentState):
+    """Route after commander_plan: first DAG fan-out.
 
-    Multi-step plans (multi-agent or subtask decomposition):
-      → list of Send("delegate") for parallel fan-out.
-      Each delegate_node runs the subgraph ReAct internally.
-      LangGraph waits for all branches to complete before continuing.
+    Single-step plans (len ≤ 1):
+      → "react_prepare" (top-level ReAct loop, backward compatible)
 
-    NOTE: LangGraph 1.2.x Send API passes only the `arg` dict as the state
-    update to the target node, NOT the merged state.  We must include all
-    necessary state fields (delegation_plan, plan_type, etc.) in the arg.
+    Multi-step plans with DAG dependencies:
+      → [Send("delegate", ...)] for each ready step (depends_on all satisfied).
+      If no ready steps (shouldn't happen on first call), → "aggregate".
     """
     plan = state.get("delegation_plan", [])
     if len(plan) <= 1:
         return "react_prepare"
-    # Fan out: one Send per step, each with its own current_step
-    # Include essential state fields that delegate_node needs
+
+    completed = state.get("completed_steps", [])
+    ready = _get_ready_steps(plan, completed)
+
+    if not ready:
+        return "aggregate"
+
     return [
         Send("delegate", {
-            "current_step": i,
+            "current_step": _plan_index(plan, s["step"]),
             "delegation_plan": plan,
             "plan_type": state.get("plan_type", "agent"),
             "user_message": state.get("user_message", ""),
             "session_id": state.get("session_id", ""),
         })
-        for i in range(len(plan))
+        for s in ready
     ]
 
 
-def _route_after_delegate(state: AgentState) -> str:
-    """Route after delegate: confirm (HITL) or aggregate.
+def _route_after_replan(state: AgentState):
+    """Route after replan_node: continue, replan, or finish.
 
-    No more loop-back — each delegate invocation processes exactly one
-    plan step.  In parallel mode, all branches complete before this
-    router runs once on the merged state.
+    needs_replan → "commander_plan" (regenerate plan)
+    more steps ready → [Send("delegate", ...)] for next batch
+    all done → "aggregate"
     """
-    if state.get("error"):
+    if state.get("needs_replan"):
+        return "commander_plan"
+
+    plan = state.get("delegation_plan", [])
+    completed = state.get("completed_steps", [])
+    ready = _get_ready_steps(plan, completed)
+
+    if not ready:
+        # All steps done or no more executable steps
         return "aggregate"
 
-    # Check if confirmation is needed (HITL for high-risk tool calls)
-    if state.get("needs_confirmation") and not state.get("confirmed"):
-        return "confirm"
+    return [
+        Send("delegate", {
+            "current_step": _plan_index(plan, s["step"]),
+            "delegation_plan": plan,
+            "plan_type": state.get("plan_type", "agent"),
+            "user_message": state.get("user_message", ""),
+            "session_id": state.get("session_id", ""),
+        })
+        for s in ready
+    ]
 
-    return "aggregate"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _plan_index(plan: list[dict], step_num: int) -> int:
+    """Convert 1-based step number to 0-based index in the plan list."""
+    for i, s in enumerate(plan):
+        if s.get("step") == step_num:
+            return i
+    return 0
