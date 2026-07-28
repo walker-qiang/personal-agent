@@ -41,6 +41,7 @@ CODING_ASSISTANT = AgentDefinition(
     domain_skills=[
         "brainstorming",
     ],
+    system_guidelines=["code_execution", "browser_automation"],
     output_constraints=[
         "使用与用户相同的语言回复",
         "代码块使用正确的语言标记（```python、```typescript 等）",

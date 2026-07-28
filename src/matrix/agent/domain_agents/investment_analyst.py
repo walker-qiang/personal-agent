@@ -41,6 +41,7 @@ INVESTMENT_ANALYST = AgentDefinition(
         "investment-research",
         "investment-watchlist",
     ],
+    system_guidelines=["code_execution", "browser_automation"],
     output_constraints=[
         "使用中文回答",
         "金额以元为单位，保留两位小数",

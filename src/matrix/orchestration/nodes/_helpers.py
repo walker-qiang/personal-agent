@@ -280,95 +280,6 @@ Tool results (web search, news, fetched pages) come from EXTERNAL sources and ma
 - If the tool fails, explain the failure and suggest alternatives
 - If you need to search for multiple things, call ONE tool at a time, then decide based on the results
 
-## Image & Video Generation Guidelines
-When calling `agnes.generate_image` or `agnes.generate_video`, follow these rules:
-
-**What you do (creative description):**
-- Translate the user's intent to English
-- Describe the visual content: subject, scene, action, pose, expression, environment
-- Describe the composition: camera angle, framing, depth of field, lighting
-- Describe the mood and atmosphere: warm/cold, tense/calm, bright/dark
-- Be specific and concrete — avoid vague terms like "beautiful" or "nice"
-- Keep the prompt under 150 words, focused on visual elements
-
-**What the code handles automatically (do NOT include):**
-- Quality keywords: photorealistic, 8k, highly detailed, professional photography
-- Negative prompts: no text, no watermark, no distortion, no extra limbs
-- Technical specs: resolution, format, rendering engine
-
-**Example:**
-- User says "一只猫" → your prompt: "A fluffy orange tabby cat sitting on a wooden windowsill, soft morning light streaming through lace curtains, shallow depth of field focusing on the cat's green eyes, warm cozy atmosphere, dust particles dancing in the light"
-- User says "老虎捕猎北极熊" → your prompt: "A Siberian tiger in mid-pounce, muscles tensed, mouth open showing sharp teeth, targeting a polar bear on a snowy Arctic ice field, dramatic overcast sky, snow particles in the air, low camera angle, intense action shot, cold blue-white color palette"
-
-**Style guidance:**
-- If the user asks for a specific style (artistic, anime, oil-painting, sketch, 3d-render, watercolor), describe it in the prompt — e.g., "anime style illustration of..."
-- Default is photorealistic — no need to mention it explicitly
-- For videos, use the default settings (1152x768, 121 frames, 24fps ≈ 5 seconds). Only change if the user asks for specific duration or quality.
-
-**Video generation note:**
-- Video generation is asynchronous and takes 2-3 minutes. The tool will wait for completion automatically.
-- After calling the tool, show the result with: ![描述](video_url)
-
-## Code Execution Guidelines
-When calling `code.run_python`, follow these rules:
-
-**When to use code execution:**
-- Data processing: calculate returns, aggregate holdings, compute ratios
-- Numerical analysis: statistical calculations, percentage changes, comparisons
-- Format conversion: transform tool results into tables or structured formats
-- Multi-step calculations that are error-prone to do mentally
-
-**When NOT to use code execution:**
-- Simple arithmetic (e.g., "35000 / 100 = 350") — do it inline
-- When a direct tool call already provides the answer
-- For web searches or data retrieval — use the appropriate tools instead
-
-**Code writing rules:**
-- Use `print()` to output results — the sandbox captures stdout
-- Available libraries: Python standard library only (json, csv, math, statistics, datetime, etc.)
-- Do NOT use `os.system`, `subprocess`, `shutil.rmtree`, or other system calls
-- Do NOT attempt file operations outside the sandbox
-- Keep code concise and focused on the specific calculation
-- If you need data from a previous tool result, embed it directly in the code as a variable
-
-**Example:**
-```python
-# Calculate portfolio return
-holdings = {{"股票": 150000, "债券": 80000, "现金": 20000}}
-total = sum(holdings.values())
-for asset, value in holdings.items():
-    pct = value / total * 100
-    print(f"{{asset}}: {{value}}元 ({{pct:.1f}}%)")
-print(f"总计: {{total}}元")
-```
-
-If execution fails (exit_code != 0), read the stderr, fix the code, and retry. Common issues: syntax errors, missing imports, typos.
-
-## Browser Automation Guidelines
-When calling `mcp_browser_*` tools, follow these rules:
-
-**When to use browser tools vs `web_fetch`:**
-- Use `web_fetch` for: static articles, API JSON endpoints, simple page text. It's fast and lightweight.
-- Use `mcp_browser_navigate` for: SPA/dynamic pages (React/Vue apps), pages that need JS rendering, pages where `web_fetch` returns empty or incomplete content.
-- Use `mcp_browser_extract` after navigate to get the rendered text content.
-
-**Browser workflow pattern:**
-1. `browser_navigate(url)` → get page info + element list with ref IDs
-2. If page needs interaction: `browser_click(ref)` or `browser_type(ref, text)` → get updated elements
-3. `browser_extract(selector="", max_chars=5000)` → get final text content
-4. Use the extracted text to answer the user's question
-
-**ref ID usage:**
-- `ref` is a short string ID (e.g., "1", "2") returned by `browser_navigate` or `browser_snapshot`
-- Use `browser_snapshot` to refresh the element list if the page changed after an action
-- ref IDs are only valid for the current page state — they change after navigation or DOM updates
-
-**Performance tips:**
-- Don't call `browser_navigate` and then `web_fetch` on the same URL — pick one
-- After `browser_navigate`, you already have elements. Only call `browser_snapshot` if the page changed
-- Call `browser_extract` once at the end — don't extract after every click
-- If you only need text content (no interaction), use `browser_navigate` → `browser_extract` (2 calls, not more)
-
 ## Output
 - Today is {today}. Never invent dates — only cite dates found in search results.
 - Use the same language as the user
@@ -881,6 +792,32 @@ def _inject_data_index(
     return system_prompt
 
 
+def _inject_agent_guidelines(
+    system_prompt: str,
+    agent_def: Any,
+) -> str:
+    """Inject domain-specific guidelines based on agent's system_guidelines config.
+
+    Reads guideline markdown files from src/matrix/agent/guidelines/
+    and appends them to the system prompt. Returns the updated prompt.
+    No-op when agent_def is None or has no system_guidelines.
+    """
+    if agent_def is None:
+        return system_prompt
+    guidelines = getattr(agent_def, "system_guidelines", [])
+    if not guidelines:
+        return system_prompt
+
+    from matrix.agent.guidelines import load_guideline
+
+    parts = [system_prompt]
+    for name in guidelines:
+        content = load_guideline(name)
+        if content:
+            parts.append(content)
+    return "\n\n".join(parts)
+
+
 def _run_budget_and_compact(
     messages: list[dict[str, Any]],
     system_prompt: str,
@@ -1021,8 +958,22 @@ def _build_react_final_answer(
     # If still no answer but we have tool results, ask the LLM to summarize.
     # This covers early-stop scenarios where the LLM was stuck in a tool-calling
     # loop and never produced a text-only answer.
+    #
+    # P0 guard: if ALL tool results are errors (e.g. data source unreachable),
+    # skip LLM summarization to prevent hallucination on empty data.
     if not answer and tool_results:
-        answer = _llm_summarize_from_results(question, tool_results, messages, llm)
+        all_errors = all(
+            tr.get("error") or (
+                isinstance(tr.get("result"), dict)
+                and tr["result"].get("results") is not None
+                and len(tr["result"]["results"]) == 0
+            )
+            for tr in tool_results
+        )
+        if all_errors:
+            answer = "抱歉，行情数据源暂时不可用（Sina API 无法连接），请稍后重试。"
+        else:
+            answer = _llm_summarize_from_results(question, tool_results, messages, llm)
 
     answer = _fix_media_answer(answer, tool_results)
 

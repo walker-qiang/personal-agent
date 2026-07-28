@@ -30,6 +30,7 @@ from ._helpers import (
     _classify_query_factuality,
     _evaluate_sufficiency,
     _get_configurable,
+    _inject_agent_guidelines,
     _inject_data_index,
     _inject_working_memory,
     _is_refusal,
@@ -104,6 +105,7 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     system_prompt = _inject_working_memory(
         system_prompt, state.get("working_memory", {}), state.get("messages", []),
     )
+    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
     system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), state.get("messages", []))
 
     # Phase 5: Enrich with project context (AGENTS.md) + skills清单

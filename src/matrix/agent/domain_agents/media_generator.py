@@ -24,6 +24,7 @@ MEDIA_GENERATOR = AgentDefinition(
     ],
     general_skills=[],
     domain_skills=[],
+    system_guidelines=["image_generation"],
     output_constraints=[
         "使用与用户相同的语言回复",
         "生成图片后使用 ![描述](URL) 格式展示",

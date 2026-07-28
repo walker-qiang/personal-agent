@@ -78,7 +78,12 @@ def truncate_messages(
 
     budget = max_tokens - reserve_tokens - estimate_tokens(system_prompt)
     if budget <= 0:
-        # Budget exhausted by system prompt; keep only the last message
+        # Budget exhausted by system prompt. Walk backward to find the most
+        # recent non-tool message (user or assistant). If only tool messages
+        # exist, keep the last one — better than total context loss.
+        for msg in reversed(messages):
+            if msg.get("role") != "tool":
+                return [msg]
         return [messages[-1]]
 
     result: list[dict[str, Any]] = []
@@ -116,9 +121,49 @@ def truncate_messages(
     if not result or result[-1] is not messages[-1]:
         result.append(messages[-1])
 
-    # Ensure we don't leave orphan tool messages at the start
-    # (tool messages without their preceding assistant message)
-    while result and result[0].get("role") == "tool":
-        result.pop(0)
+    # Remove orphan tool messages: DeepSeek and other strict APIs require
+    # every tool message to follow an assistant message with tool_calls.
+    # Orphans can appear anywhere in the list (not just at the start) when
+    # the preceding assistant message was dropped by the budget limit.
+    result = _remove_orphan_tool_messages(result)
 
     return result
+
+
+def _remove_orphan_tool_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove tool messages that lack a preceding assistant with tool_calls.
+
+    DeepSeek's API strictly requires: "Messages with role 'tool' must be a
+    response to a preceding message with 'tool_calls'." Consecutive tool
+    messages are all responses to the same assistant, so we look backward
+    for the most recent non-tool message to verify the pairing.
+    """
+    clean: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "tool":
+            clean.append(msg)
+            continue
+        # Look backward for the most recent non-tool message
+        paired = False
+        for j in range(i - 1, -1, -1):
+            prev = messages[j]
+            if prev.get("role") == "tool":
+                continue  # skip consecutive tool messages
+            if prev.get("role") == "assistant" and "tool_calls" in prev:
+                paired = True
+            break  # found the pairing anchor
+        if paired:
+            clean.append(msg)
+
+    # Safety net: never return empty list if input was non-empty.
+    # If all messages are orphan tool messages, keep at least the
+    # most recent non-tool message or the last message as fallback.
+    if not clean and messages:
+        for msg in reversed(messages):
+            if msg.get("role") != "tool":
+                return [msg]
+        return [messages[-1]]
+
+    return clean

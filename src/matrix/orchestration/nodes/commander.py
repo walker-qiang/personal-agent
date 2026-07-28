@@ -27,6 +27,7 @@ from ._helpers import (
     _extract_media_urls,
     _fix_media_answer,
     _get_configurable,
+    _inject_agent_guidelines,
     _inject_data_index,
     _inject_working_memory,
     _is_high_risk,
@@ -362,6 +363,7 @@ def _run_domain_agent_react(
     # Pinned working memory + DataBus index
     wm = cfg.get("working_memory", {})
     system_prompt = _inject_working_memory(system_prompt, wm, cfg.get("history", []))
+    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
 
     # Phase 5: Enrich with project context (AGENTS.md) + skills清单
     system_prompt = enrich_system_prompt(
@@ -468,10 +470,22 @@ def _react_call_llm(
         msg_len = sum(len(str(m.get("content", ""))) for m in messages)
         logger.error("ReAct: LLM call failed in domain_agent_react: %s (msg_count=%d, total_chars=%d)",
                      type(e).__name__, len(messages), msg_len)
-        react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm)
+        # If we have no tool results at all, skip the fallback (it will also fail
+        # with the same broken LLM) and return a clear error immediately.
+        # This avoids adding 45s+ of wasted fallback retries per step.
+        if not tool_results:
+            return {
+                "answer": f"LLM 服务异常（{type(e).__name__}），无法完成任务。请确认 LLM 服务可用后重试。",
+                "tool_results": tool_results, "findings": [],
+            }
+        # With existing tool results, try fallback but accept partial answers.
+        # If the fallback LLM also fails, don't iterate — just use what we have.
+        react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm,
+                                               max_iterations=1)
         if react_result.get("answer") or react_result.get("tool_results"):
             return react_result
-        return {"answer": "无法完成任务，请检查工具和数据。", "tool_results": tool_results, "findings": []}
+        return {"answer": f"LLM 服务异常（{type(e).__name__}），请稍后重试。",
+                "tool_results": tool_results, "findings": []}
 
 
 def _react_handle_tool_calls(
@@ -679,6 +693,7 @@ def _domain_react_fallback(
     tool_results: list[dict[str, Any]],
     tools: ToolRegistry,
     llm,
+    max_iterations: int = MAX_REACT_ITERATIONS,
 ) -> dict[str, Any]:
     """Regex-based ReAct fallback for domain agents."""
     tools_list = json.dumps(tools.list_tools(), ensure_ascii=False)
@@ -705,7 +720,7 @@ After calling all needed tools, output your final answer with <answer>...</answe
         {"role": "user", "content": f"Complete this task: {task}"},
     ]
 
-    for _ in range(MAX_REACT_ITERATIONS):
+    for _ in range(max_iterations):
         try:
             response = llm.complete(system_prompt, messages, temperature=0.1)
         except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:

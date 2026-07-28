@@ -29,6 +29,7 @@ class AgentDefinition:
     tools: list[str] = field(default_factory=list)  # tool name patterns
     general_skills: list[str] = field(default_factory=list)  # from skills/common/
     domain_skills: list[str] = field(default_factory=list)  # from skills/{domain}/
+    system_guidelines: list[str] = field(default_factory=list)  # guideline names to inject into system prompt
     output_constraints: list[str] = field(default_factory=list)
     safety_rules: list[str] = field(default_factory=list)
     # LLM override: if set, domain agent uses its own LLM config instead of commander's

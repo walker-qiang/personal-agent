@@ -41,6 +41,7 @@ KNOWLEDGE_MANAGER = AgentDefinition(
         "personal-reflection",
         "brainstorming",
     ],
+    system_guidelines=["code_execution", "browser_automation"],
     output_constraints=[
         "使用与用户相同的语言回复",
         "知识整理结果使用层次化结构（概念 → 子概念 → 要点）",
