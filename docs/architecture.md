@@ -83,7 +83,7 @@ Agent 按"岗位"定义，每个岗位有独立的系统提示、工具集、技
 |----------|------|------|------|----------|----------|
 | `commander` | 指挥官 | 通用 | 全部 | decision-mirror | wiki-health-check, karpathy-guidelines, personal-reflection, ingest-source-to-knowledge |
 | `coding-assistant` | 编程助手 | coding | code.run_python, web_search, web_fetch, knowledge_search, mcp_browser_* | decision-mirror, karpathy-guidelines, planning-with-files | brainstorming |
-| `investment-analyst` | 投资分析员 | investment | finance.*, web_search, web_fetch, news_search, code.run_python, mcp_browser_* | decision-mirror | anomaly-diagnosis, portfolio-review, allocation-check, investment-research, investment-watchlist |
+| `investment-analyst` | 投资分析员 | investment | finance.*, finance_query, web_search, web_fetch, news_search, code.run_python, mcp_browser_* | decision-mirror | anomaly-diagnosis, portfolio-review, allocation-check, investment-research, investment-watchlist |
 | `knowledge-manager` | 知识管理员 | knowledge | knowledge_search, web_search, web_fetch, news_search, code.run_python, mcp_browser_* | decision-mirror | ingest-source-to-knowledge, wiki-health-check, personal-reflection, brainstorming |
 | `media-generator` | 媒体生成器 | media | agnes.* | — | — |
 
@@ -123,8 +123,8 @@ Agent 按"岗位"定义，每个岗位有独立的系统提示、工具集、技
 ### 工具体系
 
 所有工具通过 `ToolRegistry` 统一注册，分类管理：
-- `finance/` — 金融数据（持仓、快照、资产配置、实时行情）
-- `web/` — 网页搜索、新闻搜索、网页抓取、天气
+- `finance/` — 金融数据（持仓、快照、资产配置、资产查找）
+- `web/` — 网页搜索、新闻搜索、网页抓取、天气、实时行情查询（finance_query）
 - `code/` — Python 代码沙箱（需 `MATRIX_CODE_SANDBOX_ENABLED=true`）
 - `mcp/` — 外部 MCP 服务器工具（如 Playwright 浏览器自动化）
 - `rag/` — 知识库检索
@@ -136,35 +136,45 @@ Agent 按"岗位"定义，每个岗位有独立的系统提示、工具集、技
 
 ```python
 ToolDefinition(
-    name="finance.holdings_summary",
-    description="获取持仓摘要",
-    capabilities=["market_data", "portfolio_analysis"],
+    name="finance.asset_lookup",
+    description="按 ID、代码或名称查找资产",
+    capabilities=["portfolio_analysis", "market_data"],
     ...
 )
 ```
 
 **能力标签体系**：
 
-| 能力标签 | 含义 | 示例工具 |
+| 能力标签 | 含义 | 对应工具 |
 |----------|------|----------|
-| `market_data` | 实时/历史行情数据 | `finance.realtime_quote`, `finance.stock_history` |
-| `portfolio_analysis` | 持仓分析、资产配置 | `finance.holdings_summary`, `finance.bucket_allocation` |
-| `web_search` | 互联网搜索 | `web_search`, `news_search`, `web_fetch` |
+| `market_data` | 实时行情/资产数据 | `finance_query`, `finance.asset_lookup` |
+| `portfolio_analysis` | 持仓分析、资产配置 | `finance.holdings_summary`, `finance.bucket_allocation`, `finance.asset_lookup`, `finance.recent_snapshots`, `finance.snapshot_history` |
+| `web_search` | 网页搜索 | `web_search` |
+| `web_fetch` | 网页抓取 | `web_fetch` |
+| `news_search` | 新闻搜索 | `news_search` |
+| `weather` | 天气查询 | `weather` |
 | `code_execution` | Python 代码沙箱 | `code.run_python` |
-| `media_generation` | 图片/视频生成 | `agnes.generate_image`, `agnes.generate_video` |
-| `weather` | 天气查询 | `weather_get_current` |
+| `knowledge_base` | 知识库检索 | `knowledge_search` |
+| `image_generation` | 图片生成 | `agnes.generate_image` |
+| `video_generation` | 视频生成 | `agnes.generate_video` |
 
 **能力聚合机制**：
-- `ToolRegistry.get_capabilities_summary()` — 返回全局 `{capability: count}` 统计
+- `ToolRegistry.get_capabilities_summary()` — 返回全局 `{capability: [tool_name, ...]}` 映射（capability 标签 → 具备该能力的工具名列表）
 - `ToolRegistry.get_tool_capabilities()` — 返回 `{tool_name: [capabilities]}` 映射
 - `AgentRegistry.agents_for_commander()` — 为每个 Agent 计算其可用工具集的 `capabilities_summary`，注入 Commander 的 system prompt 中
 
 ```
-Agent 可用能力示例：
-- investment_analyst: market_data(2), portfolio_analysis(2), web_search(2), code_execution(1), weather(1)
+investment-analyst 可用能力示例（capability → 工具列表）：
+- market_data: finance_query, finance.asset_lookup
+- portfolio_analysis: finance.holdings_summary, finance.bucket_allocation,
+  finance.asset_lookup, finance.recent_snapshots, finance.snapshot_history
+- web_search: web_search
+- web_fetch: web_fetch
+- news_search: news_search
+- code_execution: code.run_python
 ```
 
-这使 Commander 能够在规划时做出更精准的 Agent 选择，例如："需要用实时行情数据 → 选 investment_analyst（有 market_data 能力）"。
+这使 Commander 能够在规划时做出更精准的 Agent 选择，例如："需要实时行情数据 → 选 investment-analyst（有 market_data 能力）"。
 
 ### 编排系统
 
