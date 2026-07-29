@@ -88,6 +88,9 @@ python -m matrix
 | `/sessions/batch-delete` | POST | 批量删除 |
 | `/sessions/batch-archive` | POST | 批量归档 |
 | `/sessions/batch-unarchive` | POST | 批量取消归档 |
+| `/sessions/{id}/branch` | POST | 从指定消息创建会话分支 |
+| `/sessions/{id}/branches` | GET | 列出会话的所有分支 |
+| `/sessions/{id}/leaf` | GET | 获取会话当前叶子节点 |
 
 ### 技能管理
 
@@ -97,6 +100,7 @@ python -m matrix
 | `/skills/{name}` | PUT/DELETE | 技能更新/删除 |
 | `/skills/{name}/knowledge/{file}` | GET/PUT/DELETE | 知识文件读写 |
 | `/skills/{name}/scripts/{file}` | GET/PUT/DELETE | 脚本文件读写 |
+| `/skills/{name}/knowledge` | GET | 列出技能知识文件 |
 
 ### 工具与提供商
 
@@ -118,6 +122,9 @@ python -m matrix
 | `/api/trace/sessions` | GET | Trace 会话列表 |
 | `/api/trace/sessions/{id}` | GET | Trace 详情 |
 | `/api/trace/events` | GET | Trace 事件查询 |
+| `/api/trace/stats` | GET | Trace 统计 |
+| `/api/trace/spans` | GET | OTEL 标准化 spans |
+| `/api/trace/otlp/export` | GET | OTLP 导出数据 |
 | `/mcp/servers` | GET/POST | MCP 服务器管理 |
 | `/mcp/servers/{name}` | PUT/DELETE | MCP 服务器更新/删除 |
 | `/mcp/servers/{name}/toggle` | POST | MCP 服务器启用/禁用 |

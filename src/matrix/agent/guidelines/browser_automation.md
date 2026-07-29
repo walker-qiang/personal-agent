@@ -11,6 +11,7 @@ When calling `mcp_browser_*` tools, follow these rules:
 2. If page needs interaction: `browser_click(ref)` or `browser_type(ref, text)` → get updated elements
 3. `browser_extract(selector="", max_chars=5000)` → get final text content
 4. Use the extracted text to answer the user's question
+5. `browser_screenshot(path)` → for visual verification or when the user asks to see the page
 
 **ref ID usage:**
 - `ref` is a short string ID (e.g., "1", "2") returned by `browser_navigate` or `browser_snapshot`

@@ -10,7 +10,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 ┌──────────────────────────────────────────────────┐
 │                    前端层                          │
 │  ┌─────────────────────┐  ┌───────────────────┐  │
-│  │ 纯 HTML 前端 (主 UI)  │  │ React SPA (开发中)  │  │
+│  │ 纯 HTML 前端 (主 UI)  │  │ React SPA           │  │
 │  │ static/index.html    │  │ static/react-app/ │  │
 │  │ 服务路径: /           │  │ 服务路径: /react-app│  │
 │  └─────────┬───────────┘  └────────┬──────────┘  │
@@ -68,7 +68,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 |------|-------------|-----------|
 | 文件 | `static/index.html` (单文件) | `static/react-app/` (构建产物) |
 | 服务路径 | `/` | `/react-app/` |
-| 定位 | 管理员/开发者全功能面板 | 日常对话交互界面（开发中） |
+| 定位 | 管理员/开发者全功能面板 | 日常对话交互界面 |
 | 依赖 | 零外部框架（仅 marked.min.js） | React 18 + TypeScript + Vite |
 | 来源 | 手写维护 | `src/matrix/web/` 源码构建 |
 | 构建方式 | 无需构建 | `cd src/matrix/web && npm run build` |
@@ -109,6 +109,7 @@ Agent 按"岗位"定义，每个岗位有独立的系统提示、工具集、技
 | `tools` | `list[str]` | 工具名模式（支持 `*` 通配，空列表 = 全部可用） |
 | `general_skills` | `list[str]` | 通用技能（skills/common/） |
 | `domain_skills` | `list[str]` | 领域技能（skills/{domain}/） |
+| `system_guidelines` | `list[str]` | 按需注入的行为准则（guidelines/） |
 | `output_constraints` | `list[str]` | 输出约束规则 |
 | `safety_rules` | `list[str]` | 安全规则 |
 | `llm_provider` | `str` | LLM 提供方覆盖（可选） |
@@ -264,7 +265,7 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 | 记忆层 | 实现 | 说明 |
 |--------|------|------|
 | 工作记忆 | `state.working_memory` (pinned + insights) | 当前会话的临时上下文 |
-| 情景记忆 | SQLite `messages` 表 + `get_history()` | 历史对话消息 |
+| 情景记忆 | SQLite `messages` 表 + `get_history()`（返回含 `message_id` 的消息树） | 历史对话消息 |
 | 语义记忆 | RAG (ChromaDB + BM25) | 长期知识检索 |
 | 程序记忆 | Skills (YAML) | 可复用的执行流程 |
 | 用户画像 | `user_profile` 表 | 用户偏好、策略 |
@@ -334,7 +335,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 **L3: Compaction（上下文压缩）**
 - 触发条件：token 使用量 ≥ 85% 上下文窗口
 - 目标：压缩到约 30% 窗口
-- 输出结构化 JSON：`user_goal`、`execution_history`、`abandoned_paths`、`data_references`
+- 输出结构化 JSON：`user_goal`、`execution_history`、`abandoned_paths`、`critical_context`、`data_references`
 - 使用 pipeline LLM 执行，失败时降级为简单截断
 
 **L4: DataBus（数据索引）**
@@ -376,6 +377,9 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | `/sessions/batch-delete` | POST | 批量删除多个会话 |
 | `/sessions/batch-archive` | POST | 批量归档（隐藏）会话 |
 | `/sessions/batch-unarchive` | POST | 批量取消归档 |
+| `/sessions/{id}/branch` | POST | 从指定消息创建会话分支 |
+| `/sessions/{id}/branches` | GET | 列出会话的所有分支 |
+| `/sessions/{id}/leaf` | GET | 获取会话当前叶子节点 |
 
 ### 技能管理
 

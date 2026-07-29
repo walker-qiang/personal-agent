@@ -17,6 +17,8 @@ Fix 5: 提示词组装缓存                  ← Phase 5 遗留，改动最小
 
 ## Fix 1: 截断入口统一 + 覆盖盲区（Phase 1 遗留）
 
+> **实现状态（2026-07-29）**：已完成 ✅。注册层已无 `truncate_result` 包裹；`_ARRAY_FIELDS` 已扩展 `images`，`_TEXT_FIELDS` 已扩展 `prompt`/`url`。
+
 ### 问题
 
 1. **双重截断**：finance 和 web 工具在 `__init__.py` 注册时包裹了 `truncate_result`，`registry.call()` 又调了一次。功能上无害（第二次是 no-op），但架构不干净。
@@ -78,6 +80,8 @@ _TEXT_FIELDS = (
 ---
 
 ## Fix 2: tool_error() 落地 + 错误规范（Phase 3 遗留）
+
+> **实现状态（2026-07-29）**：`tool_error()` 已定义并用于 fetch.py（5处）、holdings.py、weather.py ✅；AGENTS.md 已追加错误信息规范 ✅；`web/search.py` 尚未改造 ❌
 
 ### 问题
 
@@ -171,6 +175,8 @@ def holdings_summary(cache_path: str = "") -> dict[str, Any]:
 
 ## Fix 3: 事件系统迁移完成（Phase 6 遗留）
 
+> **实现状态（2026-07-29）**：尚未执行 ❌。`_push_event` 仍 put `(string, dict)` tuple 到 queue，`events.py` 定义的 13 种结构化事件未被激活。
+
 ### 问题
 
 `events.py` 定义了 13 种结构化事件，`make_event()` 工厂函数写了，但实际系统行为零变化 — `_push_event` 仍然 put `(string, dict)` 元组到 queue，SSE 序列化仍然用字符串。
@@ -250,6 +256,8 @@ def _drain_queue(q, emitted):
 
 ## Fix 4: 会话树前端集成（Phase 7 遗留）
 
+> **实现状态（2026-07-29）**：后端已完成 ✅ — `get_history` 已返回 `message_id`（`store.py`），branch/branches/leaf 三个端点已实现（`sessions.py`）；前端尚未集成 ❌ — `static/index.html` 无 branch 交互代码。
+
 ### 问题
 
 后端有 branch / branches / leaf 三个 API 端点，但前端没有任何代码调用它们。用户无法通过 UI 执行 branch 操作。
@@ -325,6 +333,8 @@ def get_history(self, session_id, max_turns=8):
 ---
 
 ## Fix 5: 提示词组装缓存（Phase 5 遗留）
+
+> **实现状态（2026-07-29）**：已完成 ✅。`context_loader.py` 已实现 `_cache` dict + `_CACHE_TTL = 60`。
 
 ### 问题
 
