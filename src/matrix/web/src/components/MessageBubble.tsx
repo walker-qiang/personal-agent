@@ -70,6 +70,29 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
         <div style={styles.duration}>{message.duration}</div>
       )}
 
+      {message.thinking && message.thinking.length > 0 && (
+        <div style={styles.thinkingSection}>
+          <div style={styles.thinkingHeader}>
+            <span style={styles.thinkingIcon}>💭</span>
+            <span style={styles.thinkingLabel}>思考过程 ({message.thinking.length} 条)</span>
+          </div>
+          {message.thinking.map((t, i) => (
+            <div key={i} style={styles.thinkingItem}>{t}</div>
+          ))}
+        </div>
+      )}
+
+      {message.progress && message.progress.length > 0 && (
+        <div style={styles.progressSection}>
+          {message.progress.map((p, i) => (
+            <div key={i} style={styles.progressItem}>
+              <span style={styles.progressDot}>⏳</span>
+              <span>{p}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {message.toolResults && message.toolResults.length > 0 && (
         <ToolSection results={message.toolResults} />
       )}
@@ -106,6 +129,25 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center', flexShrink: 0, transition: 'opacity 0.15s',
     opacity: 0.8,
   },
+  thinkingSection: {
+    marginTop: 8, padding: '10px 14px', borderRadius: 10,
+    backgroundColor: 'rgba(99, 102, 241, 0.06)', border: '1px solid rgba(99, 102, 241, 0.15)',
+    fontSize: 12, color: 'var(--muted)', lineHeight: 1.6,
+  },
+  thinkingHeader: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 },
+  thinkingIcon: { fontSize: 13 },
+  thinkingLabel: { fontWeight: 600, color: 'var(--text-secondary)' },
+  thinkingItem: {
+    padding: '4px 0', borderTop: '1px solid rgba(99, 102, 241, 0.08)',
+    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+  },
+  progressSection: {
+    marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4,
+    padding: '8px 12px', borderRadius: 8,
+    backgroundColor: 'rgba(52, 199, 89, 0.06)', border: '1px solid rgba(52, 199, 89, 0.15)',
+  },
+  progressItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted)' },
+  progressDot: { fontSize: 12, flexShrink: 0 },
 };
 
 export default MessageBubble;

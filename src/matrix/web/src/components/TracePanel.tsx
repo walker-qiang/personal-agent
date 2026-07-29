@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTrace } from '../hooks/useTrace';
 
 interface Props {
@@ -7,14 +7,40 @@ interface Props {
 
 export const TracePanel: React.FC<Props> = ({ onClose }) => {
   const { stats, sessions, events, sessionId, loading, error, loadStats, loadSessions, loadEvents, backToList } = useTrace();
+  const [width, setWidth] = useState(() => {
+    const saved = localStorage.getItem('mx-trace-w');
+    return saved ? parseInt(saved, 10) : 420;
+  });
+  const dragging = useRef(false);
 
   useEffect(() => {
     loadStats();
     loadSessions();
   }, [loadStats, loadSessions]);
 
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    const startX = e.clientX;
+    const startW = width;
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current) return;
+      const newW = Math.max(280, Math.min(700, startW + (startX - ev.clientX)));
+      setWidth(newW);
+      localStorage.setItem('mx-trace-w', String(newW));
+    };
+    const onUp = () => {
+      dragging.current = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [width]);
+
   const drawerStyle: React.CSSProperties = {
-    position: 'fixed', top: 0, right: 0, bottom: 0, width: 420,
+    position: 'fixed', top: 0, right: 0, bottom: 0, width,
     background: 'var(--surface)', zIndex: 1000,
     display: 'flex', flexDirection: 'column',
     boxShadow: '-4px 0 16px rgba(0,0,0,0.3)',
@@ -34,6 +60,17 @@ export const TracePanel: React.FC<Props> = ({ onClose }) => {
     <>
       <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={onClose} />
       <div style={drawerStyle}>
+        {/* Resize handle */}
+        <div
+          onMouseDown={handleMouseDown}
+          style={{
+            position: 'absolute', left: 0, top: 0, bottom: 0, width: 4,
+            cursor: 'col-resize', zIndex: 10, background: 'transparent',
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--accent)')}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        />
         <div style={headerStyle}>
           <span>{sessionId ? 'Trace 事件详情' : 'Trace 追踪'}</span>
           <div style={{ display: 'flex', gap: 8 }}>

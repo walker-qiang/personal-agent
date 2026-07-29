@@ -16,14 +16,14 @@ import StatusBar from './components/StatusBar';
 import RightPanel from './components/RightPanel';
 import FileUpload from './components/FileUpload';
 import ConfirmDialog from './components/ConfirmDialog';
-import McpPanel from './components/McpPanel';
-import TracePanel from './components/TracePanel';
-import BranchBanner from './components/BranchBanner';
+import { McpPanel } from './components/McpPanel';
+import { TracePanel } from './components/TracePanel';
+import { BranchBanner } from './components/BranchBanner';
 import type { SkillItem, FileInfo } from './types';
 
 const App: React.FC = () => {
   const { authenticated, username, login, register, logout, error: authError } = useAuth();
-  const { messages, send, sending, switchSession, confirmRequired, confirmActions, confirm, dismissConfirm } = useChat();
+  const { messages, send, sending, switchSession, confirmRequired, confirmActions, confirm, dismissConfirm, rightPanel } = useChat();
   const {
     sessions, currentId, setCurrentId, showArchive,
     load: loadSessions, create: createSession, remove: removeSession,
@@ -37,10 +37,10 @@ const App: React.FC = () => {
   const [file, setFile] = useState<FileInfo | null>(null);
   const [status, setStatus] = useState<'idle' | 'thinking' | 'executing' | 'generating'>('idle');
   const [statusText, setStatusText] = useState('就绪');
-  const [rightPanel, setRightPanel] = useState({ todos: [] as string[], artifacts: [] as string[], refs: [] as string[] });
   const [showMcp, setShowMcp] = useState(false);
   const [showTrace, setShowTrace] = useState(false);
   const [showBranchBanner, setShowBranchBanner] = useState(false);
+  const [branchCount, setBranchCount] = useState(0);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,6 +62,19 @@ const App: React.FC = () => {
       loadSkills();
     }
   }, [authenticated, loadSessions, loadSkills]);
+
+  // Load branch info when session changes
+  useEffect(() => {
+    if (!currentId) {
+      setBranchCount(0);
+      return;
+    }
+    const token = localStorage.getItem('mx_token');
+    fetch(`/sessions/${currentId}/branches?token=${encodeURIComponent(token || '')}`)
+      .then(r => r.json())
+      .then(data => setBranchCount((data.branches || []).length))
+      .catch(() => setBranchCount(0));
+  }, [currentId]);
 
   // Auto-scroll
   useEffect(() => {
@@ -130,20 +143,17 @@ const App: React.FC = () => {
   const handleNewSession = useCallback(async () => {
     switchSession(null);
     setCurrentId(null);
-    setRightPanel({ todos: [], artifacts: [], refs: [] });
   }, [switchSession, setCurrentId]);
 
   const handleSelectSession = useCallback((id: string) => {
     setCurrentId(id);
     switchSession(id);
-    setRightPanel({ todos: [], artifacts: [], refs: [] });
   }, [setCurrentId, switchSession]);
 
   const handleBranch = useCallback(async (sessionId: string, messageId?: string) => {
     try {
       await branch(sessionId, messageId);
       switchSession(null);
-      setRightPanel({ todos: [], artifacts: [], refs: [] });
       setShowBranchBanner(true);
       await loadSessions();
     } catch (e) {
@@ -237,6 +247,18 @@ const App: React.FC = () => {
           }}
         >
           {showBranchBanner && <BranchBanner onClose={() => setShowBranchBanner(false)} />}
+          {branchCount > 0 && !showBranchBanner && (
+            <div style={{
+              padding: '6px 12px', fontSize: 11, color: 'var(--text-secondary)',
+              background: 'var(--bg2)', borderBottom: '1px solid var(--rule)',
+              display: 'flex', alignItems: 'center', gap: 6, borderRadius: 8,
+              marginBottom: 4,
+            }}>
+              <span style={{ color: 'var(--accent)', fontWeight: 500 }}>{branchCount} 个分叉点</span>
+              <span>此会话有多个对话分支，悬停消息可从此处分叉</span>
+              <span style={{ marginLeft: 'auto', opacity: 0.6 }}>旧分支保留在历史中</span>
+            </div>
+          )}
           {messages.length === 0 && !showBranchBanner && (
             <div style={{
               flex: 1, display: 'flex', flexDirection: 'column',

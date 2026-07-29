@@ -9,6 +9,13 @@ interface ConfirmAction {
   summary: string;
 }
 
+export interface RightPanelData {
+  intent: string;
+  todos: string[];
+  artifacts: string[];
+  refs: string[];
+}
+
 export interface UseChatReturn {
   messages: Message[];
   send: (message: string, sessionId: string, fileId?: string) => void;
@@ -20,6 +27,7 @@ export interface UseChatReturn {
   confirmSessionId: string;
   confirm: (decision: 'approve' | 'skip') => void;
   dismissConfirm: () => void;
+  rightPanel: RightPanelData;
 }
 
 // Per-session state: messages + EventSource
@@ -35,6 +43,7 @@ export function useChat(): UseChatReturn {
   const [confirmRequired, setConfirmRequired] = useState(false);
   const [confirmActions, setConfirmActions] = useState<ConfirmAction[]>([]);
   const [confirmSessionId, setConfirmSessionId] = useState('');
+  const [rightPanel, setRightPanel] = useState<RightPanelData>({ intent: '', todos: [], artifacts: [], refs: [] });
 
   // Per-session state map: sessionId -> { messages, eventSource, sending }
   const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
@@ -134,13 +143,34 @@ export function useChat(): UseChatReturn {
     });
 
     // classify
-    es.addEventListener('classify', () => {});
+    es.addEventListener('classify', (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const data = parsed.data || parsed;
+        const intent = data.intent || '';
+        const intentLabel = intent === 'simple' ? '直接回答' :
+          intent === 'delegate' ? '多 Agent 协同' :
+          intent === 'skill' ? '技能: ' + (data.skill_name || '') : '分析中';
+        const plan = data.delegation_plan || [];
+        const planStr = plan.length > 0 ? plan.map((p: { agent_id: string; task: string }) => p.agent_id + ': ' + p.task).join(' | ') : '';
+        setRightPanel(prev => ({
+          intent,
+          todos: [intentLabel],
+          refs: planStr ? [planStr] : prev.refs,
+          artifacts: [],
+        }));
+      } catch { /* ignore */ }
+    });
 
     // tool_call
     es.addEventListener('tool_call', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data);
         const toolCall: ToolCall = parsed.data || parsed;
+        setRightPanel(prev => ({
+          ...prev,
+          refs: [...prev.refs, toolCall.name],
+        }));
         updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
@@ -163,6 +193,15 @@ export function useChat(): UseChatReturn {
       try {
         const parsed = JSON.parse(event.data);
         const toolResult: ToolResult = parsed.data || parsed;
+        const preview = typeof toolResult.result === 'string'
+          ? toolResult.result.substring(0, 80)
+          : (toolResult.result ? '结果已返回' : '');
+        if (preview) {
+          setRightPanel(prev => ({
+            ...prev,
+            artifacts: [...prev.artifacts, toolResult.name + ': ' + preview],
+          }));
+        }
         updateSessionMessages(sessionId, (prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
@@ -421,6 +460,7 @@ export function useChat(): UseChatReturn {
       setMessages([]);
       setSending(false);
       setConfirmRequired(false);
+      setRightPanel({ intent: '', todos: [], artifacts: [], refs: [] });
       return;
     }
 
@@ -430,6 +470,7 @@ export function useChat(): UseChatReturn {
     setMessages(state.messages);
     setSending(state.sending);
     setConfirmRequired(false);
+    setRightPanel({ intent: '', todos: [], artifacts: [], refs: [] });
   }, [getOrCreateSession]);
 
   const confirm = useCallback(
@@ -485,5 +526,6 @@ export function useChat(): UseChatReturn {
     confirmSessionId,
     confirm,
     dismissConfirm,
+    rightPanel,
   };
 }

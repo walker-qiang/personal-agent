@@ -28,11 +28,16 @@ from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
 
-# Pre-load the Web UI HTML content at module level
+# Pre-load the React SPA index.html at module level
 _INDEX_HTML = ""
-_index_path = Path(__file__).parent / "static" / "index.html"
-if _index_path.exists():
-    _INDEX_HTML = _index_path.read_text(encoding="utf-8")
+_react_index_path = Path(__file__).parent / "static" / "react-app" / "index.html"
+if _react_index_path.exists():
+    _INDEX_HTML = _react_index_path.read_text(encoding="utf-8")
+else:
+    # Fallback to legacy HTML frontend
+    _legacy_path = Path(__file__).parent / "static" / "index.html"
+    if _legacy_path.exists():
+        _INDEX_HTML = _legacy_path.read_text(encoding="utf-8")
 
 
 @asynccontextmanager
@@ -233,9 +238,9 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
             return HTMLResponse(_INDEX_HTML)
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
 
-    # Mount static files (marked.min.js, etc.) — after all routes
-    static_dir = Path(__file__).parent / "static"
-    if static_dir.is_dir():
-        app.mount("/", StaticFiles(directory=str(static_dir), html=False), name="static")
+    # Mount React SPA static files (assets/) — after all routes
+    react_dir = Path(__file__).parent / "static" / "react-app"
+    if react_dir.is_dir():
+        app.mount("/", StaticFiles(directory=str(react_dir), html=False), name="static")
 
     return app

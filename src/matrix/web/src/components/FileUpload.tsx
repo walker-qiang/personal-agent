@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, DragEvent } from 'react';
+import React, { useState, useRef, useCallback, DragEvent, useEffect } from 'react';
 import type { FileInfo } from '../types';
 import { api } from '../utils/api';
 
@@ -102,6 +102,29 @@ const FileUpload: React.FC<Props> = ({ onFileSelected }) => {
       uploadFile(f);
     }
   };
+
+  // Paste image support
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          const blob = item.getAsFile();
+          if (blob) {
+            const ext = item.type.split('/')[1] || 'png';
+            const f = new File([blob], `paste-${Date.now()}.${ext}`, { type: item.type });
+            uploadFile(f);
+          }
+          break;
+        }
+      }
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [uploadFile]);
 
   return (
     <div
