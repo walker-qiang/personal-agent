@@ -21,17 +21,29 @@ export function useSessions() {
   }, []);
 
   const load = useCallback(async () => {
-    const data = await api<SessionItem[]>(`/sessions?include_hidden=${showArchive}`);
-    setSessions(Array.isArray(data) ? data : []);
+    const data = await api<{ sessions?: Record<string, unknown>[] } | Record<string, unknown>[]>(`/sessions?include_hidden=${showArchive}`);
+    const rawList = Array.isArray(data) ? data : (data?.sessions || []);
+    const list: SessionItem[] = (rawList as Record<string, unknown>[]).map((s) => ({
+      id: s.id as string,
+      title: s.title as string,
+      // Backend returns Unix timestamps (seconds) as numbers; convert to ISO strings
+      created_at: typeof s.created_at === 'number' ? new Date(s.created_at * 1000).toISOString() : (s.created_at as string),
+      updated_at: typeof s.updated_at === 'number' ? new Date(s.updated_at * 1000).toISOString() : (s.updated_at as string),
+      // Backend returns 'turn_count'; frontend uses 'turns'
+      turns: (typeof s.turn_count === 'number' ? s.turn_count : s.turns) as number,
+      hidden: s.hidden as boolean | undefined,
+    }));
+    setSessions(list);
   }, [showArchive]);
 
   const create = useCallback(async (): Promise<SessionItem | null> => {
-    const session = await api<SessionItem>('/sessions', {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
+    // Sessions are created implicitly on the server when the first
+    // chat message is sent. Generate a client-side ID and set it.
+    const id = 'web-' + Math.random().toString(36).slice(2, 8);
+    const now = Date.now() / 1000;
+    const session: SessionItem = { id, title: '新会话', created_at: new Date(now * 1000).toISOString(), updated_at: new Date(now * 1000).toISOString(), turns: 0, hidden: false };
     setSessions((prev) => [session, ...prev]);
-    setCurrentId(session.id);
+    setCurrentId(id);
     return session;
   }, [setCurrentId]);
 

@@ -24,7 +24,7 @@ const SkillEditor: React.FC<Props> = ({ skill, onSave, onClose }) => {
 
   useEffect(() => {
     if (isEditing && skill) {
-      loadFiles(skill.name);
+      loadFiles(skill.name, skill.knowledge_files || [], skill.script_files || []);
     }
   }, [isEditing, skill, loadFiles]);
 

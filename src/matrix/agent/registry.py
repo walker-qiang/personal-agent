@@ -36,11 +36,18 @@ class AgentRegistry:
         """Detect if skills_base_dir uses flat or domain-based structure."""
         if not self._skills_base_dir.exists():
             return False
-        # If base dir contains subdirs that look like domain dirs, it's domain-based
+        # If base dir contains domain dirs that actually contain skill subdirs,
+        # it's domain-based. Empty domain dirs (e.g. created by a failed POST)
+        # should not trigger domain-based detection — fall through to flat check.
         domain_dirs = {"common", "investment", "general"}
         contents = {p.name for p in self._skills_base_dir.iterdir() if p.is_dir()}
-        if contents & domain_dirs:
-            return False
+        domain_hits = contents & domain_dirs
+        if domain_hits:
+            for domain_name in domain_hits:
+                domain_dir = self._skills_base_dir / domain_name
+                for sub in domain_dir.iterdir():
+                    if sub.is_dir() and (sub / "SKILL.md").exists():
+                        return False  # genuine domain-based structure
         # If it contains SKILL.md subdirs, it's flat
         for p in self._skills_base_dir.iterdir():
             if p.is_dir() and (p / "SKILL.md").exists():

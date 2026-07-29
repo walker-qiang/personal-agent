@@ -81,7 +81,11 @@ const SessionList: React.FC<Props> = ({
 
   const formatDate = (dateStr: string) => {
     try {
-      const d = new Date(dateStr);
+      // Handle both ISO strings and Unix timestamps (seconds)
+      const d = typeof dateStr === 'string' && /^\d+$/.test(dateStr)
+        ? new Date(Number(dateStr) * 1000)
+        : new Date(dateStr);
+      if (isNaN(d.getTime())) return '';
       const now = new Date();
       const diff = now.getTime() - d.getTime();
       if (diff < 86400000) return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });

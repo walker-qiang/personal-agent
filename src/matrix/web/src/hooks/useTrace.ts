@@ -23,8 +23,9 @@ export function useTrace() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ sessions: TraceSession[] }>('/api/trace/sessions?limit=50');
-      setSessions(data.sessions || []);
+      const data = await api<TraceSession[] | { sessions: TraceSession[] }>('/api/trace/sessions?limit=50');
+      const list = Array.isArray(data) ? data : (data?.sessions || []);
+      setSessions(list);
     } catch (e) {
       setError((e as Error).message);
     } finally {

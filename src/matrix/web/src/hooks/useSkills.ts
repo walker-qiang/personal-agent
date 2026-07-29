@@ -40,8 +40,9 @@ export function useSkills(): UseSkillsReturn {
         (body as { detail?: string }).detail || 'Failed to load skills',
       );
     }
-    const data: SkillItem[] = await res.json();
-    setSkills(data);
+    const data = await res.json();
+    const skills = data.skills || data;
+    setSkills(Array.isArray(skills) ? skills : []);
   }, []);
 
   const create = useCallback(
@@ -57,10 +58,9 @@ export function useSkills(): UseSkillsReturn {
         headers: getAuthHeaders(),
         body: JSON.stringify({
           name,
+          title: name,
           description,
-          prompt,
-          workflow,
-          output_format,
+          domain: 'investment',
         }),
       });
       if (!res.ok) {
@@ -69,11 +69,11 @@ export function useSkills(): UseSkillsReturn {
           (body as { detail?: string }).detail || 'Failed to create skill',
         );
       }
-      const skill: SkillItem = await res.json();
-      setSkills((prev) => [...prev, skill]);
-      return skill;
+      // Server returns {ok, name, domain}, reload full list to get complete SkillItem
+      await load();
+      return null;
     },
-    [],
+    [load],
   );
 
   const update = useCallback(
@@ -89,12 +89,10 @@ export function useSkills(): UseSkillsReturn {
           (body as { detail?: string }).detail || 'Failed to update skill',
         );
       }
-      const updatedSkill: SkillItem = await res.json();
-      setSkills((prev) =>
-        prev.map((s) => (s.name === name ? updatedSkill : s)),
-      );
+      // Server returns {ok: true}, reload to get updated skill
+      await load();
     },
-    [],
+    [load],
   );
 
   const remove = useCallback(async (name: string) => {

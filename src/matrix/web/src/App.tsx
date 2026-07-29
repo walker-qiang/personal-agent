@@ -100,22 +100,11 @@ const App: React.FC = () => {
 
     let sid = currentId;
     if (!sid) {
-      try {
-        const res = await fetch('/sessions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('mx_token')}`,
-          },
-        });
-        const data = await res.json();
-        sid = data.id || data.session_id;
-        setCurrentId(sid);
-        loadSessions();
-      } catch {
-        sid = 's-' + Date.now();
-        setCurrentId(sid);
-      }
+      // Sessions are created implicitly on the server when the first
+      // chat message is sent. Generate a client-side ID.
+      sid = 'web-' + Math.random().toString(36).slice(2, 8);
+      setCurrentId(sid);
+      loadSessions();
     }
 
     setInput('');

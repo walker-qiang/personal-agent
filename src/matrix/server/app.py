@@ -239,8 +239,10 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
         return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
 
     # Mount React SPA static files (assets/) — after all routes
+    # NOTE: StaticFiles at "/" overrides the @app.get("/") route in Starlette.
+    # Mount at a sub-path instead to serve only asset files, not the root index.
     react_dir = Path(__file__).parent / "static" / "react-app"
     if react_dir.is_dir():
-        app.mount("/", StaticFiles(directory=str(react_dir), html=False), name="static")
+        app.mount("/assets", StaticFiles(directory=str(react_dir / "assets"), html=False), name="static")
 
     return app
