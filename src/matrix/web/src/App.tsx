@@ -3,6 +3,8 @@ import { useAuth } from './hooks/useAuth';
 import { useChat } from './hooks/useChat';
 import { useSessions } from './hooks/useSessions';
 import { useSkills } from './hooks/useSkills';
+import { useKeyboard } from './hooks/useKeyboard';
+import { useResizable } from './hooks/useResizable';
 import LoginOverlay from './components/LoginOverlay';
 import SessionList from './components/SessionList';
 import MessageBubble from './components/MessageBubble';
@@ -14,12 +16,19 @@ import StatusBar from './components/StatusBar';
 import RightPanel from './components/RightPanel';
 import FileUpload from './components/FileUpload';
 import ConfirmDialog from './components/ConfirmDialog';
+import McpPanel from './components/McpPanel';
+import TracePanel from './components/TracePanel';
+import BranchBanner from './components/BranchBanner';
 import type { SkillItem, FileInfo } from './types';
 
 const App: React.FC = () => {
   const { authenticated, username, login, register, logout, error: authError } = useAuth();
   const { messages, send, sending, switchSession, confirmRequired, confirmActions, confirm, dismissConfirm } = useChat();
-  const { sessions, currentId, setCurrentId, load: loadSessions, create: createSession, remove: removeSession } = useSessions();
+  const {
+    sessions, currentId, setCurrentId, showArchive,
+    load: loadSessions, create: createSession, remove: removeSession,
+    batchArchive, batchUnarchive, batchDelete, toggleArchive, branch,
+  } = useSessions();
   const { skills, load: loadSkills, create: createSkill, update: updateSkill, remove: removeSkill } = useSkills();
 
   const [input, setInput] = useState('');
@@ -29,9 +38,22 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<'idle' | 'thinking' | 'executing' | 'generating'>('idle');
   const [statusText, setStatusText] = useState('就绪');
   const [rightPanel, setRightPanel] = useState({ todos: [] as string[], artifacts: [] as string[], refs: [] as string[] });
+  const [showMcp, setShowMcp] = useState(false);
+  const [showTrace, setShowTrace] = useState(false);
+  const [showBranchBanner, setShowBranchBanner] = useState(false);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Resizable panels
+  const sidebar = useResizable({ minWidth: 160, maxWidth: 400, defaultWidth: 260, storageKey: 'mx-sidebar-w', direction: 'right' });
+  const rpanel = useResizable({ minWidth: 160, maxWidth: 500, defaultWidth: 280, storageKey: 'mx-rpanel-w', direction: 'left' });
+
+  // Keyboard shortcuts
+  useKeyboard([
+    { key: 'n', ctrl: true, handler: () => handleNewSession() },
+    { key: 'k', ctrl: true, handler: () => inputRef.current?.focus() },
+  ]);
 
   // Load sessions and skills on mount
   useEffect(() => {
@@ -65,7 +87,6 @@ const App: React.FC = () => {
 
     let sid = currentId;
     if (!sid) {
-      // Create a new session if none selected
       try {
         const res = await fetch('/sessions', {
           method: 'POST',
@@ -79,7 +100,6 @@ const App: React.FC = () => {
         setCurrentId(sid);
         loadSessions();
       } catch {
-        // Fallback: generate a random session id
         sid = 's-' + Date.now();
         setCurrentId(sid);
       }
@@ -104,10 +124,7 @@ const App: React.FC = () => {
 
   const handleQuickSend = useCallback((question: string) => {
     setInput(question);
-    // Auto-send after a brief delay
-    setTimeout(() => {
-      handleSend();
-    }, 50);
+    setTimeout(() => { handleSend(); }, 50);
   }, [handleSend]);
 
   const handleNewSession = useCallback(async () => {
@@ -122,6 +139,24 @@ const App: React.FC = () => {
     setRightPanel({ todos: [], artifacts: [], refs: [] });
   }, [setCurrentId, switchSession]);
 
+  const handleBranch = useCallback(async (sessionId: string, messageId?: string) => {
+    try {
+      await branch(sessionId, messageId);
+      switchSession(null);
+      setRightPanel({ todos: [], artifacts: [], refs: [] });
+      setShowBranchBanner(true);
+      await loadSessions();
+    } catch (e) {
+      console.error('Branch failed:', e);
+    }
+  }, [branch, switchSession, loadSessions]);
+
+  const handleMessageBranch = useCallback((messageId: string) => {
+    if (currentId) {
+      handleBranch(currentId, messageId);
+    }
+  }, [currentId, handleBranch]);
+
   if (!authenticated) {
     return <LoginOverlay onLogin={login} onRegister={register} error={authError || undefined} />;
   }
@@ -129,12 +164,31 @@ const App: React.FC = () => {
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       {/* Left sidebar */}
-      <SessionList
-        sessions={sessions}
-        currentId={currentId || ''}
-        onSelect={handleSelectSession}
-        onCreate={handleNewSession}
-        onDelete={removeSession}
+      <div style={{ width: sidebar.width, flexShrink: 0 }}>
+        <SessionList
+          sessions={sessions}
+          currentId={currentId || ''}
+          showArchive={showArchive}
+          onSelect={handleSelectSession}
+          onCreate={handleNewSession}
+          onDelete={removeSession}
+          onBatchArchive={batchArchive}
+          onBatchUnarchive={batchUnarchive}
+          onBatchDelete={batchDelete}
+          onToggleArchive={toggleArchive}
+          onBranch={(id) => handleBranch(id)}
+        />
+      </div>
+      {/* Sidebar resize handle */}
+      <div
+        onMouseDown={sidebar.onMouseDown}
+        style={{
+          width: 4, cursor: 'col-resize', flexShrink: 0,
+          background: 'transparent', transition: 'background 0.15s',
+          zIndex: 10,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--accent)')}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
       />
 
       {/* Main chat area */}
@@ -150,6 +204,16 @@ const App: React.FC = () => {
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>{username}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={() => setShowTrace(true)}
+              style={{
+                padding: '4px 12px', borderRadius: 'var(--radius-sm)',
+                background: 'transparent', color: 'var(--muted)', fontSize: 12,
+                border: '1px solid var(--rule)',
+              }}
+            >
+              Trace
+            </button>
             <ModelSelector />
             <button
               onClick={logout}
@@ -172,7 +236,8 @@ const App: React.FC = () => {
             display: 'flex', flexDirection: 'column', gap: 12,
           }}
         >
-          {messages.length === 0 && (
+          {showBranchBanner && <BranchBanner onClose={() => setShowBranchBanner(false)} />}
+          {messages.length === 0 && !showBranchBanner && (
             <div style={{
               flex: 1, display: 'flex', flexDirection: 'column',
               alignItems: 'center', justifyContent: 'center',
@@ -185,9 +250,12 @@ const App: React.FC = () => {
             </div>
           )}
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble key={msg.id} message={msg} onBranch={handleMessageBranch} />
           ))}
         </div>
+
+        {/* Quick questions (always visible when messages exist) */}
+        {messages.length > 0 && <QuickQuestions onSend={handleQuickSend} />}
 
         {/* Input area */}
         <div style={{
@@ -244,9 +312,21 @@ const App: React.FC = () => {
         <StatusBar status={status} text={statusText} />
       </div>
 
+      {/* Right panel resize handle */}
+      <div
+        onMouseDown={rpanel.onMouseDown}
+        style={{
+          width: 4, cursor: 'col-resize', flexShrink: 0,
+          background: 'transparent', transition: 'background 0.15s',
+          zIndex: 10,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--accent)')}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+      />
+
       {/* Right panels */}
       <div style={{
-        width: 280, borderLeft: '1px solid var(--rule)',
+        width: rpanel.width, borderLeft: '1px solid var(--rule)',
         background: 'var(--bg2)', overflowY: 'auto', flexShrink: 0,
         display: 'flex', flexDirection: 'column',
       }}>
@@ -258,6 +338,23 @@ const App: React.FC = () => {
           onDelete={removeSkill}
           onCreate={() => { setEditingSkill(null); setShowSkillEditor(true); }}
         />
+        {/* User bar with MCP entry */}
+        <div style={{
+          padding: '12px 16px', borderTop: '1px solid var(--rule)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{username}</span>
+          <button
+            onClick={() => setShowMcp(true)}
+            style={{
+              padding: '4px 10px', borderRadius: 'var(--radius-sm)',
+              background: 'transparent', color: 'var(--muted)', fontSize: 11,
+              border: '1px solid var(--rule)',
+            }}
+          >
+            MCP
+          </button>
+        </div>
       </div>
 
       {/* Skill Editor Modal */}
@@ -276,6 +373,12 @@ const App: React.FC = () => {
           onClose={() => { setShowSkillEditor(false); setEditingSkill(null); }}
         />
       )}
+
+      {/* MCP Panel */}
+      {showMcp && <McpPanel onClose={() => setShowMcp(false)} />}
+
+      {/* Trace Panel */}
+      {showTrace && <TracePanel onClose={() => setShowTrace(false)} />}
 
       {/* HITL Confirm Dialog */}
       {confirmRequired && (
