@@ -66,20 +66,20 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     alignItems: 'center',
-    gap: 10,
-    padding: '8px 16px',
-    backgroundColor: 'var(--bg, #1a1a2e)',
-    borderTop: '1px solid var(--rule, #333)',
-    height: 36,
+    gap: 6,
+    padding: '8px 0',
+    backgroundColor: 'transparent',
+    borderTop: 'none',
+    height: 32,
   },
   dots: {
-    display: 'flex',
+    display: 'inline-flex',
     gap: 4,
     alignItems: 'center',
   },
   dot: {
-    width: 8,
-    height: 8,
+    width: 5,
+    height: 5,
     borderRadius: '50%',
     display: 'inline-block',
   },
@@ -88,8 +88,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   text: {
     fontSize: 12,
-    fontWeight: 500,
-    color: 'var(--muted, #888)',
+    color: 'var(--text-secondary)',
   },
 };
 

@@ -1,5 +1,11 @@
 import { marked } from 'marked';
 
+// Configure marked.js — matches original HTML frontend settings
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+});
+
 export function renderMarkdown(text: string): string {
   if (!text) return '';
   let html = marked.parse(text, { async: false }) as string;

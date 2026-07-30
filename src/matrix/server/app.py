@@ -10,7 +10,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..chat import ChatService
@@ -28,16 +28,16 @@ from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
 
-# Pre-load the React SPA index.html at module level
+# Pre-load frontend HTML files
 _INDEX_HTML = ""
+_legacy_path = Path(__file__).parent / "static" / "index.html"
+if _legacy_path.exists():
+    _INDEX_HTML = _legacy_path.read_text(encoding="utf-8")
+
+_REACT_INDEX_HTML = ""
 _react_index_path = Path(__file__).parent / "static" / "react-app" / "index.html"
 if _react_index_path.exists():
-    _INDEX_HTML = _react_index_path.read_text(encoding="utf-8")
-else:
-    # Fallback to legacy HTML frontend
-    _legacy_path = Path(__file__).parent / "static" / "index.html"
-    if _legacy_path.exists():
-        _INDEX_HTML = _legacy_path.read_text(encoding="utf-8")
+    _REACT_INDEX_HTML = _react_index_path.read_text(encoding="utf-8")
 
 
 @asynccontextmanager
@@ -231,12 +231,28 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     # Auth middleware — verify JWT on protected routes
     app.add_middleware(AuthMiddleware)
 
-    # Serve Web UI at root (LAST, so API routes take priority)
+    # Serve React SPA at root (LAST, so API routes take priority)
     @app.get("/", include_in_schema=False)
     async def serve_ui():
-        if _INDEX_HTML:
-            return HTMLResponse(_INDEX_HTML)
-        return HTMLResponse("<h1>Matrix</h1><p>UI not found.</p>", status_code=404)
+        if _REACT_INDEX_HTML:
+            return HTMLResponse(_REACT_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return HTMLResponse("<h1>Matrix</h1><p>React SPA not found.</p>", status_code=404)
+
+    # Serve React SPA at /react-app/
+    @app.get("/react-app/", include_in_schema=False)
+    @app.get("/react-app", include_in_schema=False)
+    async def serve_react_app():
+        if _REACT_INDEX_HTML:
+            return HTMLResponse(_REACT_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return HTMLResponse("<h1>Matrix</h1><p>React SPA not found.</p>", status_code=404)
+
+    # Serve original HTML static assets (marked.min.js)
+    @app.get("/marked.min.js", include_in_schema=False)
+    async def serve_marked():
+        path = Path(__file__).parent / "static" / "marked.min.js"
+        if path.exists():
+            return FileResponse(path, media_type="application/javascript")
+        return HTMLResponse("Not found", status_code=404)
 
     # Mount React SPA static files (assets/) — after all routes
     # NOTE: StaticFiles at "/" overrides the @app.get("/") route in Starlette.

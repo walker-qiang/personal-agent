@@ -18,10 +18,12 @@ PUBLIC_PATHS = {
     "/docs",
     "/redoc",
     "/",
+    "/react-app",
+    "/react-app/",
 }
 
-# Public path prefixes (e.g. /api/trace/stats, /api/trace/sessions)
-PUBLIC_PREFIXES = ("/api/trace",)
+# Public path prefixes (e.g. /api/trace/stats, /api/trace/sessions, /react-app/*)
+PUBLIC_PREFIXES = ("/api/trace", "/react-app/")
 
 # Static file extensions that don't need auth
 PUBLIC_SUFFIXES = {".js", ".css", ".png", ".jpg", ".svg", ".ico", ".woff2", ".map"}

@@ -28,6 +28,7 @@ export interface SessionItem {
 
 export interface SkillItem {
   name: string;
+  title?: string;
   description: string;
   prompt: string;
   workflow: string;

@@ -43,7 +43,7 @@ export const TracePanel: React.FC<Props> = ({ onClose }) => {
     position: 'fixed', top: 0, right: 0, bottom: 0, width,
     background: 'var(--surface)', zIndex: 1000,
     display: 'flex', flexDirection: 'column',
-    boxShadow: '-4px 0 16px rgba(0,0,0,0.3)',
+    boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
     animation: 'slideInRight 0.2s ease',
   };
   const headerStyle: React.CSSProperties = {

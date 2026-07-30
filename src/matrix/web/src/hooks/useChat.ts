@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { Message, ToolCall, ToolResult, AgentStep } from '../types';
-import { buildStreamUrl } from '../utils/api';
+import { buildStreamUrl, api } from '../utils/api';
 
 interface ConfirmAction {
   agent: string;
@@ -19,6 +19,7 @@ export interface RightPanelData {
 export interface UseChatReturn {
   messages: Message[];
   send: (message: string, sessionId: string, fileId?: string) => void;
+  stop: () => void;
   sending: boolean;
   clearMessages: () => void;
   switchSession: (sessionId: string | null) => void;
@@ -312,7 +313,7 @@ export function useChat(): UseChatReturn {
         const lastIdx = updated.length - 1;
         const last = updated[lastIdx];
         if (last && last.role === 'assistant') {
-          updated[lastIdx] = { ...last, isStreaming: false };
+          updated[lastIdx] = { ...last, isStreaming: false, progress: [] };
         }
         return updated;
       });
@@ -332,6 +333,7 @@ export function useChat(): UseChatReturn {
             updated[lastIdx] = {
               ...last,
               isStreaming: false,
+              progress: [],  // Clear progress messages (matches original HTML hideStatus)
               ...(duration ? { duration } : {}),
             };
           }
@@ -366,6 +368,7 @@ export function useChat(): UseChatReturn {
           updated[lastIdx] = {
             ...last,
             isStreaming: false,
+            progress: [],  // Clear progress messages on error too
             error: errorMessage,
           };
         }
@@ -450,6 +453,32 @@ export function useChat(): UseChatReturn {
     [getOrCreateSession, setupEventListeners],
   );
 
+  const stop = useCallback(() => {
+    const sid = activeSessionRef.current;
+    if (!sid) return;
+    const state = sessionStatesRef.current.get(sid);
+    if (state?.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+    // Mark last assistant message as not streaming, keep partial content
+    updateSessionMessages(sid, (prev) => {
+      const updated = [...prev];
+      const lastIdx = updated.length - 1;
+      const last = updated[lastIdx];
+      if (last && last.role === 'assistant') {
+        updated[lastIdx] = {
+          ...last,
+          isStreaming: false,
+          progress: [],
+          ...(last.content ? {} : { content: '（已停止）' }),
+        };
+      }
+      return updated;
+    });
+    updateSessionSending(sid, false);
+  }, [updateSessionMessages, updateSessionSending]);
+
   const switchSession = useCallback((sessionId: string | null) => {
     // Save current session's React-visible state is already in the map
     // (updates via updateSessionMessages keep the map in sync)
@@ -471,6 +500,39 @@ export function useChat(): UseChatReturn {
     setSending(state.sending);
     setConfirmRequired(false);
     setRightPanel({ intent: '', todos: [], artifacts: [], refs: [] });
+
+    // If session has no messages in memory (e.g., page refresh), load from server
+    if (state.messages.length === 0) {
+      api<{ messages: Array<{ role: string; content: string; message_id?: string }> }>(
+        `/sessions/${sessionId}/messages`,
+      )
+        .then((data) => {
+          const msgs = data.messages || [];
+          if (msgs.length === 0) return;
+          // Only proceed if still the active session
+          if (activeSessionRef.current !== sessionId) return;
+
+          const historyMessages: Message[] = msgs.map((m) => ({
+            id: m.message_id || `hist-${Math.random().toString(36).slice(2, 8)}`,
+            role: (m.role as 'user' | 'assistant' | 'system') || 'assistant',
+            content: m.content || '',
+            message_id: m.message_id,
+          }));
+
+          // Update session state
+          const st = sessionStatesRef.current.get(sessionId);
+          if (st) {
+            st.messages = historyMessages;
+            // Only update React state if still active
+            if (activeSessionRef.current === sessionId) {
+              setMessages(historyMessages);
+            }
+          }
+        })
+        .catch(() => {
+          // Silently fail — user will see empty chat
+        });
+    }
   }, [getOrCreateSession]);
 
   const confirm = useCallback(
@@ -518,6 +580,7 @@ export function useChat(): UseChatReturn {
   return {
     messages,
     send,
+    stop,
     sending,
     clearMessages,
     switchSession,

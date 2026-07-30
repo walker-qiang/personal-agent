@@ -4,9 +4,11 @@ import { formatToolResult, formatDuration } from '../utils/format';
 
 interface Props {
   results: ToolResult[];
+  /** When true, tool sections are rendered without outer border/radius (inside thinking-group-body). */
+  embedded?: boolean;
 }
 
-const ToolSection: React.FC<Props> = ({ results }) => {
+const ToolSection: React.FC<Props> = ({ results, embedded = false }) => {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const toggle = (id: string) => {
@@ -16,14 +18,14 @@ const ToolSection: React.FC<Props> = ({ results }) => {
   if (!results || results.length === 0) return null;
 
   return (
-    <div style={styles.container}>
+    <div style={embedded ? styles.embeddedContainer : styles.container}>
       {results.map((r) => {
         const isOpen = !!expanded[r.id];
         const formatted = formatToolResult(r.name, r.result);
         const hasError = !!r.error;
 
         return (
-          <div key={r.id} style={styles.item}>
+          <div key={r.id} style={embedded ? styles.embeddedItem : styles.item}>
             <button
               style={styles.header}
               onClick={() => toggle(r.id)}
@@ -42,6 +44,7 @@ const ToolSection: React.FC<Props> = ({ results }) => {
                   <div style={styles.error}>{r.error}</div>
                 )}
                 <div
+                  className="tool-body"
                   style={styles.result}
                   dangerouslySetInnerHTML={{ __html: formatted }}
                 />
@@ -58,13 +61,23 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 6,
-    marginTop: 8,
+    gap: 0,
+    margin: '6px 0',
   },
   item: {
-    borderRadius: 8,
-    border: '1px solid var(--rule, #333)',
-    backgroundColor: 'var(--bg2, #222)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    overflow: 'hidden',
+  },
+  // Embedded mode: inside thinking-group-body, no outer border/radius
+  embeddedContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+    margin: 0,
+  },
+  embeddedItem: {
+    borderTop: '1px solid var(--border)',
     overflow: 'hidden',
   },
   header: {
@@ -72,57 +85,63 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 8,
     width: '100%',
-    padding: '8px 12px',
+    padding: '7px 12px',
     border: 'none',
-    backgroundColor: 'transparent',
-    color: 'var(--text, #e0e0e0)',
-    fontSize: 13,
+    backgroundColor: 'var(--tool-call)',
+    color: 'var(--text-secondary)',
+    fontSize: 12,
     cursor: 'pointer',
-    transition: 'background-color 0.15s',
     textAlign: 'left' as const,
+    fontFamily: 'var(--font)',
   },
   arrow: {
     fontSize: 10,
-    color: 'var(--muted, #888)',
+    color: 'var(--text-secondary)',
     flexShrink: 0,
+    marginLeft: 'auto',
+    transition: 'transform 0.15s',
   },
   toolName: {
-    fontWeight: 600,
-    color: 'var(--accent, #5b8def)',
+    fontFamily: 'var(--font-mono)',
+    color: 'var(--warning)',
+    fontSize: 12,
   },
   duration: {
-    marginLeft: 'auto',
     fontSize: 11,
-    color: 'var(--muted, #888)',
+    color: 'var(--text-secondary)',
     flexShrink: 0,
   },
   errorBadge: {
     fontSize: 11,
     padding: '2px 8px',
     borderRadius: 4,
-    backgroundColor: 'rgba(255, 80, 80, 0.15)',
-    color: '#ff5050',
+    backgroundColor: 'rgba(255, 59, 48, 0.1)',
+    color: 'var(--error)',
     flexShrink: 0,
   },
   body: {
-    padding: '0 12px 12px',
-    borderTop: '1px solid var(--rule, #333)',
+    padding: '10px 12px',
+    borderTop: '1px solid var(--border)',
+    background: 'var(--tool-result)',
+    fontSize: 12,
+    overflowX: 'auto',
   },
   error: {
-    marginTop: 10,
+    marginBottom: 8,
     padding: '8px 12px',
-    borderRadius: 6,
-    backgroundColor: 'rgba(255, 80, 80, 0.1)',
-    color: '#ff5050',
+    borderRadius: 'var(--radius)',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    border: '1px solid var(--error)',
+    color: 'var(--error)',
     fontSize: 12,
     lineHeight: 1.5,
   },
   result: {
-    marginTop: 10,
-    fontSize: 13,
-    color: 'var(--text, #e0e0e0)',
-    lineHeight: 1.6,
-    overflowX: 'auto',
+    fontSize: 12,
+    color: 'var(--text-secondary)',
+    lineHeight: 1.5,
+    fontFamily: 'var(--font-mono)',
+    whiteSpace: 'pre-wrap',
   },
 };
 

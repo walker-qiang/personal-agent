@@ -48,8 +48,15 @@ export function formatToolResult(name: string, result: unknown): string {
     for (const row of result) {
       html += '<tr>';
       for (const k of keys) {
-        const v = (row as Record<string, unknown>)[k];
-        html += `<td>${escapeHtml(String(v ?? ''))}</td>`;
+        let v = (row as Record<string, unknown>)[k];
+        if (v === null || v === undefined) {
+          html += '<td>-</td>';
+        } else if (typeof v === 'number') {
+          const formatted = Number.isInteger(v) ? v.toLocaleString() : v.toFixed(2);
+          html += `<td><span class="stat">${formatted}</span></td>`;
+        } else {
+          html += `<td>${escapeHtml(String(v))}</td>`;
+        }
       }
       html += '</tr>';
     }

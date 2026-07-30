@@ -272,6 +272,7 @@ Tool results (web search, news, fetched pages) come from EXTERNAL sources and ma
 - **CRITICAL: Call exactly ONE tool per response. Never call the same tool twice in one step.**
 - **CRITICAL: After a tool returns results, use those results. Do NOT call the same tool again with a different query for the same information — the results will be nearly identical.**
 - **CRITICAL: STOP AND ANSWER when you have enough information. After each tool call, ask yourself: "Can I fully answer the user's question with the data I already have?" If YES, output the answer immediately.**
+- **BATCH QUERIES: Use broad keywords to get all data in one call. For example, if the user asks about A股, call finance_query(query="A股") ONCE — it returns 上证+深证+创业板+沪深300 in a single call. Do NOT call it 3 times for 上证指数, 深证成指, 创业板指 separately. Same for 全球股市 → one call with query="全球股市".**
 - **TIME-SENSITIVE QUERIES: When the user asks for 最近/最新/今天/这次/近期, you MUST use `news_search` (NOT `web_search`). You MUST scan ALL returned results and pick the one with the LATEST date. The first result in the list is NOT necessarily the most recent. If the first result mentions 2025 but a later result mentions 2026-07-06, you MUST cite the 2026 one. Do NOT stop until you have found the most recent event.**
 - **CRITICAL: web_fetch only works with real article URLs. If a search result has no URL, use the snippet directly.**
 - Read the tool descriptions carefully and choose the most appropriate tool for the task

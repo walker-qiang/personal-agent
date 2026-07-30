@@ -46,13 +46,13 @@ export const McpPanel: React.FC<Props> = ({ onClose }) => {
   };
 
   const overlayStyle: React.CSSProperties = {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.25)', zIndex: 1000,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
   };
   const modalStyle: React.CSSProperties = {
     background: 'var(--surface)', borderRadius: 12, width: 600, maxHeight: '80vh',
     overflow: 'hidden', display: 'flex', flexDirection: 'column',
-    boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+    boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
   };
   const headerStyle: React.CSSProperties = {
     padding: '16px 20px', borderBottom: '1px solid var(--border)',
