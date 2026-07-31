@@ -256,7 +256,7 @@ def _drain_queue(q, emitted):
 
 ## Fix 4: 会话树前端集成（Phase 7 遗留）
 
-> **实现状态（2026-07-29）**：后端已完成 ✅ — `get_history` 已返回 `message_id`（`store.py`），branch/branches/leaf 三个端点已实现（`sessions.py`）；前端尚未集成 ❌ — `static/index.html` 无 branch 交互代码。
+> **实现状态（2026-07-29）**：后端已完成 ✅ — `get_history` 已返回 `message_id`（`store.py`），branch/branches/leaf 三个端点已实现（`sessions.py`）；前端已实现。
 
 ### 问题
 
@@ -266,7 +266,7 @@ def _drain_queue(q, emitted):
 
 #### 4.1 前端改动点
 
-Matrix 前端是纯 HTML（`static/index.html`），单文件约 2900 行 JS。需要加两个交互：
+Matrix 前端是 React SPA。
 
 **交互 A：消息悬停显示"从这里分叉"按钮**
 
@@ -327,7 +327,7 @@ def get_history(self, session_id, max_turns=8):
 |------|------|
 | `src/matrix/store.py` | `get_history` 返回 `message_id` |
 | `src/matrix/server/routes/sessions.py` | `get_messages` 透传 `message_id` |
-| `src/matrix/server/static/index.html` | 消息渲染存 message_id + hover 分叉按钮 + branch 交互 |
+| `src/matrix/web/src/App.tsx` | 消息渲染存 message_id + hover 分叉按钮 + branch 交互 |
 | `tests/test_server.py` | 会话消息包含 message_id 的测试 |
 
 ---

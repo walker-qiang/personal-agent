@@ -5,7 +5,6 @@ export default defineConfig({
   plugins: [react()],
   build: {
     // Output to react-app subdirectory to avoid overwriting
-    // the pure HTML frontend (static/index.html, marked.min.js)
     outDir: '../server/static/react-app',
     emptyOutDir: true,
   },

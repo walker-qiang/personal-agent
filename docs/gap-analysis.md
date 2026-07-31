@@ -378,7 +378,7 @@ class DeterministicVerifier:
 ### 5.1 现状
 
 - 已有 OTel + JSONL Trace 记录
-- 纯 HTML 前端有 Trace 面板（文本列表 + 详情）
+- React 前端有 Trace 面板（文本列表 + 详情）
 - 但无法可视化回放决策过程
 
 ### 5.2 业界参考
@@ -427,7 +427,7 @@ CREATE TABLE token_usage (
 
 **写入时机**：在 `_service.py` 的 `stream_chat()` 中，每次 LLM 调用完成后，异步写入。
 
-**前端展示**：在纯 HTML 前端底部状态栏增加 Token 计数器，在用户菜单中增加"用量统计"页面。
+**前端展示**：在前端底部状态栏增加 Token 计数器，在用户菜单中增加"用量统计"页面。
 
 **成本换算**：在 `config.py` 中维护各模型的价格表，自动换算为人民币。
 

@@ -2,7 +2,7 @@
 
 ## 概述
 
-Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个落地场景为投资分析员。后端为 Python FastAPI + LangGraph，当前默认前端为 React SPA；旧版纯 HTML 页面仍作为静态兼容资源保留。
+Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个落地场景为投资分析员。后端为 Python FastAPI + LangGraph，当前默认前端为 React SPA。
 
 ## 整体架构
 
@@ -10,10 +10,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 ┌──────────────────────────────────────────────────┐
 │                    前端层                          │
 │  ┌─────────────────────┐  ┌───────────────────┐  │
-│  │ 旧版 HTML 资源        │  │ React SPA (默认 UI) │  │
-│  │ static/index.html    │  │ static/react-app/   │  │
-│  │ 不作为默认入口         │  │ 服务路径: / 和 /react-app│ │
-│  └─────────┬───────────┘  └────────┬──────────┘  │
+│  │         │  │ React SPA (默认 UI) │  ││  │     │  │ static/react-app/   │  ││  │          │  │ 服务路径: / 和 /react-app│ ││  └─────────┬───────────┘  └────────┬──────────┘  │
 └────────────┼───────────────────────┼──────────────┘
              │  HTTP/SSE              │
 ┌────────────┴───────────────────────┴──────────────┐
@@ -62,18 +59,20 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 
 ## 关键设计决策
 
-### React 默认前端与旧版资源并存
+### React SPA 前端
 
-| 维度 | 纯 HTML 前端 | React SPA |
-|------|-------------|-----------|
-| 文件 | `static/index.html` (单文件) | `static/react-app/` (构建产物) |
-| 服务路径 | 不直接提供页面 | `/` 和 `/react-app/` |
-| 定位 | 历史兼容资源 | 当前日常对话交互界面 |
-| 依赖 | 零外部框架（仅 marked.min.js） | React 18 + TypeScript + Vite |
-| 来源 | 手写维护 | `src/matrix/web/` 源码构建 |
-| 构建方式 | 无需构建 | `cd src/matrix/web && npm run build` |
+Matrix 使用 React SPA 作为唯一前端界面。旧版React SPA（/react-app 提供同样内容）已移除。
 
-**重要规则**：React 构建产物输出到 `static/react-app/` 子目录，**不得覆盖** `static/index.html` 和 `static/marked.min.js`。构建产物不纳入 Git，需要在本地执行前端构建。
+| 维度 | React SPA |
+|------|-----------|
+| 文件 | `static/react-app/` (构建产物) |
+| 服务路径 | `/` 和 `/react-app/` |
+| 定位 | 日常对话交互界面 |
+| 依赖 | React 18 + TypeScript + Vite |
+| 来源 | `src/matrix/web/` 源码构建 |
+| 构建方式 | `cd src/matrix/web && npm run build` |
+
+**重要规则**：React 构建产物输出到 `static/react-app/` 子目录。构建产物不纳入 Git，需要在本地执行前端构建。
 
 ### 岗位制 Agent
 
@@ -353,7 +352,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
-| `/` | GET | Web UI（纯 HTML 前端） |
+| `/` | GET | Web UI（React SPA（/react-app 提供同样内容）） |
 | `/healthz` | GET | 健康检查（服务状态、LLM 可用性、provider/model） |
 
 ### 聊天与会话
@@ -445,7 +444,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | LLM | DeepSeek, Anthropic Claude, Agnes |
 | 向量检索 | ChromaDB, sentence-transformers, BM25 |
 | 可观测 | OpenTelemetry (OTLP), SQLite Trace |
-| 前端 (主) | 纯 HTML/CSS/JS, marked.js |
+| 前端 (主) | React 18 + TypeScript + Vite |
 | 前端 (React) | React 18, TypeScript, Vite 5 |
 | 存储 | SQLite (会话), 本地文件系统 (技能) |
 | MCP | mcp>=1.27.0, Playwright |

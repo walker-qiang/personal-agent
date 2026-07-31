@@ -28,12 +28,6 @@ from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
 
-# Pre-load frontend HTML files
-_INDEX_HTML = ""
-_legacy_path = Path(__file__).parent / "static" / "index.html"
-if _legacy_path.exists():
-    _INDEX_HTML = _legacy_path.read_text(encoding="utf-8")
-
 _REACT_INDEX_HTML = ""
 _react_index_path = Path(__file__).parent / "static" / "react-app" / "index.html"
 if _react_index_path.exists():
@@ -261,13 +255,6 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
             return HTMLResponse(_REACT_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return HTMLResponse("<h1>Matrix</h1><p>React SPA not found.</p>", status_code=404)
 
-    # Serve original HTML static assets (marked.min.js)
-    @app.get("/marked.min.js", include_in_schema=False)
-    async def serve_marked():
-        path = Path(__file__).parent / "static" / "marked.min.js"
-        if path.exists():
-            return FileResponse(path, media_type="application/javascript")
-        return HTMLResponse("Not found", status_code=404)
 
     # Mount React SPA static files (assets/) — after all routes
     # NOTE: StaticFiles at "/" overrides the @app.get("/") route in Starlette.
