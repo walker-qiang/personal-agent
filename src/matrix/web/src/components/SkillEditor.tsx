@@ -10,8 +10,8 @@ interface Props {
 
 const SkillEditor: React.FC<Props> = ({ skill, onSave, onClose }) => {
   const [name, setName] = useState(skill?.name || '');
+  const [title, setTitle] = useState(skill?.title || '');
   const [description, setDescription] = useState(skill?.description || '');
-  const [prompt, setPrompt] = useState(skill?.prompt || '');
   const [workflow, setWorkflow] = useState(skill?.workflow || '');
   const [outputFormat, setOutputFormat] = useState(skill?.output_format || '');
   const [error, setError] = useState('');
@@ -30,8 +30,8 @@ const SkillEditor: React.FC<Props> = ({ skill, onSave, onClose }) => {
 
   const handleSave = () => {
     if (!name.trim()) { setError('技能名称不能为空'); return; }
-    if (!prompt.trim()) { setError('提示词不能为空'); return; }
-    onSave({ name: name.trim(), description: description.trim(), prompt: prompt.trim(), workflow: workflow.trim(), output_format: outputFormat.trim() });
+    if (!title.trim()) { setError('技能名称不能为空'); return; }
+    onSave({ name: name.trim(), title: title.trim(), description: description.trim(), workflow: workflow.trim(), output_format: outputFormat.trim() });
   };
 
   const handleOverlayClick = (e: React.MouseEvent) => {
@@ -73,25 +73,27 @@ const SkillEditor: React.FC<Props> = ({ skill, onSave, onClose }) => {
         </div>
 
         <div style={styles.body}>
+          {!isEditing && (
+            <div style={styles.field}>
+              <label style={styles.label}>标识 <span style={styles.hint}>（英文，唯一）</span></label>
+              <input style={styles.input} type="text" placeholder="my-skill" value={name} onChange={e => setName(e.target.value)} autoFocus />
+            </div>
+          )}
           <div style={styles.field}>
             <label style={styles.label}>名称</label>
-            <input style={styles.input} type="text" placeholder="技能名称" value={name} onChange={e => setName(e.target.value)} autoFocus />
+            <input style={styles.input} type="text" placeholder="技能名称" value={title} onChange={e => setTitle(e.target.value)} autoFocus={isEditing} />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>描述</label>
+            <label style={styles.label}>简介 <span style={styles.hint}>（同时也是匹配触发词）</span></label>
             <input style={styles.input} type="text" placeholder="简要描述" value={description} onChange={e => setDescription(e.target.value)} />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>提示词 (prompt)</label>
-            <textarea style={styles.textarea} placeholder="技能提示词内容" value={prompt} onChange={e => setPrompt(e.target.value)} rows={4} />
+            <label style={styles.label}>工作流 <span style={styles.hint}>（每行一步，格式: 1. tool_name()）</span></label>
+            <textarea style={styles.textarea} placeholder={'1. finance.holdings_summary()\n2. finance.bucket_allocation()'} value={workflow} onChange={e => setWorkflow(e.target.value)} rows={5} />
           </div>
           <div style={styles.field}>
-            <label style={styles.label}>工作流 (workflow)</label>
-            <textarea style={styles.textarea} placeholder="工作流定义" value={workflow} onChange={e => setWorkflow(e.target.value)} rows={3} />
-          </div>
-          <div style={styles.field}>
-            <label style={styles.label}>输出格式 (output_format)</label>
-            <input style={styles.input} type="text" placeholder="例如: markdown, json, html" value={outputFormat} onChange={e => setOutputFormat(e.target.value)} />
+            <label style={styles.label}>输出格式</label>
+            <textarea style={styles.textarea} placeholder="- 总资产概览（总额、币种）" value={outputFormat} onChange={e => setOutputFormat(e.target.value)} rows={3} />
           </div>
 
           {isEditing && (
@@ -216,6 +218,7 @@ const styles: Record<string, React.CSSProperties> = {
   body: { flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: 16 },
   field: { display: 'flex', flexDirection: 'column', gap: 6 },
   label: { fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.3px', display: 'block', marginBottom: 6 },
+  hint: { fontWeight: 400, color: 'var(--text-secondary)' },
   input: {
     padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)',
     backgroundColor: 'var(--bg)', color: 'var(--text)',

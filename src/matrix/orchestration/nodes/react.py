@@ -405,7 +405,7 @@ def _execute_single_tool(
         _push_event(cfg, "tool_call", {"name": name, "args": arguments})
 
     try:
-        tool_result = agent_tools.call(name, arguments)
+        tool_result = agent_tools.call(name, arguments, session_id=session_id)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
         # call() returns {"error": ...} on tool execution failures (Phase 2 pipeline).

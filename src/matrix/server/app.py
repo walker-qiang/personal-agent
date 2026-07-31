@@ -104,6 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize RAG retriever if docs path is configured
     app.state.retriever = None
+    app.state.rag_error = ""
     if config.rag_docs_path and Path(config.rag_docs_path).is_dir():
         try:
             from ..rag.embedder import LocalEmbedder
@@ -127,6 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             register_rag_tools(tools_registry, retriever=app.state.retriever)
             logger.info("rag: retriever ready")
         except Exception as exc:
+            app.state.rag_error = str(exc)
             logger.warning("rag: initialization failed (will run without RAG): %s", exc)
 
     # ---- CODE SANDBOX ----
@@ -151,6 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- MCP CLIENT ----
     # Connect to external MCP servers and register their tools
     app.state.mcp_client = None
+    app.state.mcp_error = ""
     try:
         from ..tools.mcp import init_mcp_client, register_mcp_tools
 
@@ -160,18 +163,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.mcp_client = mcp_manager
             logger.info("mcp: %d tools registered", mcp_count)
     except Exception as exc:
+        app.state.mcp_error = str(exc)
         logger.warning("mcp: initialization failed (will run without MCP): %s", exc)
     # ---- END MCP CLIENT ----
 
-    yield
-
-    # ---- Cleanup ----
-    # Disconnect MCP servers on shutdown
-    if app.state.mcp_client is not None:
-        try:
-            app.state.mcp_client.stop()
-        except Exception as exc:
-            logger.warning("mcp: shutdown error: %s", exc)
+    try:
+        yield
+    finally:
+        # ---- Cleanup ----
+        # Disconnect MCP servers on shutdown.
+        if app.state.mcp_client is not None:
+            try:
+                app.state.mcp_client.stop()
+            except Exception as exc:
+                logger.warning("mcp: shutdown error: %s", exc)
+        if getattr(app.state, "chat", None) is not None:
+            try:
+                app.state.chat.close()
+            except Exception as exc:
+                logger.warning("chat: shutdown error: %s", exc)
+        if getattr(app.state, "trace", None) is not None:
+            try:
+                app.state.trace.close()
+            except Exception as exc:
+                logger.warning("trace: shutdown error: %s", exc)
 
 
 def create_app(config: AgentConfig | None = None) -> FastAPI:

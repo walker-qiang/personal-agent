@@ -8,6 +8,7 @@ Default mode is block (tool_block_mode=True).
 from __future__ import annotations
 
 import re
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class ToolGuard:
         self._blacklist: set[str] = set(config.tool_blacklist)
         self._max_args_size = 10240  # 10KB
         self._call_counts: dict[str, int] = {}  # session_id -> count
+        self._lock = threading.Lock()
 
     # ---- instance-based call tracking (for per-session rate limiting) ----
     # Note: this is per-instance, not per-session. For proper per-session
@@ -74,8 +76,9 @@ class ToolGuard:
 
         # Per-session rate limiting (simple counter)
         if session_id:
-            count = self._call_counts.get(session_id, 0) + 1
-            self._call_counts[session_id] = count
+            with self._lock:
+                count = self._call_counts.get(session_id, 0) + 1
+                self._call_counts[session_id] = count
             if count > 100:  # hard limit per session
                 return (False, "tool_rate_limit_exceeded")
 
@@ -83,4 +86,5 @@ class ToolGuard:
 
     def reset_session(self, session_id: str) -> None:
         """Reset call count for a session."""
-        self._call_counts.pop(session_id, None)
+        with self._lock:
+            self._call_counts.pop(session_id, None)

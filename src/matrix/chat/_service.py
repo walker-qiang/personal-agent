@@ -183,8 +183,8 @@ class ChatService:
     def get_provider(self, session_id: str | None = None, user_id: str = "default") -> dict[str, str]:
         """Get the LLM provider and model for a session, falling back to default."""
         if session_id:
-            provider = self.store.get_provider(session_id)
-            model = self.store.get_model(session_id)
+            provider = self.store.get_provider(session_id, user_id=user_id)
+            model = self.store.get_model(session_id, user_id=user_id)
             if provider:
                 return {"provider": provider, "model": model or default_model(provider)}
         return {"provider": self._default_provider, "model": default_model(self._default_provider)}
@@ -203,7 +203,8 @@ class ChatService:
         """
         if provider not in {"deepseek", "anthropic", "agnes"}:
             return {"ok": False, "error": f"unsupported provider: {provider}"}
-        self.store.set_provider(session_id, provider, model, user_id=user_id)
+        if not self.store.set_provider(session_id, provider, model, user_id=user_id):
+            return {"ok": False, "error": "session not found or belongs to another user"}
         return {"ok": True, "provider": provider, "model": model or default_model(provider)}
 
     def _build_llm(self, provider: str, model: str | None = None) -> LLMClient:
@@ -224,18 +225,23 @@ class ChatService:
             )
         return self._llm_cache[cache_key]
 
-    def _get_llm(self, session_id: str | None) -> LLMClient:
+    def _get_llm(self, session_id: str | None, user_id: str = "default") -> LLMClient:
         """Get the LLM client for a session, using stored provider/model."""
         if session_id:
-            provider = self.store.get_provider(session_id)
+            provider = self.store.get_provider(session_id, user_id=user_id)
             if provider:
-                model = self.store.get_model(session_id)
+                model = self.store.get_model(session_id, user_id=user_id)
                 return self._build_llm(provider, model or None)
         return self._default_llm
 
-    def reset(self, session_id: str) -> None:
+    def reset(self, session_id: str, user_id: str = "default") -> bool:
         if session_id:
-            self.store.reset(session_id)
+            # Reset remains idempotent for a session that does not exist,
+            # while refusing to mutate an existing session owned by another user.
+            if self.store.get_session(session_id) is None:
+                return True
+            return self.store.reset(session_id, user_id=user_id)
+        return True
 
     def _load_file_content(self, file_id: str) -> str | dict[str, Any]:
         """Load uploaded file content for injection into chat messages.
@@ -282,6 +288,11 @@ class ChatService:
         started = time.perf_counter()
         sid = session_id or uuid.uuid4().hex
         text = message.strip()
+        if session_id and self.store.get_session(sid, user_id=user_id) is None:
+            if self.store.get_session(sid) is not None:
+                yield {"type": "error", "message": "session not found or belongs to another user"}
+                yield {"type": "done", "session_id": sid, "duration_ms": 0}
+                return
         if not text:
             yield {"type": "error", "message": "message is required"}
             yield {"type": "done", "session_id": sid, "duration_ms": 0}
@@ -326,7 +337,7 @@ class ChatService:
 
         interrupted = False
         try:
-            session_llm = self._get_llm(sid)
+            session_llm = self._get_llm(sid, user_id=user_id)
             logger.debug(
                 "llm_request: provider=%s model=%s message_len=%d",
                 session_llm.provider if hasattr(session_llm, 'provider') else "?",
@@ -362,7 +373,9 @@ class ChatService:
                 self._prune_checkpoints(sid, keep_latest=True)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
 
-    def resume_chat(self, session_id: str, decision: str = "approve") -> Iterator[dict[str, Any]]:
+    def resume_chat(
+        self, session_id: str, decision: str = "approve", user_id: str = "default",
+    ) -> Iterator[dict[str, Any]]:
         """Resume a paused graph after user confirmation.
 
         Args:
@@ -373,11 +386,16 @@ class ChatService:
             SSE events from the resumed graph execution.
         """
         started = time.perf_counter()
-        pending = self._pending_confirms.pop(session_id, None)
+        pending = self._pending_confirms.get(session_id)
         if not pending:
             yield {"type": "error", "message": "no pending confirmation for this session"}
             yield {"type": "done", "session_id": session_id, "duration_ms": 0}
             return
+        if pending.get("user_id") != user_id:
+            yield {"type": "error", "message": "session not found or belongs to another user"}
+            yield {"type": "done", "session_id": session_id, "duration_ms": 0}
+            return
+        self._pending_confirms.pop(session_id, None)
 
         graph_config = pending["config"]
         # Ensure the resumed graph has an event queue for real-time streaming
@@ -752,7 +770,9 @@ class ChatService:
 
     def _get_history(self, session_id: str, user_id: str = "default") -> list[dict[str, str]]:
         """Return conversation history with layered user profile injected as context."""
-        history = self.store.get_history(session_id, self.config.memory_max_turns)
+        history = self.store.get_history(
+            session_id, self.config.memory_max_turns, user_id=user_id,
+        )
         formatted = self.store.get_profile_formatted(user_id)
         if formatted:
             history.insert(0, {"role": "system", "content": formatted})
@@ -761,7 +781,7 @@ class ChatService:
     def _remember(self, session_id: str, question: str, answer: str, user_id: str = "default") -> None:
         self.store.save_message(session_id, "user", question, user_id=user_id)
         self.store.save_message(session_id, "assistant", answer, user_id=user_id)
-        self.store.update_title(session_id, question[:30].strip())
+        self.store.update_title(session_id, question[:30].strip(), user_id=user_id)
         # Extract memories in background thread (non-blocking)
         threading.Thread(
             target=self._extract_memories,
@@ -885,5 +905,3 @@ def _build_default_registry(config: AgentConfig) -> AgentRegistry:
         MEDIA_GENERATOR,
     ])
     return registry
-
-

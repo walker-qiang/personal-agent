@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ...chat import result_count, timestamp
+from ...guardrails.tool_guard import ToolGuardError
 from ...tools import FinanceToolError, ToolRegistry
 
 router = APIRouter()
@@ -36,8 +37,10 @@ async def tools_call(request: Request) -> JSONResponse:
         if not tool:
             raise FinanceToolError("tool is required")
 
+        user_id = getattr(request.state, "user_id", "default")
+        session_id = str(payload.get("session_id", "")).strip() or f"user:{user_id}"
         started = time.perf_counter()
-        result = registry.call(tool, arguments)
+        result = registry.call(tool, arguments, session_id=session_id)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         is_error = isinstance(result, dict) and "error" in result
         trace.record(
@@ -45,6 +48,7 @@ async def tools_call(request: Request) -> JSONResponse:
                 "event_type": "tool_call",
                 "ok": not is_error,
                 "tool_name": tool,
+                "session_id": session_id,
                 "arguments": arguments,
                 "result": str(result)[:500],
                 "elapsed_ms": elapsed_ms,
@@ -60,6 +64,9 @@ async def tools_call(request: Request) -> JSONResponse:
     except json.JSONDecodeError as err:
         _trace_error(request, str(err))
         return JSONResponse({"error": f"invalid json: {err}"}, status_code=400)
+    except ToolGuardError as err:
+        _trace_error(request, str(err))
+        return JSONResponse({"error": str(err)}, status_code=400)
     except Exception as err:
         _trace_error(request, str(err))
         return JSONResponse({"error": str(err)}, status_code=500)

@@ -259,12 +259,20 @@ class SessionStore:
             for r in rows
         ]
 
-    def get_session(self, session_id: str) -> dict[str, Any] | None:
+    def get_session(self, session_id: str, user_id: str = "") -> dict[str, Any] | None:
         with self._lock:
-            row = self._get_conn().execute(
-                "SELECT id, title, created_at, updated_at, msg_count, hidden FROM sessions WHERE id=?",
-                (session_id,),
-            ).fetchone()
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                    "FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                ).fetchone()
+            else:
+                row = self._get_conn().execute(
+                    "SELECT id, title, created_at, updated_at, msg_count, hidden "
+                    "FROM sessions WHERE id=?",
+                    (session_id,),
+                ).fetchone()
         if row is None:
             return None
         return {
@@ -276,27 +284,35 @@ class SessionStore:
             "hidden": bool(row[5]),
         }
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, user_id: str = "") -> bool:
         with self._lock:
-            cur = self._get_conn().execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            if user_id:
+                cur = self._get_conn().execute(
+                    "DELETE FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                )
+            else:
+                cur = self._get_conn().execute("DELETE FROM sessions WHERE id=?", (session_id,))
             self._get_conn().commit()
             return cur.rowcount > 0
 
-    def batch_delete_sessions(self, session_ids: list[str]) -> int:
+    def batch_delete_sessions(self, session_ids: list[str], user_id: str = "") -> int:
         """Delete multiple sessions and their messages. Returns count deleted."""
         if not session_ids:
             return 0
         with self._lock:
             conn = self._get_conn()
             placeholders = ",".join("?" for _ in session_ids)
-            cur = conn.execute(
-                f"DELETE FROM sessions WHERE id IN ({placeholders})",
-                tuple(session_ids),
-            )
+            sql = f"DELETE FROM sessions WHERE id IN ({placeholders})"
+            params: tuple[Any, ...] = tuple(session_ids)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            cur = conn.execute(sql, params)
             conn.commit()
             return cur.rowcount
 
-    def batch_set_hidden(self, session_ids: list[str], hidden: bool = True) -> int:
+    def batch_set_hidden(self, session_ids: list[str], hidden: bool = True, user_id: str = "") -> int:
         """Set hidden (archive) state for multiple sessions. Returns count updated."""
         if not session_ids:
             return 0
@@ -304,53 +320,77 @@ class SessionStore:
         with self._lock:
             conn = self._get_conn()
             placeholders = ",".join("?" for _ in session_ids)
-            cur = conn.execute(
-                f"UPDATE sessions SET hidden=? WHERE id IN ({placeholders})",
-                (val, *session_ids),
-            )
+            sql = f"UPDATE sessions SET hidden=? WHERE id IN ({placeholders})"
+            params: tuple[Any, ...] = (val, *session_ids)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            cur = conn.execute(sql, params)
             conn.commit()
             return cur.rowcount
 
-    def update_title(self, session_id: str, title: str) -> None:
+    def update_title(self, session_id: str, title: str, user_id: str = "") -> None:
         """Set the session title (e.g. from first user message)."""
         with self._lock:
-            self._get_conn().execute(
-                "UPDATE sessions SET title=? WHERE id=? AND (title='' OR title IS NULL)",
-                (title, session_id),
-            )
+            sql = "UPDATE sessions SET title=? WHERE id=? AND (title='' OR title IS NULL)"
+            params: tuple[Any, ...] = (title, session_id)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            self._get_conn().execute(sql, params)
             self._get_conn().commit()
 
     # ---- Provider ----
 
-    def get_provider(self, session_id: str) -> str:
+    def get_provider(self, session_id: str, user_id: str = "") -> str:
         """Get the LLM provider assigned to a session."""
         with self._lock:
-            row = self._get_conn().execute(
-                "SELECT provider FROM sessions WHERE id=?", (session_id,)
-            ).fetchone()
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT provider FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                ).fetchone()
+            else:
+                row = self._get_conn().execute(
+                    "SELECT provider FROM sessions WHERE id=?", (session_id,)
+                ).fetchone()
         return row[0] if row and row[0] else ""
 
-    def get_model(self, session_id: str) -> str:
+    def get_model(self, session_id: str, user_id: str = "") -> str:
         """Get the LLM model assigned to a session."""
         with self._lock:
-            row = self._get_conn().execute(
-                "SELECT model FROM sessions WHERE id=?", (session_id,)
-            ).fetchone()
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT model FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                ).fetchone()
+            else:
+                row = self._get_conn().execute(
+                    "SELECT model FROM sessions WHERE id=?", (session_id,)
+                ).fetchone()
         return row[0] if row and row[0] else ""
 
-    def set_provider(self, session_id: str, provider: str, model: str = "", user_id: str = "") -> None:
+    def set_provider(self, session_id: str, provider: str, model: str = "", user_id: str = "") -> bool:
         """Set the LLM provider and optionally model for a session."""
         with self._lock:
             conn = self._get_conn()
+            if user_id:
+                existing = conn.execute(
+                    "SELECT user_id FROM sessions WHERE id=?", (session_id,)
+                ).fetchone()
+                if existing is not None and existing[0] != user_id:
+                    return False
             conn.execute(
                 "INSERT INTO sessions (id, user_id, provider, model, created_at, updated_at, msg_count) "
                 "VALUES (?, ?, ?, ?, ?, ?, 0) "
                 "ON CONFLICT(id) DO UPDATE SET provider=excluded.provider"
                 + (", model=excluded.model" if model else "")
-                + ", updated_at=excluded.updated_at",
+                + ", updated_at=excluded.updated_at"
+                + ", user_id=CASE WHEN sessions.user_id='' THEN excluded.user_id ELSE sessions.user_id END",
                 (session_id, user_id, provider, model, time.time(), time.time()),
             )
             conn.commit()
+            return True
 
     # ---- Message CRUD ----
 
@@ -366,8 +406,10 @@ class SessionStore:
             conn = self._get_conn()
             # Get current leaf_id for parent
             row = conn.execute(
-                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+                "SELECT leaf_id, user_id FROM sessions WHERE id=?", (session_id,),
             ).fetchone()
+            if row and user_id and row[1] not in ("", user_id):
+                raise ValueError(f"session belongs to another user: {session_id}")
             parent_id = row[0] if row else None
 
             # Upsert session
@@ -377,7 +419,8 @@ class SessionStore:
                 "ON CONFLICT(id) DO UPDATE SET "
                 "  updated_at=excluded.updated_at, "
                 "  msg_count=sessions.msg_count + 1, "
-                "  leaf_id=excluded.leaf_id",
+                "  leaf_id=excluded.leaf_id, "
+                "  user_id=CASE WHEN sessions.user_id='' THEN excluded.user_id ELSE sessions.user_id END",
                 (session_id, user_id, "", now, now, msg_id),
             )
             # Insert message
@@ -389,7 +432,7 @@ class SessionStore:
             conn.commit()
         return msg_id
 
-    def get_history(self, session_id: str, max_turns: int = 8) -> list[dict[str, str]]:
+    def get_history(self, session_id: str, max_turns: int = 8, user_id: str = "") -> list[dict[str, str]]:
         """Return conversation history by traversing from leaf to root.
 
         Walks the parent_id chain from the session's leaf_id backward,
@@ -399,9 +442,15 @@ class SessionStore:
         with self._lock:
             conn = self._get_conn()
             # Get current leaf_id
-            row = conn.execute(
-                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
-            ).fetchone()
+            if user_id:
+                row = conn.execute(
+                    "SELECT leaf_id FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+                ).fetchone()
             if row is None:
                 return []
 
@@ -432,7 +481,7 @@ class SessionStore:
             path.reverse()
             return path
 
-    def branch(self, session_id: str, from_message_id: str) -> bool:
+    def branch(self, session_id: str, from_message_id: str, user_id: str = "") -> bool:
         """Move the session's leaf_id back to a specific message.
 
         This creates a fork point — new messages will be appended as
@@ -444,48 +493,70 @@ class SessionStore:
         """
         with self._lock:
             conn = self._get_conn()
-            row = conn.execute(
-                "SELECT 1 FROM messages WHERE message_id=? AND session_id=?",
-                (from_message_id, session_id),
-            ).fetchone()
+            sql = "SELECT 1 FROM messages WHERE message_id=? AND session_id=?"
+            params: tuple[Any, ...] = (from_message_id, session_id)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            row = conn.execute(sql, params).fetchone()
             if row is None:
                 return False
-            conn.execute(
-                "UPDATE sessions SET leaf_id=?, updated_at=? WHERE id=?",
-                (from_message_id, time.time(), session_id),
-            )
+            sql = "UPDATE sessions SET leaf_id=?, updated_at=? WHERE id=?"
+            params = (from_message_id, time.time(), session_id)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            conn.execute(sql, params)
             conn.commit()
             return True
 
-    def get_leaf_id(self, session_id: str) -> str | None:
+    def get_leaf_id(self, session_id: str, user_id: str = "") -> str | None:
         """Return the current leaf_id for a session."""
         with self._lock:
-            row = self._get_conn().execute(
-                "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
-            ).fetchone()
+            if user_id:
+                row = self._get_conn().execute(
+                    "SELECT leaf_id FROM sessions WHERE id=? AND user_id=?",
+                    (session_id, user_id),
+                ).fetchone()
+            else:
+                row = self._get_conn().execute(
+                    "SELECT leaf_id FROM sessions WHERE id=?", (session_id,),
+                ).fetchone()
             return row[0] if row else None
 
-    def get_branches(self, session_id: str) -> list[dict[str, Any]]:
+    def get_branches(self, session_id: str, user_id: str = "") -> list[dict[str, Any]]:
         """Return all fork points (messages with multiple children) in a session."""
         with self._lock:
-            rows = self._get_conn().execute(
+            sql = (
                 "SELECT parent_id, COUNT(*) as cnt FROM messages "
-                "WHERE session_id=? AND parent_id IS NOT NULL "
-                "GROUP BY parent_id HAVING cnt > 1",
-                (session_id,),
-            ).fetchall()
+                "WHERE session_id=? AND parent_id IS NOT NULL"
+            )
+            params: tuple[Any, ...] = (session_id,)
+            if user_id:
+                sql += " AND user_id=?"
+                params += (user_id,)
+            sql += " GROUP BY parent_id HAVING cnt > 1"
+            rows = self._get_conn().execute(sql, params).fetchall()
             return [{"fork_point": r[0], "branch_count": r[1]} for r in rows]
 
-    def reset(self, session_id: str) -> None:
+    def reset(self, session_id: str, user_id: str = "") -> bool:
         """Delete all messages for a session (keeps session metadata)."""
         with self._lock:
             conn = self._get_conn()
-            conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
-            conn.execute(
-                "UPDATE sessions SET msg_count=0, updated_at=? WHERE id=?",
-                (time.time(), session_id),
-            )
+            where = "session_id=?"
+            params: tuple[Any, ...] = (session_id,)
+            if user_id:
+                where += " AND user_id=?"
+                params += (user_id,)
+            conn.execute(f"DELETE FROM messages WHERE {where}", params)
+            sql = "UPDATE sessions SET msg_count=0, leaf_id=NULL, updated_at=? WHERE id=?"
+            update_params: tuple[Any, ...] = (time.time(), session_id)
+            if user_id:
+                sql += " AND user_id=?"
+                update_params += (user_id,)
+            cur = conn.execute(sql, update_params)
             conn.commit()
+            return cur.rowcount > 0
 
     def prune(self, max_age_days: int = 30) -> int:
         """Delete sessions older than max_age_days. Returns count deleted."""

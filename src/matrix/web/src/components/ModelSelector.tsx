@@ -2,15 +2,24 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../utils/api';
 
 interface Props {
+  sessionId?: string;
   onModelChange?: (model: string) => void;
+}
+
+interface ModelOption {
+  provider: string;
+  id: string;
+  name: string;
+  desc?: string;
 }
 
 interface ModelGroup {
   label: string;
-  models: string[];
+  provider: string;
+  models: ModelOption[];
 }
 
-const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
+const ModelSelector: React.FC<Props> = ({ sessionId, onModelChange }) => {
   const [groups, setGroups] = useState<ModelGroup[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
   const [open, setOpen] = useState(false);
@@ -20,7 +29,7 @@ const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
 
   useEffect(() => {
     loadModels();
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -38,10 +47,8 @@ const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
     try {
       const data = await api<{
         providers?: { id: string; name: string; models: { id: string; name: string; desc?: string }[] }[];
-        image_models?: { provider: string; name: string; models: { id: string }[] }[];
-        video_models?: { provider: string; name: string; models: { id: string }[] }[];
         current?: { provider: string; model: string };
-      }>('/api/provider');
+      }>(`/api/provider${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`);
 
       const groupsList: ModelGroup[] = [];
 
@@ -51,42 +58,19 @@ const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
           if (prov.models && prov.models.length > 0) {
             groupsList.push({
               label: prov.name,
-              models: prov.models.map((m) => m.id),
+              provider: prov.id,
+              models: prov.models.map((m) => ({ ...m, provider: prov.id })),
             });
           }
-        }
-      }
-      // Image models
-      if (data.image_models && data.image_models.length > 0) {
-        const allImageModels: string[] = [];
-        for (const img of data.image_models) {
-          if (img.models && img.models.length > 0) {
-            allImageModels.push(...img.models.map((m) => m.id));
-          }
-        }
-        if (allImageModels.length > 0) {
-          groupsList.push({ label: '图片模型', models: allImageModels });
-        }
-      }
-      // Video models
-      if (data.video_models && data.video_models.length > 0) {
-        const allVideoModels: string[] = [];
-        for (const vid of data.video_models) {
-          if (vid.models && vid.models.length > 0) {
-            allVideoModels.push(...vid.models.map((m) => m.id));
-          }
-        }
-        if (allVideoModels.length > 0) {
-          groupsList.push({ label: '视频模型', models: allVideoModels });
         }
       }
 
       setGroups(groupsList);
       // Set selected model from current or first chat model
-      if (data.current?.model) {
-        setSelectedModel(data.current.model);
+      if (data.current?.provider && data.current?.model) {
+        setSelectedModel(`${data.current.provider}:${data.current.model}`);
       } else if (data.providers && data.providers.length > 0 && data.providers[0].models?.length > 0) {
-        setSelectedModel(data.providers[0].models[0].id);
+        setSelectedModel(`${data.providers[0].id}:${data.providers[0].models[0].id}`);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '加载模型失败';
@@ -96,21 +80,31 @@ const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
     }
   };
 
-  const handleSelect = async (model: string) => {
-    setSelectedModel(model);
+  const handleSelect = async (option: ModelOption) => {
+    const key = `${option.provider}:${option.id}`;
+    if (key === selectedModel) {
+      setOpen(false);
+      return;
+    }
+    setSelectedModel(key);
     setOpen(false);
     try {
       await api('/api/provider', {
         method: 'POST',
-        body: JSON.stringify({ model }),
+        body: JSON.stringify({ provider: option.provider, model: option.id, session_id: sessionId }),
       });
-    } catch {
-      // Silently ignore provider switch errors
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '切换模型失败');
+      await loadModels();
+      return;
     }
-    onModelChange?.(model);
+    onModelChange?.(key);
   };
 
-  const displayName = selectedModel || (loading ? '加载中...' : '选择模型');
+  const selectedOption = groups.flatMap((group) => group.models).find(
+    (option) => `${option.provider}:${option.id}` === selectedModel,
+  );
+  const displayName = selectedOption?.name || (loading ? '加载中...' : '选择模型');
 
   return (
     <div ref={ref} style={styles.container}>
@@ -133,14 +127,15 @@ const ModelSelector: React.FC<Props> = ({ onModelChange }) => {
               <div style={styles.groupLabel}>{group.label}</div>
               {group.models.map((model) => (
                 <button
-                  key={model}
+                  key={`${model.provider}:${model.id}`}
                   style={{
                     ...styles.option,
-                    ...(model === selectedModel ? styles.optionActive : {}),
+                    ...(selectedModel === `${model.provider}:${model.id}` ? styles.optionActive : {}),
                   }}
                   onClick={() => handleSelect(model)}
                 >
-                  {model}
+                  <span>{model.name}</span>
+                  {model.desc && <span style={styles.optionDesc}>{model.desc}</span>}
                 </button>
               ))}
             </div>
@@ -227,6 +222,14 @@ const styles: Record<string, React.CSSProperties> = {
   optionActive: {
     backgroundColor: 'rgba(99,102,241,0.08)',
     color: 'var(--accent)',
+  },
+  optionDesc: {
+    marginLeft: 'auto',
+    color: 'var(--text-secondary)',
+    fontSize: 11,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
   },
 };
 

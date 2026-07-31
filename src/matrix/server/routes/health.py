@@ -21,4 +21,8 @@ async def healthz(request: Request) -> dict:
         "model": config.agent_model,
         "llm_available": config.llm_available,
         "llm_error": config.llm_unavailable_reason,
+        "rag_available": getattr(request.app.state, "retriever", None) is not None,
+        "rag_error": getattr(request.app.state, "rag_error", ""),
+        "mcp_available": getattr(request.app.state, "mcp_client", None) is not None,
+        "mcp_error": getattr(request.app.state, "mcp_error", ""),
     }

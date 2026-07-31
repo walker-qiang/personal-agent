@@ -58,8 +58,19 @@ const App: React.FC = () => {
     if (authenticated) {
       loadSessions();
       loadSkills();
+      if (currentId) {
+        switchSession(currentId);
+      }
     }
-  }, [authenticated, loadSessions, loadSkills]);
+  }, [authenticated, currentId, loadSessions, loadSkills, switchSession]);
+
+  // Refresh the sidebar after a stream completes so implicitly-created
+  // sessions appear immediately, matching the legacy frontend.
+  useEffect(() => {
+    if (authenticated && !sending) {
+      loadSessions();
+    }
+  }, [authenticated, sending, loadSessions]);
 
   // Load branch info when session changes
   useEffect(() => {
@@ -80,6 +91,12 @@ const App: React.FC = () => {
       chatRef.current.scrollTop = chatRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // The legacy frontend opens the right information panel while a request is
+  // running and closes it once the stream finishes.
+  useEffect(() => {
+    setRpanelOpen(sending);
+  }, [sending]);
 
 
 
@@ -134,6 +151,8 @@ const App: React.FC = () => {
   }, [setCurrentId, switchSession]);
 
   const handleBranch = useCallback(async (sessionId: string, messageId?: string) => {
+    if (!messageId) return;
+    if (!window.confirm('从此处分叉新对话？\n旧分支将保留在历史中。')) return;
     try {
       await branch(sessionId, messageId);
       switchSession(null);
@@ -150,6 +169,32 @@ const App: React.FC = () => {
     }
   }, [currentId, handleBranch]);
 
+  const handleRemoveSession = useCallback(async (id: string) => {
+    if (!window.confirm('删除此会话？')) return;
+    await removeSession(id);
+    if (id === currentId) {
+      switchSession(null);
+    }
+  }, [currentId, removeSession, switchSession]);
+
+  const handleBatchDelete = useCallback(async (ids: string[]) => {
+    if (!window.confirm('永久删除 ' + ids.length + ' 个会话？此操作不可恢复。')) return;
+    await batchDelete(ids);
+    if (currentId && ids.includes(currentId)) {
+      switchSession(null);
+    }
+  }, [batchDelete, currentId, switchSession]);
+
+  const handleBatchArchive = useCallback(async (ids: string[]) => {
+    if (!window.confirm('归档 ' + ids.length + ' 个会话？')) return;
+    await batchArchive(ids);
+  }, [batchArchive]);
+
+  const handleBatchUnarchive = useCallback(async (ids: string[]) => {
+    if (!window.confirm('取消归档 ' + ids.length + ' 个会话？')) return;
+    await batchUnarchive(ids);
+  }, [batchUnarchive]);
+
   if (!authenticated) {
     return <LoginOverlay onLogin={login} onRegister={register} error={authError || undefined} />;
   }
@@ -164,12 +209,12 @@ const App: React.FC = () => {
           showArchive={showArchive}
           onSelect={handleSelectSession}
           onCreate={handleNewSession}
-          onDelete={removeSession}
-          onBatchArchive={batchArchive}
-          onBatchUnarchive={batchUnarchive}
-          onBatchDelete={batchDelete}
+          onRefresh={loadSessions}
+          onDelete={handleRemoveSession}
+          onBatchArchive={handleBatchArchive}
+          onBatchUnarchive={handleBatchUnarchive}
+          onBatchDelete={handleBatchDelete}
           onToggleArchive={toggleArchive}
-          onBranch={(id) => handleBranch(id)}
           username={username}
           onLogout={logout}
           onQuickSend={handleQuickSend}
@@ -239,6 +284,18 @@ const App: React.FC = () => {
             maxWidth: 860, margin: '0 auto', width: '100%',
             padding: '0 20px', display: 'flex', flexDirection: 'column', gap: 20,
           }}>
+            {branchCount > 0 && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '8px 12px', margin: '0 0 8px',
+                fontSize: 12, color: 'var(--text-secondary)',
+                borderBottom: '1px solid var(--border)',
+              }}>
+                <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{branchCount} 个分叉点</span>
+                <span>此会话有多个对话分支，悬停消息可从此处分叉</span>
+                <span>旧分支保留在历史中</span>
+              </div>
+            )}
             {showBranchBanner && <BranchBanner onClose={() => setShowBranchBanner(false)} />}
             {messages.length === 0 && !showBranchBanner && (
               <div style={{ flex: 1 }} />
@@ -287,7 +344,7 @@ const App: React.FC = () => {
                 color: 'var(--text)', outline: 'none',
               }}
             />
-            <ModelSelector />
+            <ModelSelector sessionId={currentId || undefined} />
             {sending ? (
               <button
                 onClick={stop}
@@ -367,7 +424,7 @@ const App: React.FC = () => {
             if (editingSkill) {
               await updateSkill(editingSkill.name, data);
             } else {
-              await createSkill(data.name || '', data.description || '', data.prompt || '', data.workflow || '', data.output_format || '');
+              await createSkill(data.name || '', data.title || '', data.description || '', data.workflow || '', data.output_format || '');
             }
             setShowSkillEditor(false);
             setEditingSkill(null);

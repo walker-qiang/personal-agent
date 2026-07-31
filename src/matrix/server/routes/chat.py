@@ -136,7 +136,7 @@ async def chat_confirm(request: Request):
         )
 
     def iter_events():
-        for event in chat_service.resume_chat(session_id, decision):
+        for event in chat_service.resume_chat(session_id, decision, user_id=_get_user_id(request)):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)
@@ -160,7 +160,7 @@ async def chat_confirm_get(
         decision = "approve"
 
     def iter_events():
-        for event in chat_service.resume_chat(session_id, decision):
+        for event in chat_service.resume_chat(session_id, decision, user_id=_get_user_id(request)):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)
@@ -175,7 +175,8 @@ async def reset_get(
 ):
     chat_service: ChatService = request.app.state.chat
     session_id = session_id.strip()
-    chat_service.reset(session_id)
+    if session_id and not chat_service.reset(session_id, user_id=_get_user_id(request)):
+        return JSONResponse({"error": "session not found"}, status_code=404)
     return JSONResponse({"ok": True})
 
 
@@ -187,7 +188,8 @@ async def reset_post(request: Request):
         if not isinstance(payload, dict):
             raise FinanceToolError("request body must be an object")
         session_id = str(payload.get("session_id", "")).strip()
-        chat_service.reset(session_id)
+        if session_id and not chat_service.reset(session_id, user_id=_get_user_id(request)):
+            return JSONResponse({"error": "session not found"}, status_code=404)
         return JSONResponse({"ok": True})
     except (FinanceToolError, json.JSONDecodeError) as err:
         _trace_error(request, str(err))

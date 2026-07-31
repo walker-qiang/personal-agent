@@ -23,8 +23,17 @@ export function useSessions() {
   const load = useCallback(async () => {
     const data = await api<{ sessions?: Record<string, unknown>[] } | Record<string, unknown>[]>(`/sessions?include_hidden=${showArchive}`);
     const rawList = Array.isArray(data) ? data : (data?.sessions || []);
-    const list: SessionItem[] = (rawList as Record<string, unknown>[]).map((s) => ({
-      id: s.id as string,
+    const list: SessionItem[] = await Promise.all((rawList as Record<string, unknown>[]).map(async (s) => {
+      const id = s.id as string;
+      let branchCount = 0;
+      try {
+        const branchData = await api<{ branches?: unknown[] }>(`/sessions/${id}/branches`);
+        branchCount = branchData.branches?.length || 0;
+      } catch {
+        // A missing or inaccessible branch listing must not hide the session.
+      }
+      return {
+      id,
       title: s.title as string,
       // Backend returns Unix timestamps (seconds) as numbers; convert to ISO strings
       created_at: typeof s.created_at === 'number' ? new Date(s.created_at * 1000).toISOString() : (s.created_at as string),
@@ -32,6 +41,8 @@ export function useSessions() {
       // Backend returns 'turn_count'; frontend uses 'turns'
       turns: (typeof s.turn_count === 'number' ? s.turn_count : s.turns) as number,
       hidden: s.hidden as boolean | undefined,
+      branch_count: branchCount,
+      };
     }));
     setSessions(list);
   }, [showArchive]);

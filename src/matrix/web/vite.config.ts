@@ -19,6 +19,7 @@ export default defineConfig({
       '/reset': 'http://127.0.0.1:7101',
       '/sessions': 'http://127.0.0.1:7101',
       '/skills': 'http://127.0.0.1:7101',
+      '/mcp': 'http://127.0.0.1:7101',
     },
   },
 });

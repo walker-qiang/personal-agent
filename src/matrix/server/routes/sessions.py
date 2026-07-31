@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
@@ -33,9 +33,9 @@ async def get_session(request: Request, session_id: str):
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    session = store.get_session(session_id)
+    session = store.get_session(session_id, user_id=_get_user_id(request))
     if session is None:
-        return {"error": "session not found"}, 404
+        raise HTTPException(status_code=404, detail="session not found")
     return {"session": session}
 
 
@@ -45,9 +45,9 @@ async def delete_session(request: Request, session_id: str):
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    deleted = store.delete_session(session_id)
+    deleted = store.delete_session(session_id, user_id=_get_user_id(request))
     if not deleted:
-        return {"error": "session not found"}, 404
+        raise HTTPException(status_code=404, detail="session not found")
     return {"ok": True}
 
 
@@ -60,8 +60,8 @@ async def batch_delete_sessions(request: Request):
     payload = await request.json()
     session_ids = payload.get("session_ids", [])
     if not isinstance(session_ids, list) or not session_ids:
-        return {"error": "session_ids must be a non-empty list"}, 400
-    count = store.batch_delete_sessions(session_ids)
+        raise HTTPException(status_code=400, detail="session_ids must be a non-empty list")
+    count = store.batch_delete_sessions(session_ids, user_id=_get_user_id(request))
     return {"ok": True, "deleted": count}
 
 
@@ -74,8 +74,8 @@ async def batch_archive_sessions(request: Request):
     payload = await request.json()
     session_ids = payload.get("session_ids", [])
     if not isinstance(session_ids, list) or not session_ids:
-        return {"error": "session_ids must be a non-empty list"}, 400
-    count = store.batch_set_hidden(session_ids, hidden=True)
+        raise HTTPException(status_code=400, detail="session_ids must be a non-empty list")
+    count = store.batch_set_hidden(session_ids, hidden=True, user_id=_get_user_id(request))
     return {"ok": True, "archived": count}
 
 
@@ -88,8 +88,8 @@ async def batch_unarchive_sessions(request: Request):
     payload = await request.json()
     session_ids = payload.get("session_ids", [])
     if not isinstance(session_ids, list) or not session_ids:
-        return {"error": "session_ids must be a non-empty list"}, 400
-    count = store.batch_set_hidden(session_ids, hidden=False)
+        raise HTTPException(status_code=400, detail="session_ids must be a non-empty list")
+    count = store.batch_set_hidden(session_ids, hidden=False, user_id=_get_user_id(request))
     return {"ok": True, "unarchived": count}
 
 
@@ -99,7 +99,11 @@ async def get_messages(request: Request, session_id: str):
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    messages = store.get_history(session_id, max_turns=999)
+    messages = store.get_history(
+        session_id, max_turns=999, user_id=_get_user_id(request),
+    )
+    if not messages and store.get_session(session_id, user_id=_get_user_id(request)) is None:
+        raise HTTPException(status_code=404, detail="session not found")
     return {"messages": messages}
 
 
@@ -117,14 +121,12 @@ async def branch_session(request: Request, session_id: str):
     payload = await request.json()
     from_message_id = str(payload.get("from_message_id", "")).strip()
     if not from_message_id:
-        return JSONResponse(
-            {"error": "from_message_id is required"}, status_code=400,
-        )
-    ok = store.branch(session_id, from_message_id)
+        raise HTTPException(status_code=400, detail="from_message_id is required")
+    ok = store.branch(session_id, from_message_id, user_id=_get_user_id(request))
     if not ok:
-        return JSONResponse(
-            {"error": f"Message {from_message_id} not found in session {session_id}"},
+        raise HTTPException(
             status_code=404,
+            detail=f"Message {from_message_id} not found in session {session_id}",
         )
     return {"session_id": session_id, "leaf_id": from_message_id, "branched": True}
 
@@ -135,7 +137,9 @@ async def get_branches(request: Request, session_id: str):
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    branches = store.get_branches(session_id)
+    branches = store.get_branches(session_id, user_id=_get_user_id(request))
+    if not branches and store.get_session(session_id, user_id=_get_user_id(request)) is None:
+        raise HTTPException(status_code=404, detail="session not found")
     return {"session_id": session_id, "branches": branches}
 
 
@@ -145,7 +149,9 @@ async def get_leaf(request: Request, session_id: str):
     from ...store import SessionStore
 
     store: SessionStore = request.app.state.chat.store
-    leaf_id = store.get_leaf_id(session_id)
+    leaf_id = store.get_leaf_id(session_id, user_id=_get_user_id(request))
+    if leaf_id is None and store.get_session(session_id, user_id=_get_user_id(request)) is None:
+        raise HTTPException(status_code=404, detail="session not found")
     return {"session_id": session_id, "leaf_id": leaf_id}
 
 
@@ -213,16 +219,16 @@ async def create_skill(request: Request):
     domain = str(payload.get("domain", "investment")).strip() or "investment"
 
     if not name or not title:
-        return {"error": "name and title are required"}, 400
+        raise HTTPException(status_code=400, detail="name and title are required")
 
     safe_name = "".join(c for c in name if c.isalnum() or c in "_-").lower()
     if not safe_name:
-        return {"error": "invalid name"}, 400
+        raise HTTPException(status_code=400, detail="invalid name")
 
     skills_dir = _get_skills_domain_dir(request, domain)
     skill_dir = skills_dir / safe_name
     if skill_dir.exists():
-        return {"error": "skill already exists"}, 409
+        raise HTTPException(status_code=409, detail="skill already exists")
 
     skill = SkillDefinition(
         name=safe_name,
@@ -249,7 +255,7 @@ async def update_skill(request: Request, skill_name: str):
 
     skills_dir = _get_skills_domain_dir(request, domain)
     if not (skills_dir / skill_name).is_dir():
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
 
     skill = SkillDefinition(
         name=skill_name,
@@ -272,7 +278,7 @@ async def delete_skill(request: Request, skill_name: str):
     domain = str(request.query_params.get("domain", "investment")).strip() or "investment"
     skills_dir = _get_skills_domain_dir(request, domain)
     if not (skills_dir / skill_name).is_dir():
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     delete_skill_dir(skills_dir, skill_name)
     chat.agent_registry.reload_skills()
     return {"ok": True}
@@ -301,7 +307,7 @@ async def list_knowledge(request: Request, skill_name: str):
 
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     knowledge = SkillDefinition.read_knowledge_static(skill_dir)
     return {"knowledge": knowledge}
 
@@ -314,7 +320,7 @@ async def write_knowledge(request: Request, skill_name: str, filename: str):
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
 
     payload = await request.json()
     content = str(payload.get("content", ""))
@@ -330,7 +336,7 @@ async def get_knowledge_file(request: Request, skill_name: str, filename: str):
 
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     content = SkillDefinition.read_knowledge_file_static(skill_dir, filename)
     return {"filename": filename, "content": content}
 
@@ -343,7 +349,7 @@ async def remove_knowledge(request: Request, skill_name: str, filename: str):
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     delete_knowledge(skill_dir.parent, skill_name, filename)
     chat.agent_registry.reload_skills()
     return {"ok": True}
@@ -356,7 +362,7 @@ async def get_script_file(request: Request, skill_name: str, filename: str):
 
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     content = SkillDefinition.read_script_static(skill_dir, filename)
     return {"filename": filename, "content": content}
 
@@ -369,7 +375,7 @@ async def write_script(request: Request, skill_name: str, filename: str):
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
 
     payload = await request.json()
     content = str(payload.get("content", ""))
@@ -386,7 +392,7 @@ async def remove_script(request: Request, skill_name: str, filename: str):
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
-        return {"error": "skill not found"}, 404
+        raise HTTPException(status_code=404, detail="skill not found")
     delete_script(skill_dir.parent, skill_name, filename)
     chat.agent_registry.reload_skills()
     return {"ok": True}

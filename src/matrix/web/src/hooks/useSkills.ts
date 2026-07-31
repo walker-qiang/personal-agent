@@ -18,8 +18,8 @@ export interface UseSkillsReturn {
   load: () => Promise<void>;
   create: (
     name: string,
+    title: string,
     description: string,
-    prompt: string,
     workflow: string,
     output_format: string,
   ) => Promise<SkillItem | null>;
@@ -48,8 +48,8 @@ export function useSkills(): UseSkillsReturn {
   const create = useCallback(
     async (
       name: string,
+      title: string,
       description: string,
-      prompt: string,
       workflow: string,
       output_format: string,
     ): Promise<SkillItem | null> => {
@@ -58,9 +58,11 @@ export function useSkills(): UseSkillsReturn {
         headers: getAuthHeaders(),
         body: JSON.stringify({
           name,
-          title: name,
+          title,
           description,
+          workflow,
           domain: 'investment',
+          output_format,
         }),
       });
       if (!res.ok) {

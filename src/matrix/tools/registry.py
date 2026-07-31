@@ -46,7 +46,12 @@ class ToolRegistry:
         """Return the set of registered tool names."""
         return set(self._tools.keys())
 
-    def call(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
         """Invoke a tool through the five-step pipeline.
 
         Returns a result dict. Errors are encoded as {"error": "..."}.
@@ -74,16 +79,23 @@ class ToolRegistry:
 
         # Step 3: beforeToolCall — ToolGuard + CodeGuard
         if self._guard:
-            from ..guardrails.tool_guard import ToolGuardError
-            ok, reason = self._guard.check(name, args)
+            ok, reason = self._guard.check(name, args, session_id=session_id)
             if not ok:
-                raise ToolGuardError(f"tool blocked: {reason}")
+                return {
+                    "error": (
+                        f"工具 {name} 被安全策略拦截: {reason}。"
+                        "请调整参数或改用其他工具。"
+                    )
+                }
 
         if self._code_guard:
             from ..guardrails.tool_guard import ToolGuardError
             ok, reason = self._code_guard.check(name, args)
             if not ok:
-                raise ToolGuardError(f"code blocked: {reason}")
+                raise ToolGuardError(
+                    f"code blocked: 工具 {name} 被代码安全策略拦截: {reason}。"
+                    "请移除危险代码后重试。"
+                )
 
         # Step 4: execute + truncate
         try:

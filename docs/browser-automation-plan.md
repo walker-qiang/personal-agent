@@ -363,19 +363,19 @@ def validate_url(url: str) -> tuple[bool, str]:
 
 ```toml
 [project.optional-dependencies]
-browser = ["playwright>=1.40.0"]
+browser = ["playwright>=1.40.0", "mcp>=1.27.0"]
 ```
 
 安装步骤：
 ```bash
-# 1. 安装 Playwright Python 包
-pip install playwright
+# 安装浏览器 MCP 所需依赖
+pip install -e ".[browser]"
 
-# 2. 安装 Chromium 浏览器二进制文件
+# 安装 Chromium 浏览器二进制文件
 playwright install chromium
 ```
 
-> Playwright 不加入主项目依赖，只在 MCP 服务器进程中使用。
+> Playwright 和 MCP 不加入主项目基础依赖，只在浏览器 MCP 服务器进程中使用。
 > 如果未安装 Playwright，MCP 服务器启动时会优雅降级并记录警告日志。
 
 ---

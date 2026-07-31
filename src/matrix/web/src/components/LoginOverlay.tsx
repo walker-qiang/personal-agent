@@ -10,6 +10,7 @@ const LoginOverlay: React.FC<Props> = ({ onLogin, onRegister, error }) => {
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState('');
 
@@ -20,6 +21,16 @@ const LoginOverlay: React.FC<Props> = ({ onLogin, onRegister, error }) => {
     if (!username.trim() || !password.trim()) {
       setLocalError('用户名和密码不能为空');
       return;
+    }
+    if (tab === 'register') {
+      if (password.length < 4) {
+        setLocalError('密码至少4位');
+        return;
+      }
+      if (password !== passwordConfirm) {
+        setLocalError('两次输入的密码不一致');
+        return;
+      }
     }
     setLoading(true);
     setLocalError('');
@@ -86,6 +97,16 @@ const LoginOverlay: React.FC<Props> = ({ onLogin, onRegister, error }) => {
             onChange={(e) => setPassword(e.target.value)}
             onKeyDown={handleKeyDown}
           />
+          {tab === 'register' && (
+            <input
+              style={styles.input}
+              type="password"
+              placeholder="确认密码"
+              value={passwordConfirm}
+              onChange={(e) => setPasswordConfirm(e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+          )}
 
           {displayError && (
             <div style={styles.error}>{displayError}</div>

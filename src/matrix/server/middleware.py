@@ -22,8 +22,8 @@ PUBLIC_PATHS = {
     "/react-app/",
 }
 
-# Public path prefixes (e.g. /api/trace/stats, /api/trace/sessions, /react-app/*)
-PUBLIC_PREFIXES = ("/api/trace", "/react-app/")
+# The SPA assets are public; API data, including Trace, still requires JWT.
+PUBLIC_PREFIXES = ("/react-app/",)
 
 # Static file extensions that don't need auth
 PUBLIC_SUFFIXES = {".js", ".css", ".png", ".jpg", ".svg", ".ico", ".woff2", ".map"}
@@ -42,7 +42,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in PUBLIC_PATHS:
             return await call_next(request)
 
-        # Allow public path prefixes (e.g. /api/trace/*)
+        # Allow public frontend asset prefixes only.
         if path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
 

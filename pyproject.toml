@@ -6,8 +6,11 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "langgraph>=0.6.0",
+    "langgraph-checkpoint-sqlite>=3.0.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.6",
+    "bcrypt>=4.0.0",
+    "PyJWT>=2.8.0",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +25,7 @@ mcp = [
 ]
 browser = [
     "playwright>=1.40.0",
+    "mcp>=1.27.0",
 ]
 
 [project.scripts]

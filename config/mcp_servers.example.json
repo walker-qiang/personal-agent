@@ -29,6 +29,19 @@
       "transport": "http",
       "url": "http://localhost:3000/mcp",
       "enabled": false
+    },
+    {
+      "name": "browser",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["var/mcp/browser_tools.py"],
+      "enabled": false,
+      "timeout": 120.0,
+      "env": {
+        "BROWSER_HEADLESS": "true",
+        "BROWSER_DEFAULT_TIMEOUT": "30000",
+        "BROWSER_MAX_OUTPUT_CHARS": "20000"
+      }
     }
   ]
 }

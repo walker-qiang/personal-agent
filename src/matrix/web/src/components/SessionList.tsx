@@ -8,12 +8,12 @@ interface Props {
   showArchive: boolean;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onRefresh: () => void;
   onDelete: (id: string) => void;
   onBatchArchive: (ids: string[]) => void;
   onBatchUnarchive: (ids: string[]) => void;
   onBatchDelete: (ids: string[]) => void;
   onToggleArchive: () => void;
-  onBranch: (id: string, messageId?: string) => void;
   onQuickSend?: (question: string) => void;
   username?: string;
   onLogout?: () => void;
@@ -23,9 +23,9 @@ interface Props {
 
 const SessionList: React.FC<Props> = ({
   sessions, currentId, showArchive,
-    onSelect, onCreate, onDelete,
+    onSelect, onCreate, onRefresh, onDelete,
     onBatchArchive, onBatchUnarchive, onBatchDelete,
-    onToggleArchive, onBranch, onQuickSend,
+    onToggleArchive, onQuickSend,
   username, onLogout, onOpenSkillEditor, onOpenMcp,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
@@ -65,11 +65,6 @@ const SessionList: React.FC<Props> = ({
 
   const handleDelete = (id: string) => {
     onDelete(id);
-    closeContextMenu();
-  };
-
-  const handleBranch = (id: string) => {
-    onBranch(id);
     closeContextMenu();
   };
 
@@ -148,7 +143,8 @@ const SessionList: React.FC<Props> = ({
               width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               strokeWidth="2" strokeLinecap="round"
               style={{ color: 'var(--text-secondary)', opacity: 0.4, cursor: 'pointer', flexShrink: 0 }}
-              onClick={onCreate}
+              aria-label="刷新会话列表"
+              onClick={onRefresh}
             >
               <polyline points="23 4 23 10 17 10" />
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
@@ -215,9 +211,6 @@ const SessionList: React.FC<Props> = ({
 
       {contextMenu && (
         <div style={{ ...styles.contextMenu, left: contextMenu.x, top: contextMenu.y }}>
-          <button style={styles.contextMenuItem} onClick={() => handleBranch(contextMenu.id)}>
-            从此处分叉
-          </button>
           <button style={{ ...styles.contextMenuItem, color: '#ff5050' }} onClick={() => handleDelete(contextMenu.id)}>
             删除会话
           </button>
