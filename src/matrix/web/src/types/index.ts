@@ -73,6 +73,8 @@ export interface Message {
   agentChain?: AgentStep[];
   duration?: string;
   error?: string;
+  /** Set when the reply was cut short by a page refresh mid-stream. */
+  interrupted?: boolean;
   isStreaming?: boolean;
   thinking?: string[];
   progress?: string[];

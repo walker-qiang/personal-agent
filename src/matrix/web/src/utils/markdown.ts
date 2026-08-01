@@ -1,10 +1,22 @@
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 // Configure marked.js — matches original HTML frontend settings
 marked.setOptions({
   breaks: true,
   gfm: true,
 });
+
+// Allow the extra tags/attrs produced by renderMarkdown / formatToolResult,
+// on top of DOMPurify's default allow-list.
+const PURIFY_CONFIG = {
+  ADD_TAGS: ['video', 'source'],
+  ADD_ATTR: ['controls', 'preload', 'target', 'rel'],
+};
+
+export function sanitizeHtml(html: string): string {
+  return DOMPurify.sanitize(html, PURIFY_CONFIG) as string;
+}
 
 export function renderMarkdown(text: string): string {
   if (!text) return '';
@@ -25,5 +37,5 @@ export function renderMarkdown(text: string): string {
     },
   );
 
-  return html;
+  return sanitizeHtml(html);
 }

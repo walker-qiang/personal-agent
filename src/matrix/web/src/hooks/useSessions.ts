@@ -23,15 +23,8 @@ export function useSessions() {
   const load = useCallback(async () => {
     const data = await api<{ sessions?: Record<string, unknown>[] } | Record<string, unknown>[]>(`/sessions?include_hidden=${showArchive}`);
     const rawList = Array.isArray(data) ? data : (data?.sessions || []);
-    const list: SessionItem[] = await Promise.all((rawList as Record<string, unknown>[]).map(async (s) => {
+    const list: SessionItem[] = (rawList as Record<string, unknown>[]).map((s) => {
       const id = s.id as string;
-      let branchCount = 0;
-      try {
-        const branchData = await api<{ branches?: unknown[] }>(`/sessions/${id}/branches`);
-        branchCount = branchData.branches?.length || 0;
-      } catch {
-        // A missing or inaccessible branch listing must not hide the session.
-      }
       return {
       id,
       title: s.title as string,
@@ -41,22 +34,12 @@ export function useSessions() {
       // Backend returns 'turn_count'; frontend uses 'turns'
       turns: (typeof s.turn_count === 'number' ? s.turn_count : s.turns) as number,
       hidden: s.hidden as boolean | undefined,
-      branch_count: branchCount,
+      // Backend computes branch_count inline (no extra per-session request).
+      branch_count: (s.branch_count as number | undefined) ?? 0,
       };
-    }));
+    });
     setSessions(list);
   }, [showArchive]);
-
-  const create = useCallback(async (): Promise<SessionItem | null> => {
-    // Sessions are created implicitly on the server when the first
-    // chat message is sent. Generate a client-side ID and set it.
-    const id = 'web-' + Math.random().toString(36).slice(2, 8);
-    const now = Date.now() / 1000;
-    const session: SessionItem = { id, title: '新会话', created_at: new Date(now * 1000).toISOString(), updated_at: new Date(now * 1000).toISOString(), turns: 0, hidden: false };
-    setSessions((prev) => [session, ...prev]);
-    setCurrentId(id);
-    return session;
-  }, [setCurrentId]);
 
   const remove = useCallback(async (id: string) => {
     await api(`/sessions/${id}`, { method: 'DELETE' });
@@ -117,7 +100,7 @@ export function useSessions() {
 
   return {
     sessions, currentId, setCurrentId, showArchive,
-    load, create, remove,
+    load, remove,
     batchArchive, batchUnarchive, batchDelete,
     toggleArchive, branch,
   };

@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from .stream_ticket import StreamTicketStore
 
 from ..chat import ChatService
 from ..config import AgentConfig, load_config
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.tools = tools_registry
     app.state.trace = trace
     app.state.guardrails = guardrails
+    app.state.stream_tickets = StreamTicketStore()
     app.state.chat = ChatService(
         config, tools_registry, trace,
         output_guard=guardrails.output,

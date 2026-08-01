@@ -148,6 +148,10 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
         <div style={styles.duration}>{message.duration}</div>
       )}
 
+      {message.interrupted && (
+        <div style={styles.interrupted}>回答因页面刷新被中断</div>
+      )}
+
       {message.progress && message.progress.length > 0 && (
         <div style={styles.progressSection}>
           {message.progress.map((p, i) => (
@@ -184,6 +188,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   error: { marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius)', backgroundColor: 'rgba(239,68,68,0.1)', border: '1px solid var(--error)', color: 'var(--error)', fontSize: 13 },
   duration: { marginTop: 6, fontSize: 11, color: 'var(--text-secondary)', opacity: 0.6 },
+  interrupted: { marginTop: 6, fontSize: 11, color: 'var(--error)', opacity: 0.8 },
   branchBtn: {
     width: 28, height: 28, borderRadius: 6, border: '1px solid var(--border)',
     backgroundColor: 'var(--surface)', color: 'var(--text-secondary)',

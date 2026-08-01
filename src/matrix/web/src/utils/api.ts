@@ -56,15 +56,24 @@ export async function api<T = unknown>(
 export function buildStreamUrl(
   message: string,
   sessionId: string,
+  ticket: string,
   fileId?: string,
 ): string {
   const params = new URLSearchParams({
     message,
     session_id: sessionId,
-    token: getToken() || '',
+    ticket,
   });
   if (fileId) {
     params.set('file_id', fileId);
   }
   return `/chat/stream?${params.toString()}`;
+}
+
+/** Exchange the JWT (sent via Authorization header) for a one-time SSE ticket. */
+export async function fetchStreamTicket(): Promise<string> {
+  const data = await api<{ ticket: string }>('/api/auth/stream-ticket', {
+    method: 'POST',
+  });
+  return data.ticket;
 }

@@ -23,6 +23,9 @@ export function useResizable(options: UseResizableOptions) {
   const dragging = useRef(false);
   const startX = useRef(0);
   const startW = useRef(0);
+  // Keep latest width in a ref so mouseup doesn't need `width` in deps.
+  const widthRef = useRef(width);
+  widthRef.current = width;
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -46,7 +49,7 @@ export function useResizable(options: UseResizableOptions) {
       dragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      localStorage.setItem(storageKey, String(width));
+      localStorage.setItem(storageKey, String(widthRef.current));
     };
 
     window.addEventListener('mousemove', onMouseMove);
@@ -55,7 +58,7 @@ export function useResizable(options: UseResizableOptions) {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [minWidth, maxWidth, storageKey, direction, width]);
+  }, [minWidth, maxWidth, storageKey, direction]);
 
   return { width, onMouseDown };
 }

@@ -220,31 +220,40 @@ class SessionStore:
         By default excludes hidden (archived) sessions. Set include_hidden=True
         to show all sessions.
         """
+        # branch_count: number of fork points (parent messages with >1 child)
+        # computed inline so the frontend doesn't need one request per session.
+        branch_subquery = (
+            "SELECT COUNT(*) FROM ("
+            "  SELECT parent_id FROM messages "
+            "  WHERE session_id=sessions.id AND parent_id IS NOT NULL"
+            "  GROUP BY parent_id HAVING COUNT(*) > 1"
+            ")"
+        )
+        base_select = (
+            "SELECT id, title, created_at, updated_at, msg_count, hidden, "
+            f"({branch_subquery}) FROM sessions"
+        )
         with self._lock:
             if user_id:
                 if include_hidden:
                     rows = self._get_conn().execute(
-                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
-                        "FROM sessions WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+                        base_select + " WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
                         (user_id, limit),
                     ).fetchall()
                 else:
                     rows = self._get_conn().execute(
-                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
-                        "FROM sessions WHERE user_id=? AND hidden=0 ORDER BY updated_at DESC LIMIT ?",
+                        base_select + " WHERE user_id=? AND hidden=0 ORDER BY updated_at DESC LIMIT ?",
                         (user_id, limit),
                     ).fetchall()
             else:
                 if include_hidden:
                     rows = self._get_conn().execute(
-                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
-                        "FROM sessions ORDER BY updated_at DESC LIMIT ?",
+                        base_select + " ORDER BY updated_at DESC LIMIT ?",
                         (limit,),
                     ).fetchall()
                 else:
                     rows = self._get_conn().execute(
-                        "SELECT id, title, created_at, updated_at, msg_count, hidden "
-                        "FROM sessions WHERE hidden=0 ORDER BY updated_at DESC LIMIT ?",
+                        base_select + " WHERE hidden=0 ORDER BY updated_at DESC LIMIT ?",
                         (limit,),
                     ).fetchall()
         return [
@@ -255,6 +264,7 @@ class SessionStore:
                 "updated_at": r[3],
                 "turn_count": r[4] // 2,
                 "hidden": bool(r[5]),
+                "branch_count": r[6],
             }
             for r in rows
         ]

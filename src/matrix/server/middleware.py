@@ -8,6 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from ..auth import verify_token
+from .stream_ticket import StreamTicketStore
 
 PUBLIC_PATHS = {
     "/api/auth/login",
@@ -52,24 +53,45 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         config = request.app.state.config
 
-        # Token from header or query param (EventSource has no custom headers)
+        # Token from header. EventSource cannot set headers, so SSE clients
+        # authenticate with a one-time ticket query param instead of the JWT.
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-        else:
-            token = request.query_params.get("token", "")
-            if not token:
+            payload = verify_token(token, config.jwt_secret)
+            if payload is None:
                 return JSONResponse(
                     status_code=401,
-                    content={"detail": "Missing Authorization header"},
+                    content={"detail": "Invalid or expired token"},
                 )
+            request.state.user_id = payload["sub"]
+            return await call_next(request)
 
+        ticket = request.query_params.get("ticket", "")
+        if ticket:
+            tickets: StreamTicketStore = request.app.state.stream_tickets
+            user_id = tickets.redeem(ticket)
+            if user_id is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid, expired or already-used ticket"},
+                )
+            request.state.user_id = user_id
+            return await call_next(request)
+
+        # Legacy path: raw JWT in query param (kept for backward compatibility,
+        # e.g. older clients; the web frontend now uses one-time tickets).
+        token = request.query_params.get("token", "")
+        if not token:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing Authorization header"},
+            )
         payload = verify_token(token, config.jwt_secret)
         if payload is None:
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or expired token"},
             )
-
         request.state.user_id = payload["sub"]
         return await call_next(request)

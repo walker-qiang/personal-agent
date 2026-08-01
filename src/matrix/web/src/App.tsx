@@ -18,16 +18,18 @@ import { McpPanel } from './components/McpPanel';
 import { TracePanel } from './components/TracePanel';
 import { BranchBanner } from './components/BranchBanner';
 import type { SkillItem, FileInfo } from './types';
+import { api } from './utils/api';
+import { genId } from './utils/format';
 
 const App: React.FC = () => {
   const { authenticated, username, login, register, logout, error: authError } = useAuth();
   const { messages, send, stop, sending, switchSession, confirmRequired, confirmActions, confirm, dismissConfirm, rightPanel } = useChat();
   const {
     sessions, currentId, setCurrentId, showArchive,
-    load: loadSessions, create: createSession, remove: removeSession,
+    load: loadSessions, remove: removeSession,
     batchArchive, batchUnarchive, batchDelete, toggleArchive, branch,
   } = useSessions();
-  const { skills, load: loadSkills, create: createSkill, update: updateSkill, remove: removeSkill } = useSkills();
+  const { skills, load: loadSkills, create: createSkill, update: updateSkill } = useSkills();
 
   const [input, setInput] = useState('');
   const [editingSkill, setEditingSkill] = useState<SkillItem | null>(null);
@@ -78,9 +80,7 @@ const App: React.FC = () => {
       setBranchCount(0);
       return;
     }
-    const token = localStorage.getItem('mx_token');
-    fetch(`/sessions/${currentId}/branches?token=${encodeURIComponent(token || '')}`)
-      .then(r => r.json())
+    api<{ branches?: unknown[] }>(`/sessions/${currentId}/branches`)
       .then(data => setBranchCount((data.branches || []).length))
       .catch(() => setBranchCount(0));
   }, [currentId]);
@@ -108,7 +108,7 @@ const App: React.FC = () => {
     if (!sid) {
       // Sessions are created implicitly on the server when the first
       // chat message is sent. Generate a client-side ID.
-      sid = 'web-' + Math.random().toString(36).slice(2, 8);
+      sid = 'web-' + genId().slice(0, 8);
       setCurrentId(sid);
       loadSessions();
     }
@@ -125,15 +125,10 @@ const App: React.FC = () => {
     }
   }, [handleSend]);
 
-  const handleSkillSend = useCallback((prompt: string) => {
-    setInput(prompt);
-    inputRef.current?.focus();
-  }, []);
-
   const handleQuickSend = useCallback((question: string) => {
     let sid = currentId;
     if (!sid) {
-      sid = 'web-' + Math.random().toString(36).slice(2, 8);
+      sid = 'web-' + genId().slice(0, 8);
       setCurrentId(sid);
       loadSessions();
     }

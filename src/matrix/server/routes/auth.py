@@ -99,5 +99,21 @@ async def logout() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.post("/stream-ticket")
+async def stream_ticket(request: Request) -> dict[str, str]:
+    """Exchange the JWT (Authorization header) for a one-time SSE ticket.
+
+    EventSource cannot send custom headers, so SSE connections authenticate
+    with a short-lived, single-use ticket in the URL instead of the raw JWT.
+    """
+    from ..stream_ticket import StreamTicketStore
+
+    user_id = getattr(request.state, "user_id", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    tickets: StreamTicketStore = request.app.state.stream_tickets
+    return {"ticket": tickets.issue(user_id)}
+
+
 def _get_config(request: Request) -> AgentConfig:
     return request.app.state.config

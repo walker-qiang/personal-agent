@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { ToolResult } from '../types';
 import { formatToolResult, formatDuration } from '../utils/format';
+import { sanitizeHtml } from '../utils/markdown';
 
 interface Props {
   results: ToolResult[];
@@ -21,7 +22,7 @@ const ToolSection: React.FC<Props> = ({ results, embedded = false }) => {
     <div style={embedded ? styles.embeddedContainer : styles.container}>
       {results.map((r) => {
         const isOpen = !!expanded[r.id];
-        const formatted = formatToolResult(r.name, r.result);
+        const formatted = sanitizeHtml(formatToolResult(r.name, r.result));
         const hasError = !!r.error;
 
         return (
