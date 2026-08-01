@@ -933,6 +933,42 @@ def _llm_summarize_from_results(
 
 
 
+def _is_empty_tool_result(result: Any) -> bool:
+    """Check if a tool result is effectively empty (no real data).
+
+    Handles all common result shapes:
+    - {"results": [], "message": "..."}  (finance_query/web_search empty)
+    - {"holdings": [], "total_balance_cents": 0}  (holdings_summary empty)
+    - {"data": []}  (generic empty)
+    - {"error": "..."}  (explicit error)
+    - {}  (empty dict)
+    - None / ""  (falsy)
+    """
+    if not result:
+        return True
+    if not isinstance(result, dict):
+        return False  # non-dict is likely actual data (string, list of items)
+    if result.get("error"):
+        return True
+    # Check if ALL list fields are empty and all non-list fields are non-data
+    has_data = False
+    for key, value in result.items():
+        if key == "error":
+            continue
+        if isinstance(value, list):
+            if len(value) > 0:
+                has_data = True
+        elif isinstance(value, dict):
+            if value:  # non-empty dict
+                has_data = True
+        elif isinstance(value, (int, float)):
+            if value != 0:  # non-zero number is data
+                has_data = True
+        elif value:  # truthy string, etc.
+            has_data = True
+    return not has_data
+
+
 def _build_react_final_answer(
     react: dict[str, Any],
     tool_results: list[dict[str, Any]],
@@ -960,19 +996,15 @@ def _build_react_final_answer(
     # This covers early-stop scenarios where the LLM was stuck in a tool-calling
     # loop and never produced a text-only answer.
     #
-    # P0 guard: if ALL tool results are errors (e.g. data source unreachable),
+    # P0 guard: if ALL tool results are errors or empty (no real data),
     # skip LLM summarization to prevent hallucination on empty data.
     if not answer and tool_results:
-        all_errors = all(
-            tr.get("error") or (
-                isinstance(tr.get("result"), dict)
-                and tr["result"].get("results") is not None
-                and len(tr["result"]["results"]) == 0
-            )
+        all_empty = all(
+            _is_empty_tool_result(tr.get("result", tr.get("error", "")))
             for tr in tool_results
         )
-        if all_errors:
-            answer = "抱歉，行情数据源暂时不可用（Sina API 无法连接），请稍后重试。"
+        if all_empty:
+            answer = "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。"
         else:
             answer = _llm_summarize_from_results(question, tool_results, messages, llm)
 

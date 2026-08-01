@@ -823,14 +823,60 @@ class ChatService:
         except Exception:
             pass  # Evolution is best-effort
 
+    def _is_empty_tool_result(self, result: Any) -> bool:
+        """Check if a tool result is effectively empty (no real data).
+
+        Handles all common result shapes:
+        - {"results": [], "message": "..."}  (finance_query/web_search empty)
+        - {"holdings": [], "total_balance_cents": 0}  (holdings_summary empty)
+        - {"data": []}  (generic empty)
+        - {"error": "..."}  (explicit error)
+        - {}  (empty dict)
+        - None / ""  (falsy)
+        """
+        if not result:
+            return True
+        if not isinstance(result, dict):
+            return False  # non-dict is likely actual data
+        if result.get("error"):
+            return True
+        has_data = False
+        for key, value in result.items():
+            if key == "error":
+                continue
+            if isinstance(value, list):
+                if len(value) > 0:
+                    has_data = True
+            elif isinstance(value, dict):
+                if value:
+                    has_data = True
+            elif isinstance(value, (int, float)):
+                if value != 0:
+                    has_data = True
+            elif value:
+                has_data = True
+        return not has_data
+
     def _stream_summarize(
         self, state: dict[str, Any], session_id: str, original_text: str, llm: LLMClient,
         history: list[dict[str, str]] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream the LLM summarization token by token via SSE."""
+        """Stream the LLM summarization token by token via SSE.
+
+        P0 guard: if ALL tool results are empty, skip LLM to prevent hallucination.
+        """
         user_msg = state.get("user_message", original_text)
         tool_results = state.get("tool_results", [])
         attachments = state.get("attachments", [])
+
+        # ── P0 guard: empty results → hardcoded message, no LLM call ──
+        if tool_results and all(
+            self._is_empty_tool_result(tr.get("result", tr.get("error", "")))
+            for tr in tool_results
+        ):
+            msg = "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。"
+            yield {"type": "token", "content": msg}
+            return msg
 
         system_prompt = """You are a helpful AI assistant. Answer the user's question using only the provided data.
 Rules:
