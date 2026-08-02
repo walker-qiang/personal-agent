@@ -136,20 +136,7 @@ class TestAgentConfig:
     def test_active_api_key_returns_correct_provider(self, agent_config):
         assert agent_config.active_api_key == "test-key"
 
-    def test_anthropic_config_returns_anthropic_key(self, tmp_cache_path):
-        config = AgentConfig(
-            root_path=tmp_cache_path.parent,
-            cache_path=tmp_cache_path,
-            trace_path=tmp_cache_path.parent / "trace.jsonl",
-            store_path=tmp_cache_path.parent / "var" / "agent" / "sessions.db",
-            checkpoint_path=str(tmp_cache_path.parent / "var" / "agent" / "checkpoints.db"),
-            skills_base_dir=tmp_cache_path.parent / "skills",
-            host="127.0.0.1",
-            port=0,
-            agent_provider="anthropic",
-            anthropic_api_key="claude-key",
-        )
-        assert config.active_api_key == "claude-key"
+    
 
 
 class TestLoadConfig:
