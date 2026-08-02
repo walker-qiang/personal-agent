@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from matrix.llm import (
-    AnthropicClient,
     DeepSeekClient,
     LLMAuthError,
     LLMError,
@@ -77,34 +76,10 @@ class TestDeepSeekClient:
             assert client.complete("system", []) == "ok"
 
 
-class TestAnthropicClient:
-    def test_handles_text_content(self):
-        """Anthropic should extract text from content blocks."""
-        def fake_post_json(*_args, **_kwargs):
-            return {"content": [{"type": "text", "text": "hello"}, {"type": "text", "text": " world"}]}
-
-        client = AnthropicClient(api_key="test-key")
-        with patch("matrix.llm.http.post_json", fake_post_json):
-            assert client.complete("system", []) == "hello world"
-
-    def test_handles_empty_content_list(self):
-        """Anthropic should return empty string when content list is empty."""
-        def fake_post_json(*_args, **_kwargs):
-            return {"content": []}
-
-        client = AnthropicClient(api_key="test-key")
-        with patch("matrix.llm.http.post_json", fake_post_json):
-            assert client.complete("system", []) == ""
-
-
 class TestBuildLLMClient:
     def test_builds_deepseek_by_default(self):
         client = build_llm_client(provider="deepseek", deepseek_api_key="test-key")
         assert isinstance(client, DeepSeekClient)
-
-    def test_builds_anthropic(self):
-        client = build_llm_client(provider="anthropic", anthropic_api_key="claude-key")
-        assert isinstance(client, AnthropicClient)
 
     def test_builds_deepseek_with_custom_model(self):
         client = build_llm_client(
