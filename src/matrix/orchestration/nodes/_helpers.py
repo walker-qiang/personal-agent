@@ -7,6 +7,7 @@ import json
 import logging
 import queue
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -79,26 +80,29 @@ class CircuitBreaker:
     def __init__(self) -> None:
         self._failures: dict[str, int] = {}
         self._cooldowns: dict[str, float] = {}
+        self._lock = threading.Lock()
 
     def record_failure(self, tool_name: str) -> bool:
         """Record a tool failure. Returns True if the breaker just tripped."""
-        self._failures[tool_name] = self._failures.get(tool_name, 0) + 1
-        if self._failures[tool_name] >= MAX_CONSECUTIVE_TOOL_FAILURES:
-            self._cooldowns[tool_name] = time.time() + CIRCUIT_BREAKER_COOLDOWN_SEC
-            logger.warning(
-                "circuit_breaker: tripped tool=%s after %d consecutive failures",
-                tool_name, self._failures[tool_name],
-            )
-            return True
-        return False
+        with self._lock:
+            self._failures[tool_name] = self._failures.get(tool_name, 0) + 1
+            if self._failures[tool_name] >= MAX_CONSECUTIVE_TOOL_FAILURES:
+                self._cooldowns[tool_name] = time.time() + CIRCUIT_BREAKER_COOLDOWN_SEC
+                logger.warning(
+                    "circuit_breaker: tripped tool=%s after %d consecutive failures",
+                    tool_name, self._failures[tool_name],
+                )
+                return True
+            return False
 
     def record_success(self, tool_name: str) -> None:
         """Reset the failure counter for a tool after a successful call."""
-        self._failures.pop(tool_name, None)
-        self._cooldowns.pop(tool_name, None)
+        with self._lock:
+            self._failures.pop(tool_name, None)
+            self._cooldowns.pop(tool_name, None)
 
-    def is_blocked(self, tool_name: str) -> bool:
-        """Check if a tool is currently blocked by the circuit breaker."""
+    def _is_blocked_unlocked(self, tool_name: str) -> bool:
+        """Check if a tool is blocked — caller MUST hold self._lock."""
         cooldown_until = self._cooldowns.get(tool_name)
         if cooldown_until is None:
             return False
@@ -110,14 +114,21 @@ class CircuitBreaker:
             return False
         return True
 
+    def is_blocked(self, tool_name: str) -> bool:
+        """Check if a tool is currently blocked by the circuit breaker."""
+        with self._lock:
+            return self._is_blocked_unlocked(tool_name)
+
     def blocked_tools(self) -> set[str]:
         """Return the set of currently blocked tool names."""
-        return {name for name in self._cooldowns if self.is_blocked(name)}
+        with self._lock:
+            return {name for name in list(self._cooldowns) if self._is_blocked_unlocked(name)}
 
     def reset(self) -> None:
         """Reset all circuit breakers."""
-        self._failures.clear()
-        self._cooldowns.clear()
+        with self._lock:
+            self._failures.clear()
+            self._cooldowns.clear()
 
 # ── Query factuality classifier ──────────────────────────────────────────────
 
@@ -568,11 +579,11 @@ EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作�
 - INSUFFICIENT（不充分）：关键数据缺失、数据没有时间标注导致无法确认时效性、或数据明显不是用户所问时间段的
 
 重要规则：
-1. 如果用户问"今天"的数据，但工具结果中没有今天（2026-08-01）的日期标注 → 判定为 INSUFFICIENT
+1. 如果用户问"今天"的数据，但工具结果中没有今天（{today}）的日期标注 → 判定为 INSUFFICIENT
 2. 如果工具结果中只有文字描述没有具体数字，但用户问的是具体数据 → 判定为 INSUFFICIENT
 3. 只需判断工具结果是否包含足够数据，agent 可能尚未生成最终回答，这不影响充分性判断
 
-返回 JSON 对象：{"sufficient": true/false, "reason": "简短原因（中文）"}"""
+返回 JSON 对象：{{"sufficient": true/false, "reason": "简短原因（中文）"}}"""
 
 
 def _evaluate_sufficiency(
@@ -609,7 +620,7 @@ Agent 当前回答：
 
     try:
         data = llm.complete_json(
-            EVALUATOR_PROMPT,
+            EVALUATOR_PROMPT.format(today=_today_cn()),
             [{"role": "user", "content": eval_prompt}],
             temperature=0.1,
         )
@@ -971,7 +982,12 @@ def _llm_summarize_from_results(
 def _is_empty_tool_result(result: Any) -> bool:
     """Check if a tool result is effectively empty (no real data).
 
+    Accepts either a raw result value or a full tool_result entry dict
+    (with "name", "arguments", "result"/"error" keys).
+
     Handles all common result shapes:
+    - {"name": "x", "result": {"results": [], "message": "..."}}  (finance_query/web_search empty)
+    - {"name": "x", "error": "timeout"}  (tool error → always empty)
     - {"results": [], "message": "..."}  (finance_query/web_search empty)
     - {"holdings": [], "total_balance_cents": 0}  (holdings_summary empty)
     - {"data": []}  (generic empty)
@@ -983,6 +999,15 @@ def _is_empty_tool_result(result: Any) -> bool:
         return True
     if not isinstance(result, dict):
         return False  # non-dict is likely actual data (string, list of items)
+
+    # Tool result entry: {"name": ..., "arguments": ..., "result": ...} or {"name": ..., "error": ...}
+    # If this looks like a tool_result entry (has "name" and "result"/"error"), unwrap it.
+    if "name" in result and ("result" in result or "error" in result):
+        if result.get("error"):
+            return True  # tool error → always empty
+        return _is_empty_tool_result(result.get("result"))
+
+    # Plain result dict
     if result.get("error"):
         return True
     # Check if ALL list fields are empty and all non-list fields are non-data
@@ -1064,28 +1089,23 @@ def _heuristic_number_check(
     if not extracted_numbers:
         return answer  # No numbers to check, answer is likely qualitative
 
-    # Check each number against tool results using PRECISE matching
-    # Strategy: extract all numeric values from tool results as a set of
-    # normalized strings, then do exact comparison. No substring matching.
+    # Check each number against tool results using PRECISE matching.
+    # Only exact string comparison (with units/symbols intact).
+    # No numeric stripping — stripping "3.5万" to "3.5" would falsely
+    # match "3.5%" in the answer, hiding unit/quantity mismatches.
     _tool_nums: set[str] = set()
-    # Extract all numbers from tool results (with context: keep decimal + unit)
     for pat in patterns:
         for m in pat.finditer(flat_results):
             raw = m.group(0).strip()
             if _re.match(r"^\d{4}$", raw) and 2000 <= int(raw) <= 2100:
                 continue
             _tool_nums.add(raw)
-            _tool_nums.add(_re.sub(r"[^\d.]", "", raw))
 
     missing: list[str] = []
     found: list[str] = []
     for num in extracted_numbers:
-        # Exact match against tool result numbers
+        # Exact match against tool result numbers (including units)
         if num in _tool_nums:
-            found.append(num)
-            continue
-        numeric_part = _re.sub(r"[^\d.]", "", num)
-        if numeric_part and numeric_part in _tool_nums:
             found.append(num)
             continue
         missing.append(num)
@@ -1211,7 +1231,7 @@ def _build_react_final_answer(
     # intercept BEFORE the answer reaches the user.
     if tool_results:
         all_empty = all(
-            _is_empty_tool_result(tr.get("result", tr.get("error", "")))
+            _is_empty_tool_result(tr)
             for tr in tool_results
         )
         if all_empty:
@@ -1231,6 +1251,7 @@ def _build_react_final_answer(
     answer = _fix_media_answer(answer, tool_results)
 
     # ── Anti-hallucination verification ──
+    pre_verification_answer = answer  # preserve for fallback
     verification = verify_all_claims(answer, tool_results, llm)
     if verification.total > 0:
         answer = build_verified_output(answer, verification)
@@ -1239,6 +1260,17 @@ def _build_react_final_answer(
         # even when parsing found no claims (e.g. LLM formatted it incorrectly,
         # forgot closing tags, or emitted loose [CLAIM]/[EVIDENCE] tags).
         answer = _strip_all_verification_tags(answer)
+
+    # ── Guard: if verification stripping emptied the answer (e.g. the LLM
+    # output was entirely [VERIFICATION] tags with no actual content),
+    # fall back to the pre-stripping version so the ReAct result is never
+    # empty. The aggregate_node will handle final cleanup.
+    if not answer and pre_verification_answer:
+        logger.warning(
+            "_build_react_final_answer: verification stripping emptied answer, "
+            "falling back to pre-verification version (agent=%s)", agent_id,
+        )
+        answer = pre_verification_answer
 
     new_result = {
         "agent_id": agent_id,

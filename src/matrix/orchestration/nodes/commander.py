@@ -16,6 +16,7 @@ from langgraph.types import RunnableConfig, interrupt
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ...agent.registry import AgentRegistry
+from ...skills.router import SemanticRouter, SkillMatch
 
 from ._helpers import (
     _build_history_context,
@@ -59,6 +60,88 @@ from ...context.compaction import compact_messages
 
 logger = logging.getLogger("matrix.orchestration")
 
+# ── Semantic router singleton (L1 routing) ──────────────────────────────────
+
+_semantic_router: SemanticRouter | None = None
+_semantic_router_skills_key: str = ""
+
+
+def _get_semantic_router(
+    agent_registry: AgentRegistry,
+    threshold_override: float | None = None,
+) -> SemanticRouter | None:
+    """Lazily build a SemanticRouter from the registry's skills.
+
+    The router is cached by a key derived from skill names + descriptions
+    so that it rebuilds when skills are reloaded. The threshold can be
+    overridden per-call from the configurable dict; when the override
+    changes, the router's threshold is updated without rebuilding the index.
+    """
+    global _semantic_router, _semantic_router_skills_key
+
+    try:
+        all_skills = agent_registry.list_all_skills()
+    except (FileNotFoundError, OSError):
+        return None
+
+    # Build a cache key from skill names + descriptions
+    key = "|".join(
+        f"{s.name}:{s.description[:50]}" for s in all_skills
+    )
+    if key == _semantic_router_skills_key and _semantic_router is not None:
+        # Update threshold if overridden and different
+        if threshold_override is not None and _semantic_router.threshold != threshold_override:
+            _semantic_router.threshold = threshold_override
+        return _semantic_router
+
+    if not all_skills:
+        _semantic_router = None
+        _semantic_router_skills_key = ""
+        return None
+
+    # Lazy import to avoid circular dependency / heavy startup
+    try:
+        from ...rag.embedder import LocalEmbedder
+        embedder = LocalEmbedder()
+    except Exception as exc:
+        logger.warning("semantic router: embedder init failed: %s", exc)
+        return None
+
+    _semantic_router = SemanticRouter(
+        all_skills, embedder, threshold=threshold_override,
+    )
+    _semantic_router_skills_key = key
+    return _semantic_router
+
+
+def _find_skill_owner(agent_registry: AgentRegistry, skill_name: str) -> str:
+    """Find which agent owns a skill by name. Returns agent_id or ''."""
+    for agent_def in agent_registry._agents.values():
+        try:
+            agent_skills = agent_registry.load_skills_for_agent(agent_def.id)
+        except (FileNotFoundError, OSError):
+            continue
+        if any(s.name == skill_name for s in agent_skills):
+            return agent_def.id
+    return ""
+
+
+def _build_skill_plan(user_msg: str, skill_name: str, agent_id: str) -> dict[str, Any]:
+    """Build a single-step plan that delegates to a skill."""
+    return {
+        "delegation_plan": [{
+            "step": 1,
+            "agent_id": agent_id,
+            "task": user_msg,
+            "skill_name": skill_name,
+            "depends_on": [],
+            "output_key": "skill_result",
+            "purpose": f"使用 {skill_name} 技能处理",
+        }],
+        "current_step": 0,
+        "plan_type": "agent",
+    }
+
 
 def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Commander plans the delegation strategy. Entry node of the graph.
@@ -81,6 +164,67 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             ],
             "current_step": 0,
         }
+
+    # ── Tiered skill routing: L0 keyword → L1 semantic → L2 LLM plan ──────
+    # L0: Keyword match (zero cost, handles exact keywords like "组合复盘")
+    # L1: Semantic match (embedding cosine sim, handles synonyms like "看看配置")
+    # L2: LLM plan (fallback for complex/multi-step queries)
+    try:
+        all_skills = agent_registry.list_all_skills()
+    except (FileNotFoundError, OSError):
+        all_skills = []
+
+    # ── L0: keyword match (longest-match scoring) ──────────────────────
+    # Instead of first-match, collect all matching skills and pick the one
+    # with the longest matching keyword. This prevents "复盘" (2 chars from
+    # personal-reflection) from beating "组合复盘" (4 chars from portfolio-review).
+    import re as _re
+    l0_match = None
+    l0_best_len = 0
+    q_lower = user_msg.lower()
+    for skill in all_skills:
+        text = (skill.title + " " + skill.description).lower()
+        words = [w for w in _re.split(r"[\s,，。！？、；：""''（）()]+", text) if len(w) >= 2]
+        for w in words:
+            if w in q_lower and not skill._has_negation(user_msg, w):
+                if len(w) > l0_best_len:
+                    l0_best_len = len(w)
+                    l0_match = skill
+                break  # one match per skill is enough; we want the longest overall
+
+    if l0_match:
+        owner = _find_skill_owner(agent_registry, l0_match.name)
+        if owner:
+            logger.info(
+                "commander: L0 keyword match — skill=%s, agent=%s",
+                l0_match.name, owner,
+            )
+            return _build_skill_plan(user_msg, l0_match.name, owner)
+        logger.warning("commander: L0 skill %s matched but no agent owns it", l0_match.name)
+
+    # ── L1: semantic match ──
+    if not l0_match:
+        threshold_override = cfg.get("semantic_threshold")
+        router = _get_semantic_router(agent_registry, threshold_override=threshold_override)
+        if router is not None and router.is_available:
+            best = router.best_match(user_msg)
+            if best and router.should_accept(best):
+                owner = _find_skill_owner(agent_registry, best.skill_name)
+                if owner:
+                    logger.info(
+                        "commander: L1 semantic match — skill=%s, score=%.3f, agent=%s",
+                        best.skill_name, best.score, owner,
+                    )
+                    return _build_skill_plan(user_msg, best.skill_name, owner)
+                logger.warning(
+                    "commander: L1 skill %s matched (score=%.3f) but no agent owns it",
+                    best.skill_name, best.score,
+                )
+            elif best:
+                logger.info(
+                    "commander: L1 best match %s score=%.3f below threshold %.2f, falling through to LLM",
+                    best.skill_name, best.score, router.threshold,
+                )
 
     agents_desc = json.dumps(
         agent_registry.agents_for_commander(full_tools), ensure_ascii=False, indent=2
@@ -415,9 +559,11 @@ def _run_domain_agent_react(
             messages, system_prompt, pipeline_llm, user_goal,
         )
         if rejected:
-            return messages + [
-                {"role": "assistant", "content": "[PROMPT_BUDGET_EXCEEDED] 上下文过长"}
-            ]
+            return {
+                "answer": "[PROMPT_BUDGET_EXCEEDED] 上下文过长，请精简问题后重试。",
+                "tool_results": tool_results,
+                "findings": [],
+            }
 
         result = _react_call_llm(llm, system_prompt, messages, llm_tools, original_question,
                                  agent_def, task, tool_results, tools)
@@ -976,6 +1122,27 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
             result["needs_reflexion_retry"] = False
         return result
 
+    # ── Guard: all agent results are empty (no text, no error) ──────────
+    # This happens when ReAct loops complete but verification stripping
+    # removed all content. Skip LLM call — there's nothing to summarize.
+    all_empty = all(
+        not r.get("result") and not r.get("error")
+        for r in agent_results
+    )
+    if all_empty:
+        logger.warning(
+            "aggregate_node: all %d agent results are empty, skipping LLM call",
+            len(agent_results),
+        )
+        result = {
+            "final_answer": "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。",
+            "needs_summary": False,
+            "skip_reflection": True,
+        }
+        if is_retry:
+            result["needs_reflexion_retry"] = False
+        return result
+
     results_summary = []
     for r in agent_results:
         media_urls = _extract_media_urls(r.get("tool_results", []))
@@ -1020,10 +1187,13 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         )
         final_answer = response.strip()
 
+        if not final_answer:
+            logger.warning("aggregate_node: LLM returned empty response")
+
         all_tool_results = []
         for r in agent_results:
             all_tool_results.extend(r.get("tool_results", []))
-        if all_tool_results:
+        if all_tool_results and final_answer:
             verification = verify_all_claims(final_answer, all_tool_results, llm)
             if verification.total > 0:
                 final_answer = build_verified_output(final_answer, verification)
@@ -1034,6 +1204,23 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
                 final_answer = _heuristic_number_check(
                     final_answer, all_tool_results, cfg["llm"], user_msg,
                 )
+
+        # ── Guard: final_answer is empty (LLM returned empty, or
+        # verification stripping removed all content) ──
+        # Compose a fallback from the raw agent results so the user gets
+        # *something* rather than the generic "暂时无法生成回复" error.
+        if not final_answer:
+            logger.warning(
+                "aggregate_node: final_answer empty after processing, "
+                "composing fallback from %d agent results", len(agent_results),
+            )
+            parts = []
+            for r in agent_results:
+                if r.get("result"):
+                    parts.append(r["result"])
+            final_answer = "\n\n".join(parts) if parts else (
+                "抱歉，当前无法生成汇总回复，请稍后重试或换一种方式提问。"
+            )
 
         result = {"final_answer": final_answer, "needs_summary": False}
         if is_retry:
@@ -1163,16 +1350,16 @@ def confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]
     for action in pending_actions:
         action_summary.append(f"- {action.get('summary', str(action))}")
 
-    # Use LangGraph interrupt for HITL
-    interrupt({
+    # Use LangGraph interrupt for HITL.
+    # interrupt() returns the value passed to Command(resume=...) when resumed.
+    decision = interrupt({
         "type": "confirm",
         "actions": pending_actions,
         "message": "以下操作需要你确认：\n" + "\n".join(action_summary),
     })
 
-    # After resume, check decision
-    confirmed = state.get("confirmed", False)
-    if not confirmed:
-        return {"error": "用户取消了操作", "confirmed": True}
+    # After resume, check the user's decision (returned by interrupt)
+    if decision in (True, "approve", "confirmed"):
+        return {"confirmed": True}
 
-    return {"confirmed": True}
+    return {"error": "用户取消了操作", "confirmed": True}

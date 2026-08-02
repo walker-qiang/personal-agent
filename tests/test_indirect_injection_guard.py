@@ -336,9 +336,10 @@ class TestEdgeCases:
             handler=search,
         ))
 
-        # Should not raise
+        # Fail-closed: guard exception returns safe error, not unsanitized data
         result = registry.call("web_search", {"query": "test"})
-        assert result == {"result": "Normal data"}
+        assert "error" in result
+        assert "安全检查失败" in result["error"]
 
 
 if __name__ == "__main__":

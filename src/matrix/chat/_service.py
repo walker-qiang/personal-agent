@@ -414,8 +414,10 @@ class ChatService:
             # FINAL SAFETY NET: strip any leaked verification tags (same as normal path)
             if final_answer:
                 final_answer = _strip_all_verification_tags(final_answer)
-            if final_answer:
-                yield {"type": "token", "content": final_answer}
+            if not final_answer:
+                # Graceful degradation: no answer produced after resume
+                final_answer = "抱歉，恢复会话后未能生成回复。请重新提问。"
+            yield {"type": "token", "content": final_answer}
 
         except GraphInterrupt as gi:
             # Another confirmation needed — update pending confirms so session can recover
@@ -724,6 +726,10 @@ class ChatService:
                 if event["type"] == "token":
                     answer_parts.append(event["content"])
             answer = "".join(answer_parts)
+            # ── FINAL SAFETY NET: strip any leaked verification tags ──
+            # Same gate as the direct-answer path below.
+            if answer:
+                answer = _strip_all_verification_tags(answer)
             # ---- OUTPUT GUARD ----
             if answer and self._output_guard:
                 result = self._output_guard.check(answer, user_id=user_id)
@@ -731,6 +737,13 @@ class ChatService:
                     logger.warning("output_pii_detected: flags=%s session=%s", result.flags, sid)
                 answer = result.sanitized
             # ---- END OUTPUT GUARD ----
+            # ── Guard: if stream produced no answer (LLM returned empty) ──
+            if not answer:
+                logger.warning(
+                    "_finalize_stream: needs_summary path produced empty answer, session=%s", sid,
+                )
+                answer = "抱歉，暂时无法生成回复。请稍后重试或换一种方式提问。"
+                yield {"type": "token", "content": answer}
             if answer:
                 self._remember(sid, text, answer, user_id=user_id)
         else:
@@ -841,7 +854,12 @@ class ChatService:
     def _is_empty_tool_result(self, result: Any) -> bool:
         """Check if a tool result is effectively empty (no real data).
 
+        Accepts either a raw result value or a full tool_result entry dict
+        (with "name", "arguments", "result"/"error" keys).
+
         Handles all common result shapes:
+        - {"name": "x", "result": {"results": [], "message": "..."}}  (finance_query/web_search empty)
+        - {"name": "x", "error": "timeout"}  (tool error → always empty)
         - {"results": [], "message": "..."}  (finance_query/web_search empty)
         - {"holdings": [], "total_balance_cents": 0}  (holdings_summary empty)
         - {"data": []}  (generic empty)
@@ -853,6 +871,15 @@ class ChatService:
             return True
         if not isinstance(result, dict):
             return False  # non-dict is likely actual data
+
+        # Tool result entry: {"name": ..., "arguments": ..., "result": ...} or {"name": ..., "error": ...}
+        # If this looks like a tool_result entry (has "name" and "result"/"error"), unwrap it.
+        if "name" in result and ("result" in result or "error" in result):
+            if result.get("error"):
+                return True  # tool error → always empty
+            return self._is_empty_tool_result(result.get("result"))
+
+        # Plain result dict
         if result.get("error"):
             return True
         has_data = False
@@ -886,7 +913,7 @@ class ChatService:
 
         # ── P0 guard: empty results → hardcoded message, no LLM call ──
         if tool_results and all(
-            self._is_empty_tool_result(tr.get("result", tr.get("error", "")))
+            self._is_empty_tool_result(tr)
             for tr in tool_results
         ):
             msg = "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。"

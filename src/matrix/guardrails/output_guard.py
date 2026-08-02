@@ -18,8 +18,9 @@ _PII_SPECS: list[tuple[str, str, str]] = [
     # (name, regex, mask_template)
     # IMPORTANT: id_card must be before phone — phone regex is a subset of id_card.
     ("id_card", r"\d{17}[\dXx]", lambda m: m.group()[:4] + "**********" + m.group()[-4:]),
-    # Phone: keep first 3 and last 4, mask middle
-    ("phone", r"1[3-9]\d{9}", lambda m: m.group()[:3] + "****" + m.group()[-4:]),
+    # Phone: keep first 3 and last 4, mask middle. \b boundaries prevent
+    # matching phone-like substrings inside longer digit sequences.
+    ("phone", r"\b1[3-9]\d{9}\b", lambda m: m.group()[:3] + "****" + m.group()[-4:]),
     # Email: mask local part
     ("email", r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", lambda m: "u***@" + m.group().split("@", 1)[1]),
     # Bank card: keep last 4
@@ -56,20 +57,39 @@ class OutputGuard:
         ]
 
     def check(self, text: str, user_id: str = "") -> OutputResult:
-        """Sanitize PII from text. Returns sanitized text and flags."""
+        """Sanitize or block PII from text based on configuration.
+
+        - sanitize mode (default): replace PII with masked versions in-place.
+        - block mode: if PII is detected, replace the entire response with
+          a safe placeholder message to prevent any PII leakage.
+        """
         if not text:
             return OutputResult(text, [], False)
 
-        sanitized = text
+        # First pass: detect PII without modifying
         flags: list[str] = []
-
-        for name, pattern, replacer in self._patterns:
-            if pattern.search(sanitized):
+        for name, pattern, _ in self._patterns:
+            if pattern.search(text):
                 flags.append(name)
-                sanitized = pattern.sub(replacer, sanitized)
+
+        if not flags:
+            return OutputResult(text, [], False)
+
+        # Block mode: replace entire response if PII detected
+        if self._block_mode:
+            return OutputResult(
+                sanitized="[此回复因包含敏感信息已被拦截，请重新提问]",
+                flags=flags,
+                had_pii=True,
+            )
+
+        # Sanitize mode: replace PII in-place
+        sanitized = text
+        for name, pattern, replacer in self._patterns:
+            sanitized = pattern.sub(replacer, sanitized)
 
         return OutputResult(
             sanitized=sanitized,
             flags=flags,
-            had_pii=len(flags) > 0,
+            had_pii=True,
         )

@@ -16,9 +16,12 @@ from .loader import (
     write_knowledge,
     write_script,
 )
+from .router import SemanticRouter, SkillMatch
 
 __all__ = [
+    "SemanticRouter",
     "SkillDefinition",
+    "SkillMatch",
     "create_skill_dir",
     "delete_knowledge",
     "delete_script",

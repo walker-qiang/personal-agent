@@ -129,8 +129,12 @@ class ToolRegistry:
                 result = self._injection_guard.check_and_sanitize(name, result)
             except Exception as exc:
                 logger.warning(
-                    "injection_guard error (tool=%s): %s", name, exc,
+                    "injection_guard error (tool=%s): %s — returning safe placeholder",
+                    name, exc,
                 )
+                # Fail-closed: return a safe error instead of un-sanitized
+                # result that may contain injected malicious content.
+                return {"error": f"工具 {name} 的结果安全检查失败，已拦截。请重试或使用其他工具。"}
 
         return result
 
@@ -187,16 +191,15 @@ class ToolRegistry:
         for key, value in args.items():
             expected = props.get(key, {}).get("type", "")
             if expected and expected in type_map:
-                # bool is subclass of int in Python, handle separately
-                if expected == "integer" and isinstance(value, bool):
-                    return False, f"参数 {key} 类型错误: 期望 integer, 得到 boolean"
+                # bool is a subclass of int in Python — reject it for any
+                # non-boolean type to prevent True/False being accepted as
+                # integer or number.
+                if expected != "boolean" and isinstance(value, bool):
+                    return False, f"参数 {key} 类型错误: 期望 {expected}, 得到 boolean"
                 if expected == "boolean" and not isinstance(value, bool):
                     return False, f"参数 {key} 类型错误: 期望 boolean, 得到 {type(value).__name__}"
                 if expected != "boolean" and not isinstance(value, type_map[expected]):
-                    if expected == "number" and isinstance(value, bool):
-                        return False, f"参数 {key} 类型错误: 期望 number, 得到 boolean"
-                    if expected != "number" or not isinstance(value, (int, float)):
-                        return False, f"参数 {key} 类型错误: 期望 {expected}, 得到 {type(value).__name__}"
+                    return False, f"参数 {key} 类型错误: 期望 {expected}, 得到 {type(value).__name__}"
         return True, ""
 
     @staticmethod

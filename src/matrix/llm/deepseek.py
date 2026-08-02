@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Iterator
 
 from .errors import LLMError
@@ -10,6 +11,8 @@ from .http import post_json_stream, post_json_with_retry
 from .protocol import FunctionCallResult, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
+
+logger = logging.getLogger("matrix.llm.deepseek")
 
 # Maximum characters per message before truncation
 _DEFAULT_MAX_MESSAGE_CHARS = 16000
@@ -116,13 +119,15 @@ class DeepSeekClient:
             try:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
+                logger.warning("stream_complete: skipped unparseable SSE chunk: %s", raw[:100])
                 continue
             try:
                 delta = chunk["choices"][0].get("delta", {})
                 content = delta.get("content", "")
                 if content:
                     yield content
-            except (KeyError, IndexError, TypeError):
+            except (KeyError, IndexError, TypeError) as e:
+                logger.warning("stream_complete: skipped malformed chunk (%s): %s", type(e).__name__, raw[:100])
                 continue
 
     def function_call(
