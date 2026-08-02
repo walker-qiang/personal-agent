@@ -185,6 +185,10 @@ class TestHighRiskClassification:
 class TestMCPConfig:
     """Test that browser server config loads correctly."""
 
+    @pytest.mark.skipif(
+        not (PROJECT_ROOT / "config" / "mcp_servers.json").exists(),
+        reason="mcp_servers.json not configured",
+    )
     def test_browser_server_in_config(self):
         from matrix.tools.mcp.config import load_mcp_config
         config_path = PROJECT_ROOT / "config" / "mcp_servers.json"
@@ -194,6 +198,10 @@ class TestMCPConfig:
         assert "browser" in server_names
         assert "utility" in server_names
 
+    @pytest.mark.skipif(
+        not (PROJECT_ROOT / "config" / "mcp_servers.json").exists(),
+        reason="mcp_servers.json not configured",
+    )
     def test_browser_server_config_valid(self):
         from matrix.tools.mcp.config import load_mcp_config
         config_path = PROJECT_ROOT / "config" / "mcp_servers.json"
