@@ -89,13 +89,14 @@ class ToolRegistry:
                 }
 
         if self._code_guard:
-            from ..guardrails.tool_guard import ToolGuardError
             ok, reason = self._code_guard.check(name, args)
             if not ok:
-                raise ToolGuardError(
-                    f"code blocked: 工具 {name} 被代码安全策略拦截: {reason}。"
-                    "请移除危险代码后重试。"
-                )
+                return {
+                    "error": (
+                        f"代码安全策略拦截: 工具 {name} 被拦截: {reason}。"
+                        "请移除危险代码后重试。"
+                    )
+                }
 
         # Step 4: execute + truncate
         try:

@@ -358,7 +358,7 @@ class ChatService:
 
         except Exception as err:
             logger.error("stream_chat error: %s\n%s", err, traceback.format_exc())
-            yield {"type": "error", "message": f"agent error: {err}"}
+            yield {"type": "error", "message": "系统内部错误，请稍后重试"}
             # ── Graceful degradation: always provide a user-facing message ──
             yield {"type": "token", "content": (
                 "抱歉，系统处理您的请求时遇到了问题。\n\n"
@@ -417,11 +417,28 @@ class ChatService:
             if final_answer:
                 yield {"type": "token", "content": final_answer}
 
-        except GraphInterrupt:
-            # Another confirmation needed (unlikely but handle gracefully)
-            yield {"type": "error", "message": "additional confirmation required"}
+        except GraphInterrupt as gi:
+            # Another confirmation needed — update pending confirms so session can recover
+            interrupt_value = gi.args[0] if gi.args else {}
+            pending_actions = interrupt_value.get("actions", [])
+            logger.info(
+                "hitl: second confirm_required session=%s actions=%d",
+                session_id, len(pending_actions),
+            )
+            self._pending_confirms[session_id] = {
+                "config": graph_config,
+                "session_llm": session_llm,
+                "user_id": user_id,
+            }
+            yield {
+                "type": "confirm_required",
+                "actions": pending_actions,
+                "session_id": session_id,
+            }
+            return
         except Exception as err:
-            yield {"type": "error", "message": f"resume error: {err}"}
+            logger.error("resume error: %s\n%s", err, traceback.format_exc())
+            yield {"type": "error", "message": "恢复会话失败，请稍后重试"}
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)
             self._prune_checkpoints(session_id, keep_latest=False)
@@ -930,10 +947,12 @@ Please answer the user's question using only the provided data."""
                 full_answer.append(token)
                 yield {"type": "token", "content": token}
         except LLMError as err:
-            yield {"type": "error", "message": f"LLM error: {err}"}
+            logger.error("_stream_summarize LLM error: %s", err)
+            yield {"type": "error", "message": "LLM 服务异常，请稍后重试"}
             full_answer = ["无法生成回答，请查看原始数据。"]
             yield {"type": "token", "content": full_answer[0]}
-        except Exception:
+        except Exception as err:
+            logger.error("_stream_summarize unexpected error: %s: %s", type(err).__name__, str(err)[:200])
             full_answer = ["无法生成回答，请查看原始数据。"]
             yield {"type": "token", "content": full_answer[0]}
 

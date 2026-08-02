@@ -468,7 +468,7 @@ def _react_call_llm(
     try:
         temp = _classify_query_factuality(original_question)
         return llm.function_call(system_prompt, messages, llm_tools, temperature=temp)
-    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError, RuntimeError, TypeError, KeyError) as e:
         msg_len = sum(len(str(m.get("content", ""))) for m in messages)
         logger.error("ReAct: LLM call failed in domain_agent_react: %s (msg_count=%d, total_chars=%d)",
                      type(e).__name__, len(messages), msg_len)
@@ -679,8 +679,8 @@ def _react_generate_partial_answer(
             )
             if partial and len(partial) > 10:
                 return {"answer": _fix_media_answer(partial, tool_results), "tool_results": tool_results, "findings": []}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("_react_generate_partial_answer LLM failed: %s: %s", type(e).__name__, str(e)[:200])
     return {
         "answer": _fix_media_answer("已达到最大分析步数，请基于已有数据回答。", tool_results),
         "tool_results": tool_results, "findings": [],

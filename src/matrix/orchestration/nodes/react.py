@@ -185,7 +185,7 @@ def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
 
             temp = _classify_query_factuality(question)
             result: FunctionCallResult = llm.function_call(system_prompt, messages, llm_tools, temperature=temp)
-        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
+        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError, RuntimeError, TypeError, KeyError) as e:
             msg_len = sum(len(str(m.get("content", ""))) for m in messages)
             logger.error("ReAct: LLM call failed in react_llm_node: %s: %s (msg_count=%d, total_chars=%d)",
                          type(e).__name__, str(e)[:200], len(messages), msg_len)
@@ -423,9 +423,9 @@ def _execute_single_tool(
             })
             if push_events:
                 _push_event(cfg, "tool_result", {"name": name, "error": tool_result["error"][:200]})
-            breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
-            if breaker is not None:
-                breaker.record_failure(name)
+            # Note: circuit breaker recording is handled by ToolRegistry.call()
+            # for actual handler failures. Pre-execution checks (validation,
+            # guard blocks) should NOT count as failures.
             return False, {"name": name, "arguments": arguments,
                            "error": tool_result["error"], "elapsed_ms": elapsed_ms}
 
@@ -477,6 +477,10 @@ def _execute_single_tool(
 
     except Exception as err:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+        logger.error(
+            "ReAct: _execute_single_tool exception: tool=%s error=%s: %s",
+            name, type(err).__name__, str(err)[:200],
+        )
         _trace(cfg, {
             "session_id": session_id,
             "event_type": "tool_call",
@@ -488,6 +492,10 @@ def _execute_single_tool(
         })
         if push_events:
             _push_event(cfg, "tool_result", {"name": name, "error": str(err)[:200]})
+        # Record escape exceptions (e.g. ToolGuardError before fix) in circuit breaker
+        breaker: CircuitBreaker | None = cfg.get("circuit_breaker")
+        if breaker is not None:
+            breaker.record_failure(name)
         return False, {"name": name, "arguments": arguments, "error": str(err), "elapsed_ms": elapsed_ms}
 
 

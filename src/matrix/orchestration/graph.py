@@ -107,8 +107,20 @@ def build_graph() -> StateGraph:
     )
 
     # ---- Multi-step DAG path (Plan-and-Execute) ----
-    # delegate → replan_node (check plan validity after each batch)
-    graph.add_edge("delegate", "replan_node")
+    # delegate → conditional:
+    #   needs_confirmation → confirm (HITL pause for high-risk operations)
+    #   otherwise → replan_node (check plan validity after each batch)
+    graph.add_conditional_edges(
+        "delegate",
+        _route_after_delegate,
+        {
+            "confirm": "confirm",
+            "replan_node": "replan_node",
+        },
+    )
+
+    # confirm → replan_node (after user confirms/cancels, resume plan execution)
+    graph.add_edge("confirm", "replan_node")
 
     # replan_node → conditional:
     #   needs_replan → commander_plan (regenerate plan)
@@ -124,8 +136,7 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # confirm → aggregate
-    graph.add_edge("confirm", "aggregate")
+    # confirm → replan_node (set above)
 
     # aggregate → reflection → end
     graph.add_edge("aggregate", "reflection")
@@ -177,6 +188,17 @@ def _route_dag_first(state: AgentState):
         })
         for s in ready
     ]
+
+
+def _route_after_delegate(state: AgentState):
+    """Route after delegate: HITL confirmation or replan.
+
+    needs_confirmation → "confirm" (pause for user to approve high-risk ops)
+    otherwise → "replan_node" (normal plan-and-execute flow)
+    """
+    if state.get("needs_confirmation") and state.get("pending_actions"):
+        return "confirm"
+    return "replan_node"
 
 
 def _route_after_replan(state: AgentState):

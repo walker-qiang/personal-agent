@@ -924,7 +924,7 @@ def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> 
         try:
             q.put_nowait((evt_type, payload))
         except queue.Full:
-            pass
+            logger.warning("event_queue full: dropping %s event", evt_type)
 
 
 # ---- Shared tool execution (used by both ReAct paths) ----
