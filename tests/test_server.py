@@ -81,7 +81,7 @@ class TestHealthz:
             resp = client.get("/healthz")
             data = resp.json()
             assert data["llm_available"] is False
-            assert "missing AGNES_API_KEY" in data["llm_error"]
+            assert "missing DEEPSEEK_API_KEY" in data["llm_error"]
 
 
 class TestTools:
@@ -204,7 +204,7 @@ class TestChat:
             assert resp.status_code == 200
             text = resp.text
             assert "event: error" in text
-            assert "missing AGNES_API_KEY" in text
+            assert "missing DEEPSEEK_API_KEY" in text
             assert "event: done" in text
 
     def test_chat_with_tools(self, client, auth_token):
