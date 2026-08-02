@@ -26,7 +26,7 @@ from ..llm.http import set_rate_limiter
 from ..orchestration.anti_hallucination import _strip_all_verification_tags
 from ..orchestration import build_graph
 from ..orchestration.state import AgentState
-from ..orchestration.nodes._helpers import CircuitBreaker
+from ..orchestration.nodes._helpers import CircuitBreaker, _today_cn
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
@@ -158,8 +158,6 @@ class ChatService:
         providers = []
         if self.config.deepseek_api_key:
             providers.append({"id": "deepseek", "name": "DeepSeek", "models": KNOWN_MODELS.get("deepseek", [])})
-        if self.config.anthropic_api_key:
-            providers.append({"id": "anthropic", "name": "Anthropic", "models": KNOWN_MODELS.get("anthropic", [])})
         if self.config.agnes_api_key:
             providers.append({"id": "agnes", "name": "Agnes AI", "models": KNOWN_MODELS.get("agnes", [])})
         return providers
@@ -194,14 +192,14 @@ class ChatService:
 
         Args:
             session_id: Session to configure.
-            provider: One of 'deepseek', 'anthropic', 'agnes'.
+            provider: One of 'deepseek', 'agnes'.
             model: Specific model ID (optional, falls back to provider default).
             user_id: Authenticated user ID.
 
         Returns:
             dict with 'ok', 'provider', and 'model' fields.
         """
-        if provider not in {"deepseek", "anthropic", "agnes"}:
+        if provider not in {"deepseek", "agnes"}:
             return {"ok": False, "error": f"unsupported provider: {provider}"}
         if not self.store.set_provider(session_id, provider, model, user_id=user_id):
             return {"ok": False, "error": "session not found or belongs to another user"}
@@ -878,7 +876,10 @@ class ChatService:
             yield {"type": "token", "content": msg}
             return msg
 
-        system_prompt = """You are a helpful AI assistant. Answer the user's question using only the provided data.
+        system_prompt = f"""You are a helpful AI assistant. Answer the user's question using only the provided data.
+
+Today is {_today_cn()}.
+
 Rules:
 - Use only the provided data, never fabricate
 - Money is CNY unless stated otherwise, format large numbers with commas
@@ -887,6 +888,7 @@ Rules:
 - Use Markdown formatting: **bold** for key figures, bullet lists for breakdowns
 - If the result contains an image URL, display it using ![description](URL) format
 - Do NOT include execution process review, agent status tables, or step-by-step workflow
+- If the user asks about "today" data but today is a weekend/holiday, first remind them the market is closed, then provide the latest available trading day data
 - Your output is for the end user, not an internal log"""
 
         # Build conversation history context for multi-turn awareness

@@ -25,6 +25,20 @@ from ..state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
 
+# ── Chinese weekday names ──
+_WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def _today_cn() -> str:
+    """Return today's date with Chinese weekday, e.g., '2026年8月1日 (周六)'.
+
+    Uses Asia/Shanghai timezone so the date matches the user's locale.
+    """
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    return f"{now.year}年{now.month}月{now.day}日 ({_WEEKDAY_CN[now.weekday()]})"
+
+
 MAX_REACT_ITERATIONS = 20  # Hard safety net; goal-driven stopping should trigger earlier
 
 MAX_TOPLEVEL_REACT_ITERATIONS = 10  # Iteration limit for the top-level single-step ReAct loop
@@ -217,6 +231,8 @@ FALLBACK_AGGREGATE_PROMPT = """你是一个友好的助手。系统在处理用�
 
 COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家的执行结果，汇总回答用户的问题。
 
+今天是 {today}。
+
 用户问题：{question}
 
 专家执行结果：
@@ -229,6 +245,7 @@ COMMANDER_AGGREGATE_PROMPT = """你是指挥官 Agent。请根据各领域专家
 4. 使用与用户相同的语言
 5. 使用 Markdown 格式化：**加粗**关键数字，列表展示要点
 6. 如果结果中包含图片 URL，使用 ![描述](URL) 格式展示图片
+7. 如果用户问"今天"的数据，但今天是周末/节假日，必须先提醒用户市场休市，然后提供最近交易日的数据
 
 重要：你的输出是给最终用户看的，不是内部日志。不要包含执行过程回顾。"""
 
@@ -547,12 +564,15 @@ def _build_history_context(history: list[dict[str, str]], max_turns: int = 3) ->
 EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的工具结果是否已经足够回答用户的问题。
 
 评估标准：
-- SUFFICIENT（充分）：工具结果中已包含回答用户问题所需的关键数据（如天气数据、股价、新闻详情等），无需更多工具调用
-- INSUFFICIENT（不充分）：关键数据缺失，仍需更多工具调用才能回答
+- SUFFICIENT（充分）：工具结果中已包含回答用户问题所需的关键数据，且数据明确标注了时效性（如日期、时间戳），确认为用户所需时间的数据
+- INSUFFICIENT（不充分）：关键数据缺失、数据没有时间标注导致无法确认时效性、或数据明显不是用户所问时间段的
 
-重要：只需判断工具结果是否包含足够数据。agent 可能尚未生成最终回答（仍在调用工具），这不影响充分性判断——只要工具结果中有足够数据即为 SUFFICIENT。
+重要规则：
+1. 如果用户问"今天"的数据，但工具结果中没有今天（2026-08-01）的日期标注 → 判定为 INSUFFICIENT
+2. 如果工具结果中只有文字描述没有具体数字，但用户问的是具体数据 → 判定为 INSUFFICIENT
+3. 只需判断工具结果是否包含足够数据，agent 可能尚未生成最终回答，这不影响充分性判断
 
-返回 JSON 对象：{{"sufficient": true/false, "reason": "简短原因（中文）"}}"""
+返回 JSON 对象：{"sufficient": true/false, "reason": "简短原因（中文）"}"""
 
 
 def _evaluate_sufficiency(
@@ -666,19 +686,34 @@ def _check_domain_tool_sufficiency(
     question: str,
     tool_results: list[dict[str, Any]],
 ) -> bool:
-    """Check if domain-specific tools have returned valid data.
+    """Check if domain-specific tools have returned valid, CURRENT data.
 
-    Lightweight heuristic: if weather or finance_query returned non-error
-    results with actual data, the information is likely sufficient for the
-    user's question. This avoids waiting for the LLM-based evaluator and
-    prevents the LLM from looping on redundant tool calls.
+    For finance queries: requires that the result contains actual numeric
+    data (prices, percentages, etc.) AND that the data appears to be for
+    today's date. A non-empty dict without actual numbers is not sufficient.
+
+    This avoids treating stale/cached data as sufficient and prevents the
+    LLM from fabricating missing numbers.
     """
+    import re as _re
     for tr in tool_results:
         name = tr.get("name", "")
-        if name in _DOMAIN_SUFFICIENCY_TOOLS and "error" not in tr:
-            result = tr.get("result", {})
-            if isinstance(result, dict) and result:
+        if name not in _DOMAIN_SUFFICIENCY_TOOLS or "error" in tr:
+            continue
+        result = tr.get("result", {})
+        if not isinstance(result, dict) or not result:
+            continue
+        # For finance queries: require actual numeric data in the result
+        if name == "finance_query":
+            result_str = json.dumps(result, ensure_ascii=False)
+            # Check if result contains price-like numbers (e.g., 3400.12, 3.5%)
+            has_prices = bool(_re.search(r"\d{3,5}\.\d{1,2}", result_str))
+            has_percentages = bool(_re.search(r"\d+\.\d+\s*[%％]", result_str))
+            if has_prices or has_percentages:
                 return True
+            # Result has data but no actual numeric market data → not sufficient
+            continue
+        return True
     return False
 
 
@@ -969,6 +1004,184 @@ def _is_empty_tool_result(result: Any) -> bool:
     return not has_data
 
 
+def _heuristic_number_check(
+    answer: str,
+    tool_results: list[dict[str, Any]],
+    llm,
+    question: str,
+) -> str:
+    """Heuristic check: verify that key numbers in the answer appear in tool results.
+
+    Extracts significant numbers (prices, amounts, percentages with context) from
+    the LLM's answer and checks if they appear in the flattened tool results.
+    If a substantial portion of numbers cannot be found in the tool results,
+    the answer is likely fabricated and we add a warning or trigger verification.
+
+    Returns the (possibly modified) answer string.
+    """
+    import re as _re
+
+    # Flatten tool results into a single searchable text
+    result_texts: list[str] = []
+    for tr in tool_results:
+        name = tr.get("name", "")
+        data = tr.get("result", tr.get("error", ""))
+        if isinstance(data, (dict, list)):
+            data = json.dumps(data, ensure_ascii=False)
+        result_texts.append(str(data))
+    flat_results = " ".join(result_texts)
+
+    # Extract "significant" numbers from the answer — numbers that look like
+    # data points rather than formatting artifacts:
+    # - Numbers with Chinese units: 亿, 万, 千, 百, 元, 点, %, 倍
+    # - Numbers with currency symbols: ¥, $, HK$, US$
+    # - Decimal numbers that look like prices/rates (e.g., 3.14, 0.05)
+    # - Percentages: 1.5%, -2.3%
+    patterns = [
+        # Chinese unit patterns
+        _re.compile(r"(\d+(?:\.\d+)?)\s*(亿|万|千|百|元|港元|美元|点|％|%|倍)"),
+        # Currency patterns
+        _re.compile(r"[¥$￥]\s*(\d+(?:\.\d+)?)"),
+        _re.compile(r"HK\$\s*(\d+(?:\.\d+)?)"),
+        _re.compile(r"US\$\s*(\d+(?:\.\d+)?)"),
+        # Percentage patterns (standalone)
+        _re.compile(r"(\d+(?:\.\d+)?)\s*[%％]"),
+        # Price-like decimals (2+ decimal places, or 3-5 digit integer with 1-2 decimals)
+        _re.compile(r"(?<!\d)(\d{3,5}\.\d{1,2})(?!\d)"),
+        # Large integers (>= 1000, likely data points)
+        _re.compile(r"(?<!\d)(\d{4,})(?!\d)"),
+    ]
+
+    extracted_numbers: set[str] = set()
+    for pat in patterns:
+        for m in pat.finditer(answer):
+            num_text = m.group(0).strip()
+            # Skip numbers that look like dates (e.g., 2024, 2025, 2026)
+            if _re.match(r"^\d{4}$", num_text) and 2000 <= int(num_text) <= 2100:
+                continue
+            extracted_numbers.add(num_text)
+
+    if not extracted_numbers:
+        return answer  # No numbers to check, answer is likely qualitative
+
+    # Check each number against tool results using PRECISE matching
+    # Strategy: extract all numeric values from tool results as a set of
+    # normalized strings, then do exact comparison. No substring matching.
+    _tool_nums: set[str] = set()
+    # Extract all numbers from tool results (with context: keep decimal + unit)
+    for pat in patterns:
+        for m in pat.finditer(flat_results):
+            raw = m.group(0).strip()
+            if _re.match(r"^\d{4}$", raw) and 2000 <= int(raw) <= 2100:
+                continue
+            _tool_nums.add(raw)
+            _tool_nums.add(_re.sub(r"[^\d.]", "", raw))
+
+    missing: list[str] = []
+    found: list[str] = []
+    for num in extracted_numbers:
+        # Exact match against tool result numbers
+        if num in _tool_nums:
+            found.append(num)
+            continue
+        numeric_part = _re.sub(r"[^\d.]", "", num)
+        if numeric_part and numeric_part in _tool_nums:
+            found.append(num)
+            continue
+        missing.append(num)
+
+    total = len(extracted_numbers)
+    missing_ratio = len(missing) / total if total > 0 else 0
+
+    logger.info(
+        "heuristic_number_check: total=%d found=%d missing=%d ratio=%.2f missing=%s",
+        total, len(found), len(missing), missing_ratio,
+        json.dumps(missing[:5], ensure_ascii=False),
+    )
+
+    # ── Tightened thresholds: 25% for warning, 50% for strong ──
+    # If >= 50% of numbers are missing → high fabrication risk
+    if missing_ratio >= 0.5 and total >= 2:
+        logger.warning(
+            "heuristic_number_check: high fabrication risk — %d/%d numbers not in tool results",
+            len(missing), total,
+        )
+        # Try LLM-based verification as a second pass
+        if llm is not None:
+            try:
+                verified = _llm_verify_numbers(answer, missing, flat_results, llm, question)
+                if verified:
+                    return verified
+            except Exception:
+                logger.exception("heuristic_number_check: LLM verification failed")
+
+        # Fallback: add a strong warning
+        missing_preview = "、".join(missing[:5])
+        warning = (
+            f"\n\n> ⚠️ **数据一致性警告**：以上回答中的关键数据（{missing_preview}等）"
+            f"未在工具搜索结果中找到对应来源，可能不准确。建议核实后参考。"
+        )
+        return answer + warning
+
+    # If >= 25% of numbers are missing, add a lighter warning
+    if missing_ratio >= 0.25 and total >= 3:
+        missing_preview = "、".join(missing[:3])
+        warning = (
+            f"\n\n> ⚠️ 部分数据（{missing_preview}）未在搜索结果中确认，请谨慎参考。"
+        )
+        return answer + warning
+
+    return answer
+
+
+def _llm_verify_numbers(
+    answer: str,
+    missing_numbers: list[str],
+    tool_results_text: str,
+    llm,
+    question: str,
+) -> str | None:
+    """Use a separate LLM call to verify if the answer is supported by tool results.
+
+    Returns a corrected answer string, or None if verification is inconclusive.
+    """
+    verify_prompt = f"""你是一个事实核查员。请检查以下 AI 回答是否基于给定的工具搜索结果。
+
+用户问题：{question}
+
+AI 回答：
+{answer[:1500]}
+
+工具搜索结果（截取）：
+{tool_results_text[:3000]}
+
+请判断 AI 回答中的事实陈述是否有工具搜索结果支持。特别关注以下数字是否出现在工具结果中：{', '.join(missing_numbers[:5])}
+
+返回 JSON：
+{{"verdict": "SUPPORTED"|"PARTIAL"|"FABRICATED", "reason": "简短原因", "corrected_answer": "修正后的回答（仅当 FABRICATED 时需要）"}}
+
+如果 verdict 是 FABRICATED，corrected_answer 应该只包含工具结果中确实存在的信息，并诚实说明哪些数据无法获取。"""
+
+    try:
+        data = llm.complete_json(
+            verify_prompt,
+            [{"role": "user", "content": "请核查以上回答的事实准确性。"}],
+            temperature=0.0,
+        )
+        if not isinstance(data, dict):
+            return None
+        verdict = str(data.get("verdict", "")).upper()
+        if verdict == "FABRICATED" and data.get("corrected_answer"):
+            logger.info("heuristic_number_check: LLM verification found fabrication, using corrected answer")
+            return str(data["corrected_answer"])
+        if verdict == "PARTIAL":
+            reason = data.get("reason", "")
+            logger.info("heuristic_number_check: LLM verification found partial support: %s", reason)
+        return None
+    except Exception:
+        return None
+
+
 def _build_react_final_answer(
     react: dict[str, Any],
     tool_results: list[dict[str, Any]],
@@ -992,21 +1205,28 @@ def _build_react_final_answer(
                 answer = msg["content"]
                 break
 
-    # If still no answer but we have tool results, ask the LLM to summarize.
-    # This covers early-stop scenarios where the LLM was stuck in a tool-calling
-    # loop and never produced a text-only answer.
-    #
-    # P0 guard: if ALL tool results are errors or empty (no real data),
-    # skip LLM summarization to prevent hallucination on empty data.
-    if not answer and tool_results:
+    # ── P0 guard: if ALL tool results are empty/errors, override ANY answer ──
+    # This runs UNCONDITIONALLY — even when the LLM already produced text.
+    # The LLM may fabricate data when tools return empty results, so we must
+    # intercept BEFORE the answer reaches the user.
+    if tool_results:
         all_empty = all(
             _is_empty_tool_result(tr.get("result", tr.get("error", "")))
             for tr in tool_results
         )
         if all_empty:
             answer = "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。"
-        else:
+        elif not answer:
+            # Only call LLM summarization when we have real data but no answer yet
             answer = _llm_summarize_from_results(question, tool_results, messages, llm)
+
+    # ── P1 guard: heuristic number consistency check ──
+    # Even when tools return non-empty results, the LLM may fabricate specific
+    # numbers that don't appear in the tool results. This lightweight check
+    # extracts numbers from the answer and verifies them against tool results.
+    _all_empty = all_empty if tool_results else True
+    if answer and tool_results and not _all_empty:
+        answer = _heuristic_number_check(answer, tool_results, llm, question)
 
     answer = _fix_media_answer(answer, tool_results)
 

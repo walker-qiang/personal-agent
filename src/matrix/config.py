@@ -67,8 +67,7 @@ ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
 
 # ---- Defaults ----
 
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
-DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_AGNES_MODEL = "agnes-2.0-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
@@ -82,11 +81,7 @@ KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
     "agnes": [
         {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash", "desc": "免费 · 256K上下文"},
     ],
-    "anthropic": [
-        {"id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet", "desc": "推荐"},
-        {"id": "claude-3-5-haiku-latest", "name": "Claude 3.5 Haiku", "desc": "快速"},
-    ],
-}
+    }
 
 # Image generation models
 IMAGE_MODELS: dict[str, list[dict[str, str]]] = {
@@ -122,8 +117,8 @@ class AgentConfig:
     skills_base_dir: Path  # root dir for skills/{common,investment,general}
     host: str
     port: int
-    agent_provider: str = "agnes"
-    agent_model: str = DEFAULT_AGNES_MODEL
+    agent_provider: str = "deepseek"
+    agent_model: str = DEFAULT_DEEPSEEK_MODEL
     agent_max_tokens: int = 8192
     agent_model_timeout_sec: float = 45.0
     deepseek_api_key: str = ""
@@ -158,8 +153,6 @@ class AgentConfig:
     def active_api_key(self) -> str:
         if self.agent_provider == "deepseek":
             return self.deepseek_api_key
-        if self.agent_provider == "anthropic":
-            return self.anthropic_api_key
         if self.agent_provider == "agnes":
             return self.agnes_api_key
         return ""
@@ -170,12 +163,11 @@ class AgentConfig:
 
     @property
     def llm_unavailable_reason(self) -> str:
-        if self.agent_provider not in {"deepseek", "anthropic", "agnes"}:
+        if self.agent_provider not in {"deepseek", "agnes"}:
             return f"unsupported AGENT_PROVIDER: {self.agent_provider}"
         if not self.active_api_key:
             key_map = {
                 "deepseek": ENV_DEEPSEEK_API_KEY,
-                "anthropic": ENV_ANTHROPIC_API_KEY,
                 "agnes": ENV_AGNES_API_KEY,
             }
             key_name = key_map.get(self.agent_provider, "API key")
@@ -220,7 +212,7 @@ def load_config() -> AgentConfig:
         skills_base_dir = root / ".." / "personal-assets" / "技能"
 
     host, port = load_bind_addr()
-    provider = os.environ.get(ENV_AGENT_PROVIDER, "agnes").strip().lower() or "agnes"
+    provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
 
     # Log level: map string to int
@@ -364,8 +356,6 @@ def load_bind_addr() -> tuple[str, int]:
 
 
 def default_model(provider: str) -> str:
-    if provider == "anthropic":
-        return DEFAULT_ANTHROPIC_MODEL
     if provider == "agnes":
         return DEFAULT_AGNES_MODEL
     return DEFAULT_DEEPSEEK_MODEL

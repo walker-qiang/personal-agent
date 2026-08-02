@@ -38,6 +38,7 @@ from ._helpers import (
     _prune_tools,
     _push_event,
     _run_budget_and_compact,
+    _today_cn,
     _trace,
     _trace_span,
     CircuitBreaker,
@@ -98,7 +99,7 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         agent_name=agent_def.name,
         persona=agent_def.persona,
         task=task,
-        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        today=_today_cn(),
     )
 
     # Pinned working memory + DataBus index

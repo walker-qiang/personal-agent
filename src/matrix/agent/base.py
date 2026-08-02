@@ -33,7 +33,7 @@ class AgentDefinition:
     output_constraints: list[str] = field(default_factory=list)
     safety_rules: list[str] = field(default_factory=list)
     # LLM override: if set, domain agent uses its own LLM config instead of commander's
-    llm_provider: str = ""  # deepseek | anthropic | agnes
+    llm_provider: str = ""  # deepseek | agnes
     llm_model: str = ""  # specific model override
 
     @property

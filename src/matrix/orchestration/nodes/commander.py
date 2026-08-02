@@ -27,6 +27,7 @@ from ._helpers import (
     _extract_media_urls,
     _fix_media_answer,
     _get_configurable,
+    _heuristic_number_check,
     _inject_agent_guidelines,
     _inject_data_index,
     _inject_working_memory,
@@ -35,6 +36,7 @@ from ._helpers import (
     _prune_tools,
     _push_event,
     _run_budget_and_compact,
+    _today_cn,
     COMMANDER_AGGREGATE_PROMPT,
     COMMANDER_PLAN_PROMPT,
     DOMAIN_AGENT_REACT_SYSTEM,
@@ -357,7 +359,7 @@ def _run_domain_agent_react(
         agent_name=agent_def.name,
         persona=agent_def.persona,
         task=task,
-        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        today=_today_cn(),
     )
 
     # Pinned working memory + DataBus index
@@ -994,6 +996,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         reflections_text = "\n".join(f"- {r}" for r in reflexion_memory)
         system_prompt = (
             COMMANDER_AGGREGATE_PROMPT.format(
+                today=_today_cn(),
                 question=user_msg,
                 results=json.dumps(results_summary, ensure_ascii=False, indent=2),
             )
@@ -1004,6 +1007,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         )
     else:
         system_prompt = COMMANDER_AGGREGATE_PROMPT.format(
+            today=_today_cn(),
             question=user_msg,
             results=json.dumps(results_summary, ensure_ascii=False, indent=2),
         )
@@ -1025,6 +1029,11 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
                 final_answer = build_verified_output(final_answer, verification)
             else:
                 final_answer = _strip_all_verification_tags(final_answer)
+                # P1 fallback: heuristic number check when no [VERIFICATION] blocks
+                # Use main agent LLM (DeepSeek V4 Flash) for regex-based verification
+                final_answer = _heuristic_number_check(
+                    final_answer, all_tool_results, cfg["llm"], user_msg,
+                )
 
         result = {"final_answer": final_answer, "needs_summary": False}
         if is_retry:
