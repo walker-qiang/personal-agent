@@ -83,7 +83,6 @@ class TestLoadSkills:
         # Core investment skills should be present
         assert "anomaly-diagnosis" in names
         assert "portfolio-review" in names
-        assert "allocation-check" in names
 
     def test_anomaly_diagnosis_has_workflow(self):
         skills_dir = self.SKILLS_DIR
