@@ -290,9 +290,9 @@ class TestCodeToolRegistration:
         registry = ToolRegistry()
         guard = register_all(registry)
         registry.set_code_guard(guard)
-        from matrix.guardrails.tool_guard import ToolGuardError
-        with pytest.raises(ToolGuardError, match="code blocked"):
-            registry.call("code.run_python", {"code": "os.system('ls')"})
+        result = registry.call("code.run_python", {"code": "os.system('ls')"})
+        assert "error" in result
+        assert "代码安全策略拦截" in result["error"]
 
     def test_guard_allows_safe_call_through_registry(self):
         registry = ToolRegistry()
