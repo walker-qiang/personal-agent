@@ -1,0 +1,495 @@
+{
+  "description": "Golden dataset — 35 test cases covering all domain agents, tool categories, and edge cases for the personal-agent evaluation framework.",
+  "cases": [
+    {
+      "case_id": "golden_greeting",
+      "user_input": "你好",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": ["finance.holdings_summary", "finance_query", "web_search", "news_search", "knowledge_search", "code.run_python", "agnes.generate_image", "agnes.generate_video"]
+      },
+      "tags": ["greeting", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_identity",
+      "user_input": "你是谁？你是做什么的？",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": ["finance.holdings_summary", "finance_query", "web_search", "news_search", "knowledge_search", "code.run_python"]
+      },
+      "tags": ["identity", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_help",
+      "user_input": "你能帮我做什么？你有哪些功能？",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": ["finance.holdings_summary", "finance_query", "web_search", "news_search", "knowledge_search", "code.run_python"]
+      },
+      "tags": ["help", "basic"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_holdings",
+      "user_input": "查询我的当前持仓",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.holdings_summary"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "holdings"],
+      "difficulty": "easy",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_asset_lookup",
+      "user_input": "帮我查找苹果公司（AAPL）的资产信息",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.asset_lookup"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "asset_lookup"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_bucket_allocation",
+      "user_input": "查看我的桶配置情况",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.bucket_allocation"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "bucket_allocation"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_snapshot_history",
+      "user_input": "查看我最近一个月的持仓快照历史",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.snapshot_history"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "snapshot", "history"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_portfolio_analysis",
+      "user_input": "分析我的投资组合整体表现",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "portfolio", "analysis"],
+      "difficulty": "medium",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_allocation_check",
+      "user_input": "检查我的资产配置比例是否合理",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "allocation", "check"],
+      "difficulty": "medium",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_missing_asset",
+      "user_input": "查询不存在的股票代码 ZZZ999",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "edge_case", "error_handling"],
+      "difficulty": "hard",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_recent_snapshot",
+      "user_input": "我最近一次的持仓快照是什么时候",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.recent_snapshots"],
+        "forbidden_tools": []
+      },
+      "tags": ["finance", "snapshot", "recent"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_portfolio_risk",
+      "user_input": "评估我的投资组合风险等级",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "risk", "analysis"],
+      "difficulty": "medium",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_allocation_deviation",
+      "user_input": "我的实际配置和目标配置偏差多少",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "allocation", "deviation"],
+      "difficulty": "medium",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_investment_research",
+      "user_input": "研究特斯拉（TSLA）这只股票的投资价值",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "research"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_watchlist",
+      "user_input": "查看我的投资观察列表",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "watchlist"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_anomaly_diagnosis",
+      "user_input": "诊断我持仓中的异常波动",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "anomaly", "diagnosis"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_market_query",
+      "user_input": "查询上证指数今日行情",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["investment", "market", "query"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_news_search",
+      "user_input": "搜索最新的AI行业新闻",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["news_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["web", "news", "search"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_web_fetch",
+      "user_input": "帮我获取 https://example.com 这个网页的内容",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["web_fetch"],
+        "forbidden_tools": []
+      },
+      "tags": ["web", "fetch"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_realtime_quote",
+      "user_input": "查询贵州茅台的实时股价",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["web", "finance", "realtime"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_weather",
+      "user_input": "今天北京天气怎么样",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["web_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["web", "weather"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_knowledge_search",
+      "user_input": "搜索我的知识库中关于投资策略的笔记",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["knowledge_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["knowledge", "search"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_note_ingestion",
+      "user_input": "把这篇文章整理成知识笔记：https://example.com/article",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["knowledge", "ingestion"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_brainstorming",
+      "user_input": "帮我头脑风暴一个适合程序员的副业创意",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["knowledge", "brainstorming"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_personal_reflection",
+      "user_input": "帮我做一次本周的个人反思总结",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["knowledge", "reflection"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_wiki_health",
+      "user_input": "检查我的知识库健康状况",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["knowledge", "wiki", "health"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_code_execution",
+      "user_input": "运行一段Python代码，计算斐波那契数列前10项",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["code.run_python"],
+        "forbidden_tools": []
+      },
+      "tags": ["coding", "execution"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_code_analysis",
+      "user_input": "分析这段代码的时间复杂度：def fib(n): return fib(n-1)+fib(n-2) if n>1 else n",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["coding", "analysis"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_debugging",
+      "user_input": "这段代码报错了，帮我看看哪里有问题：print(x)",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": []
+      },
+      "tags": ["coding", "debugging"],
+      "difficulty": "medium",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_multi_domain",
+      "user_input": "查询我的持仓情况，并搜索最新的市场新闻",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.holdings_summary", "news_search"],
+        "forbidden_tools": []
+      },
+      "tags": ["multi-step", "finance", "web"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_complex_analysis",
+      "user_input": "分析我的投资组合，搜索相关市场资讯，然后给出优化建议",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.holdings_summary"],
+        "forbidden_tools": []
+      },
+      "tags": ["multi-step", "analysis", "investment"],
+      "difficulty": "hard",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_cross_agent",
+      "user_input": "帮我分析持仓风险，并生成一张投资报告的封面图",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["agnes.generate_image"],
+        "forbidden_tools": []
+      },
+      "tags": ["multi-step", "cross-agent", "finance", "media"],
+      "difficulty": "hard",
+      "risk": "medium"
+    },
+    {
+      "case_id": "golden_empty_query",
+      "user_input": "",
+      "expected": {
+        "outcome": "clarify",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": ["finance.holdings_summary", "finance_query", "web_search", "news_search", "knowledge_search", "code.run_python", "agnes.generate_image", "agnes.generate_video"]
+      },
+      "tags": ["edge_case", "empty"],
+      "difficulty": "easy",
+      "risk": "low"
+    },
+    {
+      "case_id": "golden_long_query",
+      "user_input": "请帮我详细分析一下我目前的投资组合状况，包括但不限于以下几个方面：第一，持仓的整体分布情况，各个资产的占比是多少；第二，当前的风险等级评估，是否处于合理范围内；第三，资产配置的合理性分析，实际配置和目标配置之间的偏差有多大；第四，历史表现趋势，最近几个月的收益走势如何；第五，与市场大盘走势的对比，跑赢了还是跑输了大盘；第六，找出可能存在的问题和潜在的风险点；第七，给出具体的优化调整建议，包括应该增持哪些资产、减持哪些资产；第八，把以上所有分析结果整理成一份完整的投资报告，方便我保存和回顾。另外如果方便的话，也帮我搜索一下最近的市场新闻，看看有没有影响我持仓的重大事件。",
+      "expected": {
+        "outcome": "answer",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": ["finance.holdings_summary"],
+        "forbidden_tools": []
+      },
+      "tags": ["edge_case", "long_query"],
+      "difficulty": "hard",
+      "risk": "high"
+    },
+    {
+      "case_id": "golden_ambiguous_query",
+      "user_input": "那个东西怎么样了",
+      "expected": {
+        "outcome": "clarify",
+        "must_include": [],
+        "must_not_include": ["error"],
+        "required_tools": [],
+        "forbidden_tools": ["finance.holdings_summary", "finance_query", "web_search", "news_search", "knowledge_search", "code.run_python", "agnes.generate_image", "agnes.generate_video"]
+      },
+      "tags": ["edge_case", "ambiguous"],
+      "difficulty": "hard",
+      "risk": "low"
+    }
+  ]
+}

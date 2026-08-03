@@ -31,6 +31,7 @@ from ._helpers import (
     _heuristic_number_check,
     _inject_agent_guidelines,
     _inject_data_index,
+    _inject_lessons,
     _inject_working_memory,
     _is_high_risk,
     _is_refusal,
@@ -42,10 +43,12 @@ from ._helpers import (
     COMMANDER_PLAN_PROMPT,
     DOMAIN_AGENT_REACT_SYSTEM,
     FALLBACK_AGGREGATE_PROMPT,
+    LESSON_EXTRACTION_PROMPT,
     MAX_PLAN_STEPS,
     MAX_REACT_ITERATIONS,
     MAX_SUBTASK_ITERATIONS,
     MAX_SUBTASKS,
+    PREFLECT_PROMPT,
     REFLECTION_PROMPT,
     REFLEXION_PROMPT,
     REPLAN_PROMPT,
@@ -287,6 +290,80 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
 
     logger.info("commander: plan_type=%s steps=%d agents=%s", plan_type, len(plan), agent_ids_in_plan)
 
+    # ── PreFlect: pre-execution critique for multi-step plans ──────────────
+    # Only trigger for multi-step plans (len > 1) — single-step plans are
+    # already optimized by L0/L1 skill routing and don't need critique.
+    original_plan = list(plan)  # Save for ToT comparison
+    prelect_revised = False
+    if len(plan) > 1:
+        try:
+            plan_json = json.dumps(plan, ensure_ascii=False)
+            critique = llm.complete_json(
+                PREFLECT_PROMPT.format(question=user_msg, plan=plan_json),
+                [{"role": "user", "content": user_msg}],
+                temperature=0.0,
+            )
+
+            if critique.get("needs_revision") and critique.get("adjusted_plan"):
+                adjusted = critique["adjusted_plan"]
+                if isinstance(adjusted, list) and adjusted:
+                    # Validate adjusted plan: same agent_ids
+                    adjusted_valid = all(
+                        s.get("agent_id", "") in valid_ids for s in adjusted
+                    )
+                    if adjusted_valid:
+                        logger.info(
+                            "commander: PreFlect revised plan — issues: %s",
+                            critique.get("issues", []),
+                        )
+                        plan = adjusted[:MAX_PLAN_STEPS]
+                        # Recompute plan_type
+                        adjusted_agent_ids = {s.get("agent_id", "") for s in plan}
+                        is_subtask = len(plan) > 1 and len(adjusted_agent_ids) == 1
+                        plan_type = "subtask" if is_subtask else "agent"
+                        prelect_revised = True
+                    else:
+                        logger.warning(
+                            "commander: PreFlect adjusted plan has invalid agent_ids, keeping original"
+                        )
+                else:
+                    logger.info(
+                        "commander: PreFlect found issues but no adjusted plan — keeping original. issues: %s",
+                        critique.get("issues", []),
+                    )
+            else:
+                logger.info("commander: PreFlect approved plan (no revision needed)")
+        except (LLMError, json.JSONDecodeError, ValueError) as e:
+            logger.warning("commander: PreFlect failed: %s", type(e).__name__)
+
+    # ── ToT: compare original vs revised plan when PreFlect changed it ──────
+    if prelect_revised and original_plan != plan:
+        try:
+            from ..tot import TreeSearchEngine
+            tot_engine = TreeSearchEngine(llm=llm)
+            if tot_engine.should_use_tot(user_msg, len(plan)):
+                tot_result = tot_engine.select_best_plan(
+                    user_msg, [original_plan, plan]
+                )
+                if tot_result.used_tot and tot_result.best_path:
+                    best = tot_result.best_path[0]
+                    if best.result == original_plan:
+                        logger.info(
+                            "commander: ToT selected original plan (score=%.2f) over revised",
+                            best.value,
+                        )
+                        plan = original_plan
+                        adjusted_agent_ids = {s.get("agent_id", "") for s in plan}
+                        is_subtask = len(plan) > 1 and len(adjusted_agent_ids) == 1
+                        plan_type = "subtask" if is_subtask else "agent"
+                    else:
+                        logger.info(
+                            "commander: ToT confirmed revised plan (score=%.2f)",
+                            best.value,
+                        )
+        except Exception as e:
+            logger.warning("commander: ToT plan selection failed: %s", type(e).__name__)
+
     # P2: Emit plan creation progress event
     if len(plan) > 1:
         _push_event(cfg, "progress", {
@@ -515,6 +592,9 @@ def _run_domain_agent_react(
     system_prompt = enrich_system_prompt(
         system_prompt, agent_def=agent_def, agent_registry=cfg.get("agent_registry"),
     )
+
+    # P3: Inject cross-session failure lessons
+    system_prompt = _inject_lessons(system_prompt, task, agent_id, cfg)
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
@@ -1283,6 +1363,9 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         if not issues:
             return {}
 
+        # ── P3: Extract cross-session lesson from failure ──────────────
+        _extract_and_store_lesson(cfg, llm, user_msg, answer, issues)
+
         # ---- Reflexion loop: retry with self-reflection ----
         if current_attempt < max_attempts:
             # Generate self-reflection
@@ -1336,6 +1419,71 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         logger.warning("reflection_node LLM failed: %s", type(e).__name__)
 
     return {}
+
+
+def _extract_and_store_lesson(
+    cfg: dict[str, Any],
+    llm: Any,
+    user_msg: str,
+    answer: str,
+    issues: list[str],
+) -> None:
+    """P3: Extract a cross-session lesson from a failed answer and persist it.
+
+    Uses the LLM to generate a structured lesson from the failure context,
+    then stores it in LessonStore for future sessions. Best-effort: failures
+    in extraction or storage are logged but never propagated.
+    """
+    lesson_store = cfg.get("lesson_store")
+    if lesson_store is None:
+        return
+
+    try:
+        lesson_data = llm.complete_json(
+            LESSON_EXTRACTION_PROMPT.format(
+                question=user_msg[:500],
+                answer=answer[:1000],
+                issues="\n".join(f"- {i}" for i in issues[:5]),
+            ),
+            [{"role": "user", "content": "Extract the lesson."}],
+            temperature=0.0,
+        )
+
+        if not isinstance(lesson_data, dict):
+            return
+
+        task_pattern = str(lesson_data.get("task_pattern", "")).strip()
+        failure_type = str(lesson_data.get("failure_type", "incomplete")).strip()
+        lesson_text = str(lesson_data.get("lesson_text", "")).strip()
+        severity = str(lesson_data.get("severity", "medium")).strip()
+
+        if not lesson_text:
+            return
+
+        # Determine agent_id from plan
+        plan = cfg.get("delegation_plan", [])
+        agent_id = ""
+        if plan:
+            current_step = cfg.get("current_step", 0)
+            if current_step < len(plan):
+                agent_id = plan[current_step].get("agent_id", "")
+
+        user_id = cfg.get("user_id", "")
+
+        lesson_store.record_lesson(
+            task_pattern=task_pattern or user_msg[:100],
+            failure_type=failure_type,
+            lesson_text=lesson_text,
+            agent_id=agent_id,
+            user_id=user_id,
+            severity=severity,
+        )
+        logger.info(
+            "lesson_extracted: type=%s agent=%s pattern=%s",
+            failure_type, agent_id, task_pattern[:50],
+        )
+    except (LLMError, json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+        logger.debug("lesson_extraction failed: %s", type(e).__name__)
 
 
 # ── Confirm (HITL) ───────────────────────────────────────────────────────────

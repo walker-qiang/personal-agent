@@ -19,6 +19,7 @@ rag = [
     "sentence-transformers>=3.0.0",
     "rank-bm25>=0.2.2",
     "jieba>=0.42.1",
+    "networkx>=3.0",
 ]
 mcp = [
     "mcp>=1.27.0",
@@ -37,3 +38,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

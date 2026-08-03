@@ -1153,6 +1153,8 @@ class TestPlanAndExecuteGraph:
                 {"step": 3, "agent_id": "investment-analyst", "task": "汇总建议",
                  "depends_on": [2], "output_key": "summary", "skill_name": "", "purpose": "汇总"},
             ]),
+            # PreFlect: approve plan (no revision needed)
+            '{"needs_revision": false, "issues": [], "adjusted_plan": []}',
             # delegate Step 1
             "市场数据：上证指数3300点。",
             # replan_node: batch 1 check
@@ -1198,6 +1200,8 @@ class TestPlanAndExecuteGraph:
                 {"step": 3, "agent_id": "investment-analyst", "task": "对比分析",
                  "depends_on": [1, 2], "output_key": "comparison", "skill_name": "", "purpose": "对比"},
             ]),
+            # PreFlect: approve plan (no revision needed)
+            '{"needs_revision": false, "issues": [], "adjusted_plan": []}',
             # delegate Step 1 and Step 2 run in parallel
             "A股数据：沪深300上涨。",
             "港股数据：恒生指数持平。",

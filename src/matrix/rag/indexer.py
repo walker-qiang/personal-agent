@@ -5,11 +5,15 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import chromadb
 
+from .context_guard import ContextGuard
 from .embedder import LocalEmbedder
+
+if TYPE_CHECKING:
+    from .knowledge_graph import KnowledgeGraph, EntityExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +112,8 @@ class DocumentIndexer:
         persist_dir: Optional[str] = None,
         chunk_size: int = _CHUNK_SIZE,
         chunk_overlap: int = _CHUNK_OVERLAP,
+        knowledge_graph: Optional["KnowledgeGraph"] = None,
+        entity_extractor: Optional["EntityExtractor"] = None,
     ) -> None:
         """
         Args:
@@ -115,6 +121,8 @@ class DocumentIndexer:
             persist_dir: ChromaDB 持久化目录，若为 None 则使用默认临时目录。
             chunk_size: 分块大小（字符数）。
             chunk_overlap: 块间重叠字符数。
+            knowledge_graph: 可选的知识图谱实例，索引时自动抽取实体。
+            entity_extractor: 可选的实体抽取器，若 None 且 knowledge_graph 存在则自动创建。
         """
         self.embedder = embedder or LocalEmbedder()
         self.chunk_size = chunk_size
@@ -133,10 +141,19 @@ class DocumentIndexer:
             name=_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
+
+        # Context Guard: 文档入库前的清洗层（移除 prompt injection、截断超长行）
+        self._context_guard = ContextGuard()
+
+        # Knowledge Graph: 可选的实体图谱抽取
+        self._knowledge_graph = knowledge_graph
+        self._entity_extractor = entity_extractor
+
         logger.info(
-            "DocumentIndexer 已初始化, persist_dir=%s, collection=%s",
+            "DocumentIndexer 已初始化, persist_dir=%s, collection=%s, kg=%s",
             persist_dir,
             _COLLECTION_NAME,
+            "enabled" if knowledge_graph else "disabled",
         )
 
     # ------------------------------------------------------------------
@@ -252,6 +269,11 @@ class DocumentIndexer:
         if not content.strip():
             return 0
 
+        # Context Guard: 在分块前清洗内容（移除 prompt injection、截断超长行）
+        guard_result = self._context_guard.sanitize(content)
+        content = guard_result.content
+        guard_metadata = guard_result.metadata
+
         # 分块
         chunks = _chunk_text(content, self.chunk_size, self.chunk_overlap)
         if not chunks:
@@ -274,6 +296,9 @@ class DocumentIndexer:
                     "source_file": file_path,
                     "chunk_index": i,
                     "content": chunk_text,
+                    # Context Guard 元数据标记
+                    "source_type": guard_metadata.get("source_type", "external"),
+                    "sanitized": guard_metadata.get("sanitized", True),
                 }
             )
 
@@ -290,4 +315,32 @@ class DocumentIndexer:
             logger.error("写入 ChromaDB 失败 (文件: %s): %s", file_path, exc)
             return 0
 
+        # Knowledge Graph: 从文档中抽取实体和关系
+        if self._knowledge_graph is not None:
+            self._extract_entities_from_chunks(chunks, file_path)
+
         return len(chunks)
+
+    def _extract_entities_from_chunks(self, chunks: List[str], file_path: str) -> None:
+        """从文档分块中抽取实体并添加到知识图谱."""
+        if not self._entity_extractor:
+            from .knowledge_graph import EntityExtractor
+            self._entity_extractor = EntityExtractor()
+
+        total_entities = 0
+        total_relations = 0
+        for chunk in chunks:
+            try:
+                result = self._entity_extractor.extract(chunk, source_file=file_path)
+                if result.entities or result.relations:
+                    self._knowledge_graph.add_extraction(result)
+                    total_entities += len(result.entities)
+                    total_relations += len(result.relations)
+            except Exception as exc:
+                logger.debug("entity extraction failed for chunk in %s: %s", file_path, exc)
+
+        if total_entities or total_relations:
+            logger.debug(
+                "kg_extract: %d entities, %d relations from %s",
+                total_entities, total_relations, file_path,
+            )

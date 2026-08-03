@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphInterrupt
@@ -32,6 +32,7 @@ from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ..memory import EvolutionConfig, MemoryEvolution
+from ..memory.lesson_store import LessonStore
 from ._utils import(
     MEMORY_EXTRACTION_PROMPT,
     _drain_queue,
@@ -116,7 +117,21 @@ class ChatService:
             ),
             llm=self._pipeline_llm if self.config.llm_available else None,
         )
+        # P3: Cross-session lesson store (failure experience persistence)
+        self._lesson_store = LessonStore(
+            config.root_path / "var" / "agent" / "lessons.db"
+        )
         self._register_internal_tools()
+
+        # P3: Register agent-as-tool wrappers (hierarchical agent architecture)
+        try:
+            from ..tools.agent_tool import register_agent_tools
+            cfg_factory = self._make_cfg_factory()
+            registered = register_agent_tools(self.tools, self.agent_registry, cfg_factory)
+            if registered:
+                logger.info("agent_as_tool: registered %d agent tools", registered)
+        except Exception as exc:
+            logger.warning("agent_as_tool: registration failed: %s", exc)
 
         # Configure rate limiter for LLM API calls
         if config.rate_limit_per_sec > 0:
@@ -502,6 +517,29 @@ class ChatService:
             handler=self._handle_working_memory,
         ))
 
+    def _make_cfg_factory(self) -> Callable[[], dict[str, Any]]:
+        """Create a cfg factory for agent-as-tool handlers.
+
+        Returns a callable that produces a base cfg dict with service-level
+        configuration. The handler will merge in task-specific fields (question,
+        working_memory, etc.) before calling _run_domain_agent_react.
+        """
+        def factory() -> dict[str, Any]:
+            return {
+                "llm": self._default_llm,
+                "pipeline_llm": self._pipeline_llm,
+                "agent_registry": self.agent_registry,
+                "full_tools": self.tools,
+                "ref_store": self._ref_store,
+                "lesson_store": self._lesson_store,
+                "history": [],
+                "attachments": [],
+                "working_memory": {"pinned": "", "insights": []},
+                "circuit_breaker": CircuitBreaker(),
+                "question": "",
+            }
+        return factory
+
     def _cleanup_stale_checkpoint(self, thread_id: str, call_id: str) -> None:
         """Delete stale checkpoints from a previous call to prevent reducer merge.
 
@@ -710,6 +748,8 @@ class ChatService:
                     "insights": list(self._wm_insights.get(user_id, [])),
                 },
                 "circuit_breaker": CircuitBreaker(),
+                "lesson_store": self._lesson_store,
+                "user_id": user_id,
             },
             "thread_id": sid,
         }

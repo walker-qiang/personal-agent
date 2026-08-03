@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -106,22 +107,89 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from ..rag.embedder import LocalEmbedder
             from ..rag.retriever import HybridRetriever
             from ..rag.indexer import DocumentIndexer
+            from ..rag.knowledge_graph import KnowledgeGraph, EntityExtractor, GraphRetriever
 
             embedder = LocalEmbedder(model_name=config.rag_embed_model)
+
+            # Initialize Knowledge Graph
+            kg_persist_path = os.path.join(config.rag_persist_dir, "knowledge_graph.json")
+            knowledge_graph = KnowledgeGraph(persist_path=kg_persist_path)
+            entity_extractor = None
+            graph_retriever = GraphRetriever(knowledge_graph)
+
             indexer = DocumentIndexer(
                 embedder=embedder,
                 persist_dir=config.rag_persist_dir,
+                knowledge_graph=knowledge_graph,
+                entity_extractor=entity_extractor,
             )
             chunk_count = indexer.index_directory(config.rag_docs_path)
             logger.info(
                 "rag: indexed %d chunks from %s (persist=%s)",
                 chunk_count, config.rag_docs_path, config.rag_persist_dir,
             )
+
+            # Save knowledge graph after indexing
+            if not knowledge_graph.is_empty:
+                knowledge_graph.save()
+                logger.info(
+                    "rag: knowledge graph — %s",
+                    knowledge_graph.stats,
+                )
+
             app.state.retriever = HybridRetriever(
                 embedder=embedder,
                 persist_dir=config.rag_persist_dir,
             )
-            register_rag_tools(tools_registry, retriever=app.state.retriever)
+
+            # Build AgenticSearch for Agentic RAG (query rewriting + grading + multi-step)
+            agentic_search = None
+            if config.llm_available:
+                try:
+                    from ..rag.agentic_search import AgenticSearch
+                    from ..llm import build_llm_client
+
+                    pipeline_llm = build_llm_client(
+                        provider=config.pipeline_provider,
+                        deepseek_api_key=config.deepseek_api_key,
+                        anthropic_api_key=config.anthropic_api_key,
+                        agnes_api_key=config.agnes_api_key,
+                        model=config.pipeline_model,
+                        base_url=(
+                            config.agnes_base_url
+                            if config.pipeline_provider == "agnes"
+                            else config.deepseek_base_url
+                        ),
+                        max_tokens=config.agent_max_tokens,
+                        timeout=config.agent_model_timeout_sec,
+                    )
+
+                    # Wire entity extractor with LLM
+                    entity_extractor = EntityExtractor(llm=pipeline_llm)
+                    indexer._entity_extractor = entity_extractor
+
+                    # CRAG fallback: use web_search tool if available
+                    def _web_fallback(query: str) -> dict:
+                        web_tool = tools_registry.get("web_search")
+                        if web_tool and web_tool.handler:
+                            return web_tool.handler(query=query)
+                        return {"results": []}
+
+                    agentic_search = AgenticSearch(
+                        retriever=app.state.retriever,
+                        llm=pipeline_llm,
+                        web_search_fn=_web_fallback,
+                        graph_retriever=graph_retriever,
+                    )
+                    logger.info("rag: agentic search enabled (query rewriting + grading + knowledge graph)")
+                except Exception as agentic_exc:
+                    logger.warning("rag: agentic search init failed (using simple retrieval): %s", agentic_exc)
+
+            register_rag_tools(
+                tools_registry,
+                retriever=app.state.retriever,
+                agentic_search=agentic_search,
+            )
             logger.info("rag: retriever ready")
         except Exception as exc:
             app.state.rag_error = str(exc)

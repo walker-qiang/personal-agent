@@ -32,6 +32,7 @@ from ._helpers import (
     _get_configurable,
     _inject_agent_guidelines,
     _inject_data_index,
+    _inject_lessons,
     _inject_working_memory,
     _is_refusal,
     _now_ts,
@@ -111,6 +112,9 @@ def react_prepare_node(state: AgentState, *, config: RunnableConfig) -> dict[str
 
     # Phase 5: Enrich with project context (AGENTS.md) + skills清单
     system_prompt = enrich_system_prompt(system_prompt, agent_def=agent_def, agent_registry=agent_registry)
+
+    # P3: Inject cross-session failure lessons
+    system_prompt = _inject_lessons(system_prompt, task, agent_id, cfg)
 
     react = {
         "messages": react_messages,

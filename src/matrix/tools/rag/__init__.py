@@ -8,16 +8,24 @@ from ..registry import ToolRegistry
 from . import knowledge
 
 
-def register_all(registry: ToolRegistry, retriever: Any = None) -> None:
+def register_all(
+    registry: ToolRegistry,
+    retriever: Any = None,
+    agentic_search: Any = None,
+) -> None:
     """Register RAG tools in the given registry.
 
     If retriever is provided, injects it into the knowledge_search handler.
-    If retriever is None, registers the tool anyway (returns error on call).
+    If agentic_search is provided, injects it for Agentic RAG (query rewriting + grading).
+    If both are None, registers the tool anyway (returns error on call).
     """
     from ..base import ToolDefinition
 
     if retriever is not None:
         knowledge.set_retriever(retriever)
+
+    if agentic_search is not None:
+        knowledge.set_agentic_search(agentic_search)
 
     registry.register(
         ToolDefinition(
