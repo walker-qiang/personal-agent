@@ -222,10 +222,38 @@ const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
     es.addEventListener('tool_result', (event: MessageEvent) => {
       try {
         const parsed = JSON.parse(event.data);
-        const toolResult: ToolResult = parsed.data || parsed;
+        const raw = parsed.data || parsed;
+
+        // Backend sends 'preview' (JSON string) and/or 'result'/'error' fields.
+        // Parse preview as fallback if result/error are missing.
+        let result: unknown = raw.result;
+        let error: string | undefined = raw.error;
+
+        if (result === undefined && raw.preview) {
+          try {
+            const parsedPreview = JSON.parse(raw.preview);
+            if (parsedPreview && typeof parsedPreview === 'object' && 'error' in parsedPreview) {
+              error = String((parsedPreview as Record<string, unknown>).error);
+              result = null;
+            } else {
+              result = parsedPreview;
+            }
+          } catch {
+            result = raw.preview;
+          }
+        }
+
+        const toolResult: ToolResult = {
+          id: raw.id || genId(),
+          name: raw.name || '',
+          result: result ?? null,
+          ...(error ? { error } : {}),
+          ...(raw.duration_ms ? { duration_ms: raw.duration_ms } : {}),
+        };
+
         const preview = typeof toolResult.result === 'string'
           ? toolResult.result.substring(0, 80)
-          : (toolResult.result ? '结果已返回' : '');
+          : (toolResult.result ? '结果已返回' : (error ? error.substring(0, 80) : ''));
         if (preview) {
           setRightPanel(prev => ({
             ...prev,

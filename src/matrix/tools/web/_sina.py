@@ -134,12 +134,18 @@ def _parse_a_share_stock(code: str, fields: list[str]) -> dict[str, Any]:
     """Parse sh/sz format: 33+ fields (full A-share stock)."""
     if len(fields) < 6:
         return {"code": code, "name": fields[0] if fields else "", "error": "insufficient fields"}
+    price = _to_float(fields[3])
+    prev_close = _to_float(fields[2])
+    change = round(price - prev_close, 4) if price is not None and prev_close is not None else None
+    change_pct = round((price - prev_close) / prev_close * 100, 4) if price is not None and prev_close and prev_close != 0 else None
     return {
         "code": code,
         "name": fields[0],
         "open": _to_float(fields[1]),
-        "prev_close": _to_float(fields[2]),
-        "price": _to_float(fields[3]),
+        "prev_close": prev_close,
+        "price": price,
+        "change": change,
+        "change_pct": change_pct,
         "high": _to_float(fields[4]),
         "low": _to_float(fields[5]),
         "volume": _to_int(fields[8]) if len(fields) > 8 else None,

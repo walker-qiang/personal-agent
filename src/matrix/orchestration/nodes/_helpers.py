@@ -829,7 +829,7 @@ def _check_domain_tool_sufficiency(
         if name == "finance_query":
             result_str = json.dumps(result, ensure_ascii=False)
             # Check if result contains price-like numbers (e.g., 3400.12, 3.5%)
-            has_prices = bool(_re.search(r"\d{3,5}\.\d{1,2}", result_str))
+            has_prices = bool(_re.search(r"\d{1,5}\.\d{1,2}", result_str))
             has_percentages = bool(_re.search(r"\d+\.\d+\s*[%％]", result_str))
             if has_prices or has_percentages:
                 return True
@@ -1182,8 +1182,8 @@ def _heuristic_number_check(
         _re.compile(r"US\$\s*(\d+(?:\.\d+)?)"),
         # Percentage patterns (standalone)
         _re.compile(r"(\d+(?:\.\d+)?)\s*[%％]"),
-        # Price-like decimals (2+ decimal places, or 3-5 digit integer with 1-2 decimals)
-        _re.compile(r"(?<!\d)(\d{3,5}\.\d{1,2})(?!\d)"),
+        # Price-like decimals (1-5 digit integer part with 1-2 decimals, e.g., 17.74, 380.5, 3400.12)
+        _re.compile(r"(?<!\d)(\d{1,5}\.\d{1,2})(?!\d)"),
         # Large integers (>= 1000, likely data points)
         _re.compile(r"(?<!\d)(\d{4,})(?!\d)"),
     ]
@@ -1200,25 +1200,63 @@ def _heuristic_number_check(
     if not extracted_numbers:
         return answer  # No numbers to check, answer is likely qualitative
 
-    # Check each number against tool results using PRECISE matching.
-    # Only exact string comparison (with units/symbols intact).
-    # No numeric stripping — stripping "3.5万" to "3.5" would falsely
-    # match "3.5%" in the answer, hiding unit/quantity mismatches.
+    # Check each number against tool results using multi-pass matching:
+    # Pass 1: Exact string comparison (with units/symbols intact).
+    # Pass 2: Float comparison — strip units from answer numbers and compare
+    #         numeric values as floats. This handles:
+    #         - Trailing zeros: 17.80 (answer) == 17.8 (tool JSON)
+    #         - Sign differences: 0.34 (answer "跌幅 0.34%") == -0.34 (tool)
+    # Pass 3: Chinese unit conversion — if answer says "5.33亿", convert to
+    #         533000000.0 and check against tool floats.
     _tool_nums: set[str] = set()
+    _tool_floats: set[float] = set()
+    _tool_abs_floats: set[float] = set()
+    _bare_num_re = _re.compile(r"(\d+(?:\.\d+)?)")
     for pat in patterns:
         for m in pat.finditer(flat_results):
             raw = m.group(0).strip()
             if _re.match(r"^\d{4}$", raw) and 2000 <= int(raw) <= 2100:
                 continue
             _tool_nums.add(raw)
+            for bn in _bare_num_re.finditer(raw):
+                try:
+                    f = float(bn.group(1))
+                    _tool_floats.add(f)
+                    _tool_abs_floats.add(abs(f))
+                except ValueError:
+                    pass
+
+    _UNIT_MULTIPLIERS = {"亿": 1e8, "万": 1e4, "千": 1e3, "百": 1e2}
 
     missing: list[str] = []
     found: list[str] = []
     for num in extracted_numbers:
-        # Exact match against tool result numbers (including units)
+        # Pass 1: Exact string match against tool result numbers (including units)
         if num in _tool_nums:
             found.append(num)
             continue
+        # Pass 2: Float comparison (handles trailing zeros and sign differences)
+        bare_match = _bare_num_re.search(num)
+        if bare_match:
+            try:
+                bare_float = float(bare_match.group(1))
+                if bare_float in _tool_floats or abs(bare_float) in _tool_abs_floats:
+                    found.append(num)
+                    continue
+                # Pass 3: Chinese unit conversion (e.g., "5.33亿" → 533000000.0)
+                for unit, mult in _UNIT_MULTIPLIERS.items():
+                    if unit in num:
+                        converted = bare_float * mult
+                        if converted in _tool_floats or abs(converted) in _tool_abs_floats:
+                            found.append(num)
+                            break
+                else:
+                    missing.append(num)
+                    continue
+                found.append(num)
+                continue
+            except ValueError:
+                pass
         missing.append(num)
 
     total = len(extracted_numbers)
@@ -1305,9 +1343,14 @@ AI 回答：
         if verdict == "FABRICATED" and data.get("corrected_answer"):
             logger.info("heuristic_number_check: LLM verification found fabrication, using corrected answer")
             return str(data["corrected_answer"])
-        if verdict == "PARTIAL":
+        if verdict in ("SUPPORTED", "PARTIAL"):
             reason = data.get("reason", "")
-            logger.info("heuristic_number_check: LLM verification found partial support: %s", reason)
+            logger.info("heuristic_number_check: LLM verification found %s: %s", verdict, reason)
+            # LLM verification confirmed the data is supported or partially
+            # supported — return the original answer without the fabrication
+            # warning. Adding a scary "数据一致性警告" after LLM confirmation
+            # would be misleading to the user.
+            return answer
         return None
     except Exception:
         return None

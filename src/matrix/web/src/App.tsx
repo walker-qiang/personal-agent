@@ -236,6 +236,7 @@ const App: React.FC = () => {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '12px 20px', borderBottom: '1px solid var(--border)',
           background: 'var(--surface)', flexShrink: 0,
+          boxShadow: 'var(--shadow-sm)',
         }}>
           <span style={{
             fontWeight: 600, fontSize: 16,

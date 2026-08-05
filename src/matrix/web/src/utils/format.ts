@@ -99,7 +99,22 @@ export function formatToolResult(name: string, result: unknown): string {
     let html = '<table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody>';
     for (const [k, v] of Object.entries(obj)) {
       if (k === 'prompt' && typeof v === 'string' && v.length > 50) continue;
-      html += `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v ?? ''))}</td></tr>`;
+      let valueHtml: string;
+      if (v === null || v === undefined) {
+        valueHtml = '-';
+      } else if (Array.isArray(v)) {
+        // Recursively format nested arrays
+        valueHtml = formatToolResult(name, v);
+      } else if (typeof v === 'object') {
+        // Recursively format nested objects
+        valueHtml = formatToolResult(name, v);
+      } else if (typeof v === 'number') {
+        const formatted = Number.isInteger(v) ? v.toLocaleString() : v.toFixed(2);
+        valueHtml = `<span class="stat">${formatted}</span>`;
+      } else {
+        valueHtml = escapeHtml(String(v));
+      }
+      html += `<tr><td>${escapeHtml(k)}</td><td>${valueHtml}</td></tr>`;
     }
     html += '</tbody></table>';
     return html;

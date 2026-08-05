@@ -13,8 +13,7 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const [hovering, setHovering] = useState(false);
-  // Thinking group: auto-expand during streaming, auto-collapse when answer starts
-  // (matches original HTML: create as "open", collapse on first token)
+  // Thinking accordion: default collapsed, auto-expand during streaming
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const userToggledRef = useRef(false);
   const hadContentRef = useRef(false);
@@ -26,14 +25,9 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
 
   const hasThinking = message.thinking && message.thinking.length > 0;
   const hasToolResults = message.toolResults && message.toolResults.length > 0;
-  // Original HTML creates thinking-group when either thinking or tool_call arrives
   const hasThinkingGroup = hasThinking || hasToolResults;
 
-  // Auto-expand/collapse to match original HTML behavior:
-  // 1. When streaming and thinking group exists but no answer content yet → expand
-  // 2. When answer content starts arriving → collapse
-  // 3. After user manually toggles, stop auto-control
-  // 4. Historical (non-streaming) messages: default expanded so user can see what happened
+  // Auto-expand during streaming, collapse when answer arrives
   const expandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -41,22 +35,18 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
     if (!hasThinkingGroup) return;
 
     if (message.isStreaming && !message.content) {
-      // Streaming with thinking/tools but no answer yet → expand
       setThinkingOpen(true);
     } else if (message.content && !hadContentRef.current) {
-      // First answer content arriving → collapse after a short delay
-      // so user has time to see the thinking process
       hadContentRef.current = true;
       if (expandTimerRef.current) clearTimeout(expandTimerRef.current);
       expandTimerRef.current = setTimeout(() => {
         if (!userToggledRef.current) {
           setThinkingOpen(false);
         }
-      }, 800);
+      }, 600);
     }
   }, [message.isStreaming, message.content, hasThinkingGroup]);
 
-  // Cleanup timer on unmount
   useEffect(() => {
     return () => {
       if (expandTimerRef.current) clearTimeout(expandTimerRef.current);
@@ -68,10 +58,10 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
     setThinkingOpen(!thinkingOpen);
   };
 
-  // Build header parts: "思考过程 · X 步思考 · Y 次工具调用" (matches original HTML)
+  // Build accordion meta: step count + tool count
   const headerParts: string[] = [];
-  if (hasThinking) headerParts.push(`${message.thinking!.length} 步思考`);
-  if (hasToolResults) headerParts.push(`${message.toolResults!.length} 次工具调用`);
+  if (hasThinking) headerParts.push(`${message.thinking!.length} 步`);
+  if (hasToolResults) headerParts.push(`${message.toolResults!.length} 次调用`);
 
   return (
     <div
@@ -98,17 +88,24 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
         </div>
       ) : (
         <>
-          {/* Thinking group — contains thinking text AND tool results, BEFORE answer content (matches original HTML) */}
+          {/* Thinking accordion — "正在分析查询 ▼", default collapsed */}
           {hasThinkingGroup && (
             <div style={styles.thinkingGroup}>
               <div
                 style={styles.thinkingHeader}
                 onClick={handleThinkingToggle}
               >
-                <span style={styles.thinkingIcon}>💡</span>
-                <span style={styles.thinkingLabel}>
-                  思考过程{headerParts.length > 0 ? ' · ' + headerParts.join(' · ') : ''}
+                <span style={styles.thinkingIcon}>
+                  {message.isStreaming && !message.content ? '◐' : '✓'}
                 </span>
+                <span style={styles.thinkingLabel}>
+                  {message.isStreaming && !message.content ? '正在分析查询' : '分析完成'}
+                </span>
+                {headerParts.length > 0 && (
+                  <span style={styles.thinkingMeta}>
+                    {headerParts.join(' · ')}
+                  </span>
+                )}
                 <span style={{ ...styles.thinkingArrow, transform: thinkingOpen ? 'rotate(180deg)' : 'none' }}>▼</span>
               </div>
               {thinkingOpen && (
@@ -124,6 +121,7 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
             </div>
           )}
 
+          {/* Final answer — independent card */}
           {(renderedContent || message.error) && (
             <div style={{ ...styles.bubble, ...styles.bubbleAI }}>
               {renderedContent && (
@@ -136,6 +134,11 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
               {message.isStreaming && renderedContent && <span style={styles.cursor} />}
               {message.error && <div style={styles.error}>{message.error}</div>}
             </div>
+          )}
+
+          {/* Empty state — lightweight hint */}
+          {!renderedContent && !message.error && !message.isStreaming && hasThinkingGroup && (
+            <div style={styles.emptyState}>未返回数据</div>
           )}
 
           {onBranch && message.message_id && hovering && (
@@ -170,11 +173,21 @@ const styles: Record<string, React.CSSProperties> = {
   wrapper: {
     display: 'flex', flexDirection: 'column', maxWidth: 800, width: '100%',
   },
-  wrapperUser: { marginRight: 0, marginLeft: 'auto', alignItems: 'flex-end' },
+  wrapperUser: { marginRight: 0, marginLeft: 'auto', alignItems: 'flex-end', maxWidth: '80%' },
   wrapperAI: { marginRight: 'auto', marginLeft: 0, alignItems: 'flex-start' },
-  bubble: { padding: '10px 16px', borderRadius: 'var(--radius)', fontSize: 14, lineHeight: 1.6, wordBreak: 'break-word', display: 'inline-block', maxWidth: '85%', textAlign: 'left' },
-  bubbleUser: { backgroundColor: 'var(--accent)', color: '#fff' },
-  bubbleAI: { backgroundColor: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', padding: '20px 24px', maxWidth: '100%', lineHeight: 1.85, fontSize: 14 },
+  bubble: { padding: '12px 16px', borderRadius: 'var(--radius-bubble)', fontSize: 14, lineHeight: 1.6, wordBreak: 'break-word', display: 'inline-block', textAlign: 'left' },
+  bubbleUser: {
+    backgroundColor: 'var(--user-bubble)', color: '#fff',
+    maxWidth: '100%',
+  },
+  bubbleAI: {
+    backgroundColor: 'var(--surface)', color: 'var(--text)',
+    border: '1px solid var(--border)',
+    boxShadow: 'var(--shadow-sm)',
+    padding: '20px 24px', maxWidth: '100%', width: '100%',
+    lineHeight: 1.6, fontSize: 14,
+    borderRadius: 'var(--radius)',
+  },
   bubbleSystem: {
     backgroundColor: 'rgba(255, 200, 60, 0.1)', color: 'var(--text-secondary)',
     fontSize: 12, fontStyle: 'italic', alignSelf: 'center', maxWidth: '90%',
@@ -195,47 +208,53 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center',
     justifyContent: 'center', flexShrink: 0, opacity: 0.8,
   },
-  // Thinking group — clean Apple-style panel
+  // Thinking accordion — fintech style
   thinkingGroup: {
     borderRadius: 'var(--radius)',
-    margin: '6px 0',
+    margin: '4px 0',
     overflow: 'hidden',
-    background: 'var(--surface)',
-    border: '1px solid var(--border)',
+    background: 'transparent',
   },
   thinkingHeader: {
     padding: '8px 14px',
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
-    fontSize: 12,
+    gap: 8,
+    fontSize: 13,
     color: 'var(--text-secondary)',
     cursor: 'pointer',
     userSelect: 'none',
-    background: 'rgba(99, 102, 241, 0.03)',
-    borderBottom: '1px solid var(--border)',
+    background: 'transparent',
+    borderRadius: 'var(--radius)',
     transition: 'background 0.15s',
   },
-  thinkingIcon: { fontSize: 12, opacity: 0.6 },
-  thinkingLabel: { fontWeight: 500, color: 'var(--text-secondary)', fontSize: 12 },
-  thinkingArrow: { marginLeft: 'auto', fontSize: 10, transition: 'transform 0.2s', color: 'var(--text-secondary)', opacity: 0.5 },
+  thinkingIcon: { fontSize: 14, color: 'var(--accent)', flexShrink: 0 },
+  thinkingLabel: { fontWeight: 500, color: 'var(--text-secondary)', fontSize: 13 },
+  thinkingMeta: { fontSize: 11, color: 'var(--text-secondary)', opacity: 0.6 },
+  thinkingArrow: { marginLeft: 'auto', fontSize: 10, transition: 'transform 0.2s', color: 'var(--text-secondary)', opacity: 0.4 },
   thinkingBody: {
     maxHeight: 2000, overflowY: 'auto' as const,
+    padding: '4px 0',
   },
   thinkingItem: {
-    padding: '8px 14px', fontSize: 12.5, lineHeight: 1.65,
+    padding: '8px 14px', fontSize: 13, lineHeight: 1.6,
     color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' as const,
     wordBreak: 'break-word' as const,
     borderLeft: '2px solid rgba(99, 102, 241, 0.15)',
-    margin: '4px 12px',
+    margin: '4px 0',
     borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
     background: 'rgba(99, 102, 241, 0.02)',
     maxHeight: 200, overflowY: 'auto' as const,
   },
+  // Empty state — lightweight hint
+  emptyState: {
+    padding: '12px 16px', fontSize: 13, color: 'var(--text-secondary)',
+    opacity: 0.6, fontStyle: 'italic',
+  },
   progressSection: {
     marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4,
     padding: '8px 12px', borderRadius: 'var(--radius)',
-    backgroundColor: 'rgba(52, 199, 89, 0.06)', border: '1px solid rgba(52, 199, 89, 0.15)',
+    backgroundColor: 'rgba(16, 185, 129, 0.06)', border: '1px solid rgba(16, 185, 129, 0.15)',
   },
   progressItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' },
   progressDot: { fontSize: 12, flexShrink: 0 },

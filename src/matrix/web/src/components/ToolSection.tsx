@@ -22,33 +22,50 @@ const ToolSection: React.FC<Props> = ({ results, embedded = false }) => {
     <div style={embedded ? styles.embeddedContainer : styles.container}>
       {results.map((r) => {
         const isOpen = !!expanded[r.id];
-        const formatted = sanitizeHtml(formatToolResult(r.name, r.result));
-        const hasError = !!r.error;
+        // Check for error in both r.error and r.result.error (error dicts)
+        const resultAsObj = typeof r.result === 'object' && r.result !== null ? r.result as Record<string, unknown> : null;
+        const errorInResult = resultAsObj && 'error' in resultAsObj && typeof resultAsObj.error === 'string';
+        const hasError = !!r.error || !!errorInResult;
+        const errorText = r.error || (errorInResult ? String((resultAsObj as Record<string, unknown>).error) : '');
+        const displayResult = errorInResult ? null : r.result;
+        const formatted = displayResult != null ? sanitizeHtml(formatToolResult(r.name, displayResult)) : '';
+        const isEmpty = !formatted || formatted.trim() === '';
 
         return (
-          <div key={r.id} style={embedded ? styles.embeddedItem : styles.item}>
+          <div key={r.id} style={styles.item}>
             <button
               style={styles.header}
               onClick={() => toggle(r.id)}
             >
+              {/* Left: status icon + tool name */}
+              <span style={hasError ? styles.toolIconError : styles.toolIconDone}>
+                {hasError ? '✕' : '✓'}
+              </span>
               <span style={styles.toolName}>{r.name}</span>
-              {r.duration_ms != null && (
-                <span style={styles.duration}>{formatDuration(r.duration_ms)}</span>
-              )}
-              {hasError && <span style={styles.errorBadge}>错误</span>}
-              <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-secondary)', opacity: 0.4 }}>{isOpen ? '▾' : '▸'}</span>
+
+              {/* Right: duration + status label + expand arrow */}
+              <span style={styles.rightSection}>
+                {r.duration_ms != null && (
+                  <span style={styles.duration}>{formatDuration(r.duration_ms)}</span>
+                )}
+                <span style={styles.expandArrow}>{isOpen ? '▾' : '▸'}</span>
+              </span>
             </button>
 
             {isOpen && (
               <div style={styles.body}>
                 {hasError && (
-                  <div style={styles.error}>{r.error}</div>
+                  <div style={styles.error}>{errorText}</div>
                 )}
-                <div
-                  className="tool-body"
-                  style={styles.result}
-                  dangerouslySetInnerHTML={{ __html: formatted }}
-                />
+                {isEmpty ? (
+                  <div style={styles.emptyResult}>未返回数据</div>
+                ) : (
+                  <div
+                    className="tool-body"
+                    style={styles.result}
+                    dangerouslySetInnerHTML={{ __html: formatted }}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -62,30 +79,26 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 4,
+    gap: 2,
     margin: '4px 0',
+  },
+  embeddedContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    margin: 0,
   },
   item: {
     borderRadius: 'var(--radius-sm)',
     overflow: 'hidden',
-    background: 'var(--surface)',
-  },
-  // Embedded mode: inside thinking-group-body
-  embeddedContainer: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 0,
-    margin: 0,
-  },
-  embeddedItem: {
-    overflow: 'hidden',
+    background: 'transparent',
   },
   header: {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
     width: '100%',
-    padding: '6px 14px',
+    padding: '6px 12px',
     border: 'none',
     background: 'transparent',
     color: 'var(--text-secondary)',
@@ -94,37 +107,50 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left' as const,
     fontFamily: 'var(--font)',
     transition: 'background 0.15s',
+    borderRadius: 'var(--radius-sm)',
   },
-  arrow: {
-    fontSize: 9,
-    color: 'var(--text-secondary)',
+  toolIconDone: {
+    fontSize: 11,
+    color: 'var(--success)',
     flexShrink: 0,
-    opacity: 0.5,
-    transition: 'transform 0.15s',
+    width: 14,
+    textAlign: 'center' as const,
+  },
+  toolIconError: {
+    fontSize: 11,
+    color: 'var(--error)',
+    flexShrink: 0,
+    width: 14,
+    textAlign: 'center' as const,
   },
   toolName: {
-    fontFamily: 'var(--font)',
-    color: 'var(--accent)',
+    fontFamily: 'var(--font-mono)',
+    color: 'var(--text-secondary)',
     fontSize: 12,
-    fontWeight: 500,
-    opacity: 0.85,
+    fontWeight: 400,
+    opacity: 0.7,
+  },
+  rightSection: {
+    marginLeft: 'auto',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
   },
   duration: {
     fontSize: 11,
     color: 'var(--text-secondary)',
-    opacity: 0.6,
+    opacity: 0.5,
     flexShrink: 0,
+    fontFamily: 'var(--font-mono)',
   },
-  errorBadge: {
-    fontSize: 10,
-    padding: '1px 6px',
-    borderRadius: 3,
-    backgroundColor: 'rgba(255, 59, 48, 0.08)',
-    color: 'var(--error)',
+  expandArrow: {
+    fontSize: 9,
+    color: 'var(--text-secondary)',
+    opacity: 0.3,
     flexShrink: 0,
   },
   body: {
-    padding: '6px 14px 8px 28px',
+    padding: '6px 12px 8px 34px',
     background: 'transparent',
     fontSize: 12,
     overflowX: 'auto',
@@ -144,7 +170,13 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.55,
     fontFamily: 'var(--font-mono)',
     whiteSpace: 'pre-wrap',
-    opacity: 0.85,
+    opacity: 0.8,
+  },
+  emptyResult: {
+    fontSize: 12,
+    color: 'var(--text-secondary)',
+    opacity: 0.5,
+    fontStyle: 'italic',
   },
 };
 

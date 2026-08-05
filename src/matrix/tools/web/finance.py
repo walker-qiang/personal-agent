@@ -4,6 +4,7 @@ Queries A-share indices, global indices, US stocks, and HK stocks
 using the Sina hq API. Returns structured JSON with precise numbers,
 not news articles.
 
+Code resolution is handled by _resolver.py (dynamic Sina suggest API + SQLite cache).
 For news about finance, use news_search instead.
 """
 
@@ -13,7 +14,7 @@ import logging
 from typing import Any
 
 from ..base import ToolDefinition, tool_error
-from ._codes import resolve_code, resolve_codes
+from ._codes import resolve_codes  # backward-compatible interface
 from ._sina import fetch_quotes
 
 logger = logging.getLogger("matrix.tools.web.finance")
@@ -21,7 +22,7 @@ logger = logging.getLogger("matrix.tools.web.finance")
 tool_definition = ToolDefinition(
     name="finance_query",
     description=(
-        "查询实时行情数据（A股指数/全球指数/美股/港股）。用于：股价、大盘指数、涨跌幅、行情走势。"
+        "查询实时行情数据（A股指数/全球指数/美股/港股/ETF）。用于：股价、大盘指数、涨跌幅、行情走势。"
         "返回精确数值（价格、涨跌额、涨跌幅），不是新闻。"
         "⚠️ 用户问「今天股市」「大盘多少点」「苹果股价」「全球股市表现」时用此工具，不要用 news_search。"
         "💡 效率提示：用宽泛关键词一次查全部。例如查A股直接传 query='A股'（返回上证+深证+创业板+沪深300），"
@@ -37,6 +38,7 @@ tool_definition = ToolDefinition(
                     "查询内容，支持自然语言。例如："
                     "「上证指数」「创业板」「苹果股价」「特斯拉」「腾讯」"
                     "「全球股市」「美股」「港股」「A股」「亚太股市」「欧洲股市」"
+                    "「恒生科技」「恒生指数」「海螺水泥」"
                 ),
             },
             "market": {
@@ -54,23 +56,18 @@ tool_definition = ToolDefinition(
 def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
     """Query real-time market data.
 
+    Uses dynamic code resolution (Sina suggest API + SQLite cache) to resolve
+    any stock/index name to its Sina HQ API code. No hardcoded mapping needed.
+
     Args:
-        query: Natural language query.
+        query: Natural language query, e.g., "海螺水泥", "恒生科技", "苹果".
         market: Optional market hint (auto/a_share/us/hk/global).
 
     Returns:
         Dict with 'results' list and 'query' string.
     """
-    # Try to resolve to specific codes
-    codes: list[str] = []
-
-    # First try single-code resolution (exact match)
-    single = resolve_code(query)
-    if single:
-        codes = [single]
-    else:
-        # Try multi-code resolution (keyword matching)
-        codes = resolve_codes(query)
+    # Resolve via dynamic resolver (returns all matching codes)
+    codes = resolve_codes(query)
 
     # If market is specified, it may override/augment
     if not codes and market != "auto":
@@ -110,7 +107,7 @@ def _market_default_codes(market: str) -> list[str]:
     elif market == "us":
         return ["int_dji", "int_nasdaq", "int_sp500"]
     elif market == "hk":
-        return ["int_hangseng"]
+        return ["int_hangseng", "hkHSTECH"]
     elif market == "global":
         return [
             "int_dji", "int_nasdaq", "int_sp500",

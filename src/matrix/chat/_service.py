@@ -718,6 +718,8 @@ class ChatService:
             yield {
                 "type": "tool_result",
                 "name": tr.get("name", ""),
+                "result": tr.get("result"),
+                "error": tr.get("error"),
                 "preview": preview_json(
                     tr.get("error", tr.get("result", {})),
                     limit=2000,

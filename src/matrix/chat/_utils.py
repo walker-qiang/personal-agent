@@ -62,11 +62,15 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
                     "args": evt_data.get("args", {}),
                 }
             elif evt_type == "tool_result":
+                raw_result = evt_data.get("result")
+                raw_error = evt_data.get("error")
                 yield {
                     "type": "tool_result",
                     "name": evt_data["name"],
+                    "result": raw_result,
+                    "error": raw_error,
                     "preview": preview_json(
-                        evt_data.get("result", evt_data.get("error", "")),
+                        raw_result if raw_result is not None else (raw_error or ""),
                         limit=2000,
                     ),
                 }
