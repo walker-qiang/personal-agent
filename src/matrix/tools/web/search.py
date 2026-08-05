@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 from ._common import (
     UA,
     SKIP_TITLES,
@@ -226,6 +226,11 @@ def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
         cache_set(ckey, result)
         return result
 
-    result = {"results": [], "message": "未找到相关结果。请尝试更具体的关键词、同义词，或换用英文搜索。"}
+    result = tool_error(
+        "web_search", "网页搜索",
+        f"所有搜索引擎均未返回结果: {query}",
+        "请尝试更具体的关键词、同义词，或换用英文搜索。也可尝试使用 news_search 搜索最新新闻。",
+        {"query": query, "engines_tried": ["so360", "bing", "duckduckgo"]},
+    )
     cache_set(ckey, result)
     return result

@@ -10,6 +10,8 @@ Maps Chinese/English names to Sina hq API codes with market prefixes:
 
 from __future__ import annotations
 
+import re
+
 # ---- A-share indices (simplified format via s_ prefix) ----
 
 A_SHARE_INDICES: dict[str, str] = {
@@ -61,9 +63,97 @@ GLOBAL_INDICES: dict[str, str] = {
     "cac": "int_cac",
 }
 
-# ---- All indices combined ----
+# ---- Well-known A-share stocks (top blue-chip, sh/sz prefix) ----
 
-ALL_INDICES: dict[str, str] = {**A_SHARE_INDICES, **GLOBAL_INDICES}
+A_SHARE_STOCKS: dict[str, str] = {
+    "贵州茅台": "sh600519",
+    "海螺水泥": "sh600585",
+    "中国平安": "sh601318",
+    "招商银行": "sh600036",
+    "工商银行": "sh601398",
+    "建设银行": "sh601939",
+    "农业银行": "sh601288",
+    "中国银行": "sh601988",
+    "中国石油": "sh601857",
+    "中国石化": "sh600028",
+    "中国人寿": "sh601628",
+    "长江电力": "sh600900",
+    "宝钢股份": "sh600019",
+    "中国神华": "sh601088",
+    "万科A": "sz000002",
+    "平安银行": "sz000001",
+    "比亚迪": "sz002594",
+    "宁德时代": "sz300750",
+    "五粮液": "sz000858",
+    "格力电器": "sz000651",
+    "美的集团": "sz000333",
+    "海尔智家": "sh600690",
+    "泸州老窖": "sz000568",
+    "伊利股份": "sh600887",
+    "恒瑞医药": "sh600276",
+    "海天味业": "sh603288",
+    "东方财富": "sz300059",
+    "迈瑞医疗": "sz300760",
+    "药明康德": "sh603259",
+    "隆基绿能": "sh601012",
+    "中国中免": "sh601888",
+    "三一重工": "sh600031",
+    "海康威视": "sz002415",
+    "京东方A": "sz000725",
+    "中兴通讯": "sz000063",
+    "顺丰控股": "sz002352",
+    "洋河股份": "sz002304",
+    "汾酒": "sh600809", "山西汾酒": "sh600809",
+    "光大银行": "sh601818",
+    "交通银行": "sh601328",
+    "工业富联": "sh601138",
+    "中信证券": "sh600030",
+    "华泰证券": "sh601688",
+    "国泰君安": "sh601211",
+    "中国太保": "sh601601",
+    "新华保险": "sh601336",
+    "保利发展": "sh600048",
+    "中国建筑": "sh601668",
+    "中国铁建": "sh601186",
+    "中国交建": "sh601800",
+}
+
+# Regex for 6-digit A-share stock codes
+_STOCK_CODE_RE = re.compile(r'^(\d{6})$')
+
+
+def _a_share_code_from_digits(code: str) -> str:
+    """Map a 6-digit stock code to Sina sh/sz prefix.
+
+    Rules:
+    - 60xxxx, 68xxxx, 90xxxx → sh (Shanghai)
+    - 00xxxx, 30xxxx, 20xxxx → sz (Shenzhen)
+    """
+    if code.startswith(("60", "68", "90")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def resolve_stock_code(query: str) -> str | None:
+    """Try to resolve a query to an A-share stock code.
+
+    Checks:
+    1. Exact match against A_SHARE_STOCKS name table
+    2. Bare 6-digit code → sh/sz prefix
+    """
+    q = query.strip()
+
+    # 6-digit code direct mapping
+    m = _STOCK_CODE_RE.match(q)
+    if m:
+        return _a_share_code_from_digits(q)
+
+    # Chinese name exact match
+    for name, code in A_SHARE_STOCKS.items():
+        if q == name:
+            return code
+
+    return None
 
 # ---- Market keyword groups ----
 
@@ -99,8 +189,6 @@ US_TICKERS: dict[str, str] = {
     "拼多多": "gb_pdd", "pdd": "gb_pdd",
     "百度": "gb_bidu", "bidu": "gb_bidu",
     "网易": "gb_ntes", "ntes": "gb_ntes",
-    "美团": "gb_3690hk",  # HK listing
-    "比亚迪": "gb_1211hk",  # HK listing
 }
 
 # ---- Well-known HK stocks ----
@@ -124,12 +212,21 @@ HK_TICKERS: dict[str, str] = {
 }
 
 
+# Merged index table for convenience
+ALL_INDICES: dict[str, str] = {**A_SHARE_INDICES, **GLOBAL_INDICES}
+
+
 def resolve_code(query: str) -> str | None:
     """Try to resolve a query string to a single Sina code.
 
     Returns the code if exactly one match is found, else None.
     """
     q = query.strip().lower()
+
+    # Direct A-share stock match (exact name)
+    stock_code = resolve_stock_code(query)
+    if stock_code:
+        return stock_code
 
     # Direct index name match
     for name, code in ALL_INDICES.items():
@@ -190,6 +287,19 @@ def resolve_codes(query: str) -> list[str]:
         if name in query:
             if code not in codes:
                 codes.append(code)
+
+    # Try A-share stock name matching (substring)
+    for name, code in A_SHARE_STOCKS.items():
+        if name in query:
+            if code not in codes:
+                codes.append(code)
+
+    # Try A-share stock by 6-digit code in the query
+    code_match = _STOCK_CODE_RE.search(query)
+    if code_match:
+        a_code = _a_share_code_from_digits(code_match.group(1))
+        if a_code not in codes:
+            codes.append(a_code)
 
     for name, code in US_TICKERS.items():
         if name in query and not name.startswith("gb_"):

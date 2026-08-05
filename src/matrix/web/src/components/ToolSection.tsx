@@ -31,12 +31,12 @@ const ToolSection: React.FC<Props> = ({ results, embedded = false }) => {
               style={styles.header}
               onClick={() => toggle(r.id)}
             >
-              <span style={styles.arrow}>{isOpen ? '\u25BC' : '\u25B6'}</span>
               <span style={styles.toolName}>{r.name}</span>
               {r.duration_ms != null && (
                 <span style={styles.duration}>{formatDuration(r.duration_ms)}</span>
               )}
               {hasError && <span style={styles.errorBadge}>错误</span>}
+              <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text-secondary)', opacity: 0.4 }}>{isOpen ? '▾' : '▸'}</span>
             </button>
 
             {isOpen && (
@@ -62,15 +62,15 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 0,
-    margin: '6px 0',
+    gap: 4,
+    margin: '4px 0',
   },
   item: {
-    border: '1px solid var(--border)',
-    borderRadius: 'var(--radius)',
+    borderRadius: 'var(--radius-sm)',
     overflow: 'hidden',
+    background: 'var(--surface)',
   },
-  // Embedded mode: inside thinking-group-body, no outer border/radius
+  // Embedded mode: inside thinking-group-body
   embeddedContainer: {
     display: 'flex',
     flexDirection: 'column',
@@ -78,7 +78,6 @@ const styles: Record<string, React.CSSProperties> = {
     margin: 0,
   },
   embeddedItem: {
-    borderTop: '1px solid var(--border)',
     overflow: 'hidden',
   },
   header: {
@@ -86,63 +85,66 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 8,
     width: '100%',
-    padding: '7px 12px',
+    padding: '6px 14px',
     border: 'none',
-    backgroundColor: 'var(--tool-call)',
+    background: 'transparent',
     color: 'var(--text-secondary)',
     fontSize: 12,
     cursor: 'pointer',
     textAlign: 'left' as const,
     fontFamily: 'var(--font)',
+    transition: 'background 0.15s',
   },
   arrow: {
-    fontSize: 10,
+    fontSize: 9,
     color: 'var(--text-secondary)',
     flexShrink: 0,
-    marginLeft: 'auto',
+    opacity: 0.5,
     transition: 'transform 0.15s',
   },
   toolName: {
-    fontFamily: 'var(--font-mono)',
-    color: 'var(--warning)',
+    fontFamily: 'var(--font)',
+    color: 'var(--accent)',
     fontSize: 12,
+    fontWeight: 500,
+    opacity: 0.85,
   },
   duration: {
     fontSize: 11,
     color: 'var(--text-secondary)',
+    opacity: 0.6,
     flexShrink: 0,
   },
   errorBadge: {
-    fontSize: 11,
-    padding: '2px 8px',
-    borderRadius: 4,
-    backgroundColor: 'rgba(255, 59, 48, 0.1)',
+    fontSize: 10,
+    padding: '1px 6px',
+    borderRadius: 3,
+    backgroundColor: 'rgba(255, 59, 48, 0.08)',
     color: 'var(--error)',
     flexShrink: 0,
   },
   body: {
-    padding: '10px 12px',
-    borderTop: '1px solid var(--border)',
-    background: 'var(--tool-result)',
+    padding: '6px 14px 8px 28px',
+    background: 'transparent',
     fontSize: 12,
     overflowX: 'auto',
   },
   error: {
-    marginBottom: 8,
-    padding: '8px 12px',
-    borderRadius: 'var(--radius)',
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    border: '1px solid var(--error)',
+    marginBottom: 6,
+    padding: '6px 10px',
+    borderRadius: 'var(--radius-sm)',
+    backgroundColor: 'rgba(239, 68, 68, 0.06)',
     color: 'var(--error)',
-    fontSize: 12,
+    fontSize: 11.5,
     lineHeight: 1.5,
   },
   result: {
-    fontSize: 12,
+    fontSize: 11.5,
     color: 'var(--text-secondary)',
-    lineHeight: 1.5,
+    lineHeight: 1.55,
     fontFamily: 'var(--font-mono)',
     whiteSpace: 'pre-wrap',
+    opacity: 0.85,
   },
 };
 

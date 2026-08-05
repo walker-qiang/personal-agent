@@ -1,4 +1,19 @@
-"""DeepSeek API client."""
+"""DeepSeek API client — Responses API.
+
+Uses the DeepSeek Responses API (POST /responses) which is compatible with
+OpenAI Responses API format. Key differences from the legacy Chat Completions API:
+
+  - Endpoint: /responses (not /chat/completions)
+  - System prompt → `instructions` parameter (not in `input`)
+  - Messages → `input` items (role-based messages + function_call/function_call_output items)
+  - Tools: flat format `{type, name, description, parameters}` (not nested under `function`)
+  - Response: `output[]` array with typed items (message, function_call)
+  - Streaming: semantic events (response.output_text.delta, response.completed, etc.)
+
+The calling code (react.py, commander.py, etc.) still uses Chat Completions
+message format. This client converts internally — the migration is fully
+encapsulated here.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +22,7 @@ import logging
 from typing import Any, Iterator
 
 from .errors import LLMError
-from .http import post_json_stream, post_json_with_retry
+from .http import post_json_stream_events, post_json_with_retry
 from .protocol import FunctionCallResult, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
@@ -19,12 +34,12 @@ _DEFAULT_MAX_MESSAGE_CHARS = 16000
 
 
 class DeepSeekClient:
-    """LLM client for DeepSeek chat completions API."""
+    """LLM client for DeepSeek Responses API."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-flash",
         base_url: str = "https://api.deepseek.com",
         max_tokens: int = 8192,
         timeout_sec: float = 45.0,
@@ -37,19 +52,18 @@ class DeepSeekClient:
         self.timeout_sec = timeout_sec
         self.max_message_chars = max_message_chars
 
+    # ── Payload building ────────────────────────────────────────────────────
+
     def _build_payload(
-        self, system: str, messages: list[dict[str, Any]],
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         temperature: float | None = None,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "system", "content": system}],
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
+        json_mode: bool = False,
+    ) -> dict[str, Any]:
+        """Build Responses API payload from Chat Completions-style messages."""
         if self.max_message_chars > 0:
             messages = truncate_messages(
                 messages,
@@ -57,11 +71,69 @@ class DeepSeekClient:
                 max_tokens=self.max_message_chars // 2,
                 reserve_tokens=500,
             )
-        payload["messages"].extend(messages)
+
+        input_items = self._convert_messages_to_input(messages)
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "instructions": system,
+            "input": input_items,
+            "max_output_tokens": self.max_tokens,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
+        if json_mode:
+            payload["text"] = {"format": {"type": "json_object"}}
         return payload
+
+    def _convert_messages_to_input(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert Chat Completions messages to Responses API input items.
+
+        Handles:
+        - {role: "user"/"assistant", content: "..."} → {role, content: [{type, text}]}
+        - {role: "assistant", tool_calls: [...]} → {type: "function_call", ...} items
+        - {role: "tool", tool_call_id, content} → {type: "function_call_output", ...}
+        """
+        items: list[dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if role == "tool":
+                # Tool result → function_call_output
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": str(content) if content else "{}",
+                })
+            elif role == "assistant" and "tool_calls" in msg:
+                # Assistant with tool calls → function_call items
+                if content:
+                    items.append({
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": str(content)}],
+                    })
+                for tc in msg["tool_calls"]:
+                    func = tc.get("function", {})
+                    items.append({
+                        "type": "function_call",
+                        "name": func.get("name", ""),
+                        "arguments": func.get("arguments", "{}"),
+                        "call_id": tc.get("id", ""),
+                    })
+            else:
+                # Regular message (user/assistant/system)
+                content_type = "input_text" if role == "user" else "output_text"
+                items.append({
+                    "role": role,
+                    "content": [{"type": content_type, "text": str(content)}] if content else [],
+                })
+        return items
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -69,14 +141,70 @@ class DeepSeekClient:
             "content-type": "application/json",
         }
 
-    def complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
-        url = self.base_url.rstrip("/") + "/chat/completions"
+    # ── Response parsing ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_response(data: dict[str, Any]) -> FunctionCallResult:
+        """Parse Responses API response into FunctionCallResult.
+
+        Response structure:
+          {
+            "status": "completed" | "incomplete" | "failed",
+            "output": [
+              {"type": "message", "content": [{"type": "output_text", "text": "..."}]},
+              {"type": "function_call", "name": "...", "arguments": "...", "call_id": "..."},
+            ]
+          }
+        """
+        output = data.get("output", [])
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        finish_reason = "stop"
+
+        for item in output:
+            item_type = item.get("type", "")
+            if item_type == "message":
+                for part in item.get("content", []):
+                    if part.get("type") == "output_text":
+                        text_parts.append(part.get("text", ""))
+            elif item_type == "function_call":
+                name = item.get("name", "")
+                args_str = item.get("arguments", "{}")
+                try:
+                    args = json.loads(args_str)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_calls.append(ToolCall(
+                    id=item.get("call_id", ""),
+                    name=name,
+                    arguments=args,
+                ))
+                finish_reason = "tool_calls"
+
+        status = data.get("status", "completed")
+        if status == "incomplete":
+            finish_reason = "length"
+        elif status == "failed":
+            finish_reason = "error"
+
+        return FunctionCallResult(
+            content="".join(text_parts),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+        )
+
+    # ── Public API (unchanged interface) ─────────────────────────────────────
+
+    def complete(
+        self, system: str, messages: list[dict[str, Any]], temperature: float | None = None
+    ) -> str:
+        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(system, messages, temperature=temperature)
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
-        try:
-            return str(data["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError) as err:
-            raise LLMError("DeepSeek response did not include message content") from err
+        result = self._parse_response(data)
+        if not result.content:
+            raise LLMError("DeepSeek response message content is empty")
+        return result.content
 
     def complete_json(
         self,
@@ -85,50 +213,61 @@ class DeepSeekClient:
         schema: dict[str, Any] | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any] | list[Any]:
-        """Call DeepSeek with response_format=json_object for guaranteed JSON output.
+        """Call DeepSeek with JSON output mode.
 
-        DeepSeek (OpenAI-compatible) supports response_format={"type": "json_object"}
-        which forces the model to output valid JSON. The system prompt must contain
-        the word "json" for this to work.
+        Uses text.format={type: "json_object"} in Responses API.
+        The system prompt must contain the word "json" for this to work.
         """
-        url = self.base_url.rstrip("/") + "/chat/completions"
-        payload = self._build_payload(system, messages, temperature=temperature)
-        # Force JSON output mode
-        payload["response_format"] = {"type": "json_object"}
+        url = self.base_url.rstrip("/") + "/responses"
+        payload = self._build_payload(
+            system, messages, temperature=temperature, json_mode=True,
+        )
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
-        try:
-            content = str(data["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError) as err:
-            raise LLMError("DeepSeek response did not include message content") from err
+        result = self._parse_response(data)
+        content = result.content
+        if not content:
+            raise LLMError("DeepSeek JSON response was empty")
         try:
             return parse_json_response(content)
         except Exception as err:
             raise LLMError(f"DeepSeek JSON output could not be parsed: {err}") from err
 
-    def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
-        """Stream completion tokens from DeepSeek API.
+    def stream_complete(
+        self, system: str, messages: list[dict[str, Any]], temperature: float | None = None
+    ) -> Iterator[str]:
+        """Stream completion tokens from DeepSeek Responses API.
 
-        Uses SSE streaming (stream=True). Yields content delta chunks.
+        Uses Responses API streaming (stream=True). Yields content delta chunks
+        from response.output_text.delta events.
         """
-        url = self.base_url.rstrip("/") + "/chat/completions"
+        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(system, messages, temperature=temperature)
         payload["stream"] = True
-        payload.setdefault("stream_options", {"include_usage": False})
 
-        for raw in post_json_stream(url, payload, self._headers(), self.timeout_sec):
+        for event_type, raw in post_json_stream_events(
+            url, payload, self._headers(), self.timeout_sec
+        ):
+            # Only process output text deltas
+            if event_type and not event_type.startswith("response.output_text"):
+                # Check for terminal events
+                if event_type in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    return
+                continue
+
             try:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
                 logger.warning("stream_complete: skipped unparseable SSE chunk: %s", raw[:100])
                 continue
-            try:
-                delta = chunk["choices"][0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    yield content
-            except (KeyError, IndexError, TypeError) as e:
-                logger.warning("stream_complete: skipped malformed chunk (%s): %s", type(e).__name__, raw[:100])
-                continue
+
+            # Extract delta text
+            delta = chunk.get("delta", "")
+            if delta:
+                yield delta
 
     def function_call(
         self,
@@ -138,17 +277,19 @@ class DeepSeekClient:
         tool_choice: str = "auto",
         temperature: float | None = None,
     ) -> FunctionCallResult:
-        """Call DeepSeek/Agnes with native function calling.
+        """Call DeepSeek Responses API with native function calling.
 
         Returns a FunctionCallResult with either content or tool_calls.
         Supports multi-turn tool messages:
         - role="tool" with tool_call_id + content
         - role="assistant" with tool_calls[] + content
+
+        Tool names are sanitized (dots → underscores) for API compatibility.
         """
-        url = self.base_url.rstrip("/") + "/chat/completions"
+        url = self.base_url.rstrip("/") + "/responses"
 
         # Sanitize tool names: replace dots with underscores for APIs that
-        # only accept ^[a-zA-Z0-9_-]+$ (e.g. Agnes AI, strict OpenAI-compatible).
+        # only accept ^[a-zA-Z0-9_-]+$ (strict OpenAI-compatible).
         name_map: dict[str, str] = {}  # sanitized → original
         reverse_map: dict[str, str] = {}  # original → sanitized
         api_tools: list[dict[str, Any]] = []
@@ -157,16 +298,15 @@ class DeepSeekClient:
             sanitized = original.replace(".", "_")
             name_map[sanitized] = original
             reverse_map[original] = sanitized
+            # Responses API uses flat tool format (not nested under "function")
             api_tools.append({
                 "type": "function",
-                "function": {
-                    "name": sanitized,
-                    "description": t["description"],
-                    "parameters": t.get("input_schema", {}),
-                },
+                "name": sanitized,
+                "description": t["description"],
+                "parameters": t.get("input_schema", {}),
             })
 
-        # Normalize messages: ensure tool_calls use sanitized names
+        # Normalize messages: sanitize tool names in assistant tool_calls
         api_messages: list[dict[str, Any]] = []
         for msg in messages:
             api_msg = dict(msg)
@@ -184,36 +324,22 @@ class DeepSeekClient:
             api_messages.append(api_msg)
 
         payload = self._build_payload(
-            system, api_messages, tools=api_tools, tool_choice=tool_choice, temperature=temperature,
+            system, api_messages, tools=api_tools, tool_choice=tool_choice,
+            temperature=temperature,
         )
 
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
-        try:
-            choice = data["choices"][0]
-            message = choice.get("message", {})
-            finish = choice.get("finish_reason", "stop")
+        result = self._parse_response(data)
 
-            result = FunctionCallResult(
-                content=message.get("content") or "",
-                finish_reason=finish,
-            )
+        # Map sanitized tool names back to original (ToolCall is frozen, so rebuild)
+        if name_map:
+            result.tool_calls = [
+                ToolCall(
+                    id=tc.id,
+                    name=name_map.get(tc.name, tc.name),
+                    arguments=tc.arguments,
+                )
+                for tc in result.tool_calls
+            ]
 
-            raw_tool_calls = message.get("tool_calls", [])
-            for tc in raw_tool_calls:
-                func = tc.get("function", {})
-                name = func.get("name", "")
-                # Map sanitized name back to original
-                name = name_map.get(name, name)
-                try:
-                    args = json.loads(func.get("arguments", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                result.tool_calls.append(ToolCall(
-                    id=tc.get("id", ""),
-                    name=name,
-                    arguments=args,
-                ))
-
-            return result
-        except (KeyError, IndexError, TypeError) as err:
-            raise LLMError("DeepSeek function call response parsing failed") from err
+        return result

@@ -1097,12 +1097,12 @@ def _is_empty_tool_result(result: Any) -> bool:
     (with "name", "arguments", "result"/"error" keys).
 
     Handles all common result shapes:
-    - {"name": "x", "result": {"results": [], "message": "..."}}  (finance_query/web_search empty)
+    - {"name": "x", "result": {"error": "..."}}  (tool_error return → always empty)
     - {"name": "x", "error": "timeout"}  (tool error → always empty)
-    - {"results": [], "message": "..."}  (finance_query/web_search empty)
+    - {"error": "..."}  (tool_error return → always empty)
+    - {"results": [], "query": "..."}  (search empty, no results found)
     - {"holdings": [], "total_balance_cents": 0}  (holdings_summary empty)
     - {"data": []}  (generic empty)
-    - {"error": "..."}  (explicit error)
     - {}  (empty dict)
     - None / ""  (falsy)
     """

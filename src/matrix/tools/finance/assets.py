@@ -56,7 +56,7 @@ def asset_lookup(
 
 tool_definition = ToolDefinition(
     name="finance.asset_lookup",
-    description="按 ID、代码或名称查找资产。用于：用户问「某某基金怎么样」「查一下某个股票」「某资产收益如何」。返回资产基本信息、最新快照、收益率等。",
+    description="按 ID、代码或名称查找资产。用于：用户问「查一下某个资产」「有哪些基金」「资产列表」。返回资产基本信息（名称、代码、类型、桶、渠道、风险等级）。如需持仓快照和收益率，请使用 finance.holdings_summary。",
     capabilities=["portfolio_analysis", "market_data"],
     input_schema={
         "type": "object",

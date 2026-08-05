@@ -9,7 +9,7 @@ import re
 import urllib.parse
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 from ._common import (
     SKIP_TITLES,
     boost_recent_results,
@@ -194,6 +194,11 @@ def news_search(query: str, max_results: int = 5) -> dict[str, Any]:
         cache_set(ckey, result)
         return result
 
-    result = {"results": [], "message": "未找到相关新闻，请尝试其他关键词"}
+    result = tool_error(
+        "news_search", "新闻搜索",
+        f"所有搜索引擎均未返回结果: {query}",
+        "请尝试其他关键词、同义词，或换用英文搜索。也可使用 web_search 搜索非时效性内容。",
+        {"query": query, "engines_tried": ["bing-news", "so360-news"]},
+    )
     cache_set(ckey, result)
     return result

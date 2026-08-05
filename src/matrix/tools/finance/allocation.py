@@ -12,6 +12,8 @@ from .holdings import holdings_summary
 def bucket_allocation(cache_path: str = "") -> dict[str, Any]:
     """Show allocation targets vs actual for each bucket."""
     summary = holdings_summary(cache_path=cache_path)
+    if "error" in summary:
+        return summary
     return {
         "currency": summary["currency"],
         "total_balance_cents": summary["total_balance_cents"],

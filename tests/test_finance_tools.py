@@ -134,3 +134,11 @@ class TestErrorHandling:
         result = registry.call("finance.holdings_summary")
         assert "error" in result
         assert "不存在" in result["error"] or "does not exist" in result["error"]
+
+    def test_allocation_rejects_missing_cache(self, tmp_dir):
+        """bucket_allocation must pass through error from holdings_summary."""
+        registry = ToolRegistry()
+        register_all(registry, tmp_dir / "missing.sqlite")
+        result = registry.call("finance.bucket_allocation")
+        assert "error" in result
+        assert "不存在" in result["error"] or "does not exist" in result["error"]

@@ -15,6 +15,14 @@ from matrix.llm import (
 )
 
 
+def _mock_response(text: str) -> dict:
+    """Build a mock Responses API response."""
+    return {
+        "status": "completed",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+    }
+
+
 class TestDeepSeekClient:
     def test_retries_transient_error_once(self):
         """DeepSeek client should retry once on LLMTransientError."""
@@ -25,7 +33,7 @@ class TestDeepSeekClient:
             calls += 1
             if calls == 1:
                 raise LLMTransientError("model provider returned 503: service busy")
-            return {"choices": [{"message": {"content": "ok"}}]}
+            return _mock_response("ok")
 
         client = DeepSeekClient(api_key="test-key", timeout_sec=5)
         with patch("matrix.llm.http.post_json", fake_post_json), patch("matrix.llm.http.time.sleep"):
@@ -59,17 +67,17 @@ class TestDeepSeekClient:
     def test_handles_missing_content(self):
         """DeepSeek should raise LLMError when response has no content."""
         def fake_post_json(*_args, **_kwargs):
-            return {"choices": [{"message": {}}]}
+            return {"output": [{"type": "message", "content": []}]}
 
         client = DeepSeekClient(api_key="test-key")
-        with patch("matrix.llm.http.post_json", fake_post_json), pytest.raises(LLMError, match="message content"):
+        with patch("matrix.llm.http.post_json", fake_post_json), pytest.raises(LLMError, match="content is empty"):
             client.complete("system", [])
 
     def test_uses_custom_base_url(self):
         """DeepSeek should use the configured base_url."""
         def fake_post_json(url, *_args, **_kwargs):
             assert "custom.api.com" in url
-            return {"choices": [{"message": {"content": "ok"}}]}
+            return _mock_response("ok")
 
         client = DeepSeekClient(api_key="test-key", base_url="https://custom.api.com")
         with patch("matrix.llm.http.post_json", fake_post_json):

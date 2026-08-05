@@ -145,3 +145,89 @@ def post_json_stream(
         if isinstance(err.reason, (TimeoutError, socket.timeout)):
             raise LLMTransientError(f"model provider timed out after {timeout_sec:g}s") from err
         raise LLMTransientError(f"model provider unavailable: {err.reason}") from err
+
+
+# ── Responses API SSE event reader ────────────────────────────────────────────
+
+
+def _read_sse_events(resp: Any, timeout_sec: float) -> Iterator[tuple[str | None, str]]:
+    """Read SSE events from a streaming HTTP response (Responses API format).
+
+    Yields (event_type, data_str) tuples. For old-format SSE without
+    'event:' lines, event_type is None.
+
+    Responses API uses semantic events like:
+      event: response.output_text.delta
+      data: {"type":"response.output_text.delta","delta":"Hello"}
+
+    Stream ends with response.completed / response.incomplete / response.failed
+    (no 'data: [DONE]' marker).
+    """
+    deadline = time.monotonic() + timeout_sec
+    buf = b""
+    event_type: str | None = None
+    while time.monotonic() < deadline:
+        chunk = resp.read(STREAM_READ_CHUNK)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                # Empty line = event boundary
+                event_type = None
+                continue
+            if text.startswith("event: "):
+                event_type = text[7:]
+            elif text.startswith("data: "):
+                data_str = text[6:]
+                if data_str == "[DONE]":
+                    return
+                yield (event_type, data_str)
+                # Don't reset event_type — Responses API data lines
+                # contain type field too, but keeping event_type lets
+                # callers filter without parsing JSON first.
+                event_type = None
+            elif text.startswith("{"):
+                # Old-format SSE without 'data:' prefix
+                yield (event_type, text)
+                event_type = None
+    # Drain remaining buffer
+    if buf:
+        text = buf.decode("utf-8", errors="replace").strip()
+        if text.startswith("data: ") and text[6:] != "[DONE]":
+            yield (event_type, text[6:])
+        elif text.startswith("{"):
+            yield (event_type, text)
+
+
+def post_json_stream_events(
+    url: str, payload: dict[str, Any], headers: dict[str, str], timeout_sec: float
+) -> Iterator[tuple[str | None, str]]:
+    """POST JSON with streaming SSE response. Yields (event_type, data_str) tuples.
+
+    For Responses API streaming. Same error handling as post_json_stream.
+    """
+    _acquire_rate_limit()
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout_sec) as resp:
+            yield from _read_sse_events(resp, timeout_sec)
+    except (TimeoutError, socket.timeout) as err:
+        raise LLMTransientError(f"model provider timed out after {timeout_sec:g}s") from err
+    except error.HTTPError as err:
+        detail = err.read().decode("utf-8", errors="replace")
+        message = f"model provider returned {err.code}: {detail[:500]}"
+        if err.code in AUTH_HTTP_CODES:
+            raise LLMAuthError(
+                f"model provider authentication failed ({err.code}); check API key"
+            ) from err
+        if err.code in TRANSIENT_HTTP_CODES:
+            raise LLMTransientError(message) from err
+        raise LLMError(message) from err
+    except error.URLError as err:
+        if isinstance(err.reason, (TimeoutError, socket.timeout)):
+            raise LLMTransientError(f"model provider timed out after {timeout_sec:g}s") from err
+        raise LLMTransientError(f"model provider unavailable: {err.reason}") from err

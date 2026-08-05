@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 from ._codes import resolve_code, resolve_codes
 from ._sina import fetch_quotes
 
@@ -77,21 +77,23 @@ def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
         codes = _market_default_codes(market)
 
     if not codes:
-        return {
-            "results": [],
-            "query": query,
-            "message": "未识别到有效的查询目标。请尝试更具体的关键词，如「上证指数」「苹果股价」「全球股市」。",
-        }
+        return tool_error(
+            "finance_query", "行情查询",
+            f"未识别到有效的查询目标: {query}",
+            "请尝试更具体的关键词，如「上证指数」「苹果股价」「全球股市」「A股」「美股」。",
+            {"query": query},
+        )
 
     # Fetch quotes
     quotes = fetch_quotes(codes)
 
     if not quotes:
-        return {
-            "results": [],
-            "query": query,
-            "message": "行情数据获取失败，请稍后重试。",
-        }
+        return tool_error(
+            "finance_query", "行情查询",
+            f"行情数据获取失败，可能是网络问题或 API 限流: {query}",
+            "请稍后重试，或尝试使用 news_search 获取相关财经新闻。",
+            {"query": query, "codes": codes},
+        )
 
     # Format output
     return {

@@ -68,9 +68,7 @@ ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
 # ---- Defaults ----
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEFAULT_AGNES_MODEL = "agnes-2.0-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
 
 # Known models per provider (text/chat models only)
 KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
@@ -78,10 +76,10 @@ KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "快速 · 1M上下文"},
         {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
     ],
-    "agnes": [
-        {"id": "agnes-2.0-flash", "name": "Agnes 2.0 Flash", "desc": "免费 · 256K上下文"},
-    ],
     }
+
+# Agnes base URL (used for image/video generation only, not text LLM)
+DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
 
 # Image generation models
 IMAGE_MODELS: dict[str, list[dict[str, str]]] = {
@@ -97,12 +95,16 @@ VIDEO_MODELS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
-# Pipeline model: used for internal tasks (classify, plan, reflection)
-# Defaults to Agnes 2.0 Flash for speed and cost efficiency
+# Pipeline model: used for internal tasks (classify, plan, reflection, aggregate)
+# Defaults to DeepSeek V4 Flash — planning is the cornerstone of the whole task;
+# a stronger model here prevents cascading failures from bad decomposition / routing.
+# The execution path (ReAct tool-calling + answer generation) defaults to the
+# cheaper Agnes 2.0 Flash, which is adequately covered by guardrails
+# (CircuitBreaker, anti-hallucination, Reflexion retry).
 ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
 ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
-DEFAULT_PIPELINE_PROVIDER = "agnes"
-DEFAULT_PIPELINE_MODEL = "agnes-2.0-flash"
+DEFAULT_PIPELINE_PROVIDER = "deepseek"
+DEFAULT_PIPELINE_MODEL = DEFAULT_DEEPSEEK_MODEL
 
 
 @dataclass(frozen=True)
@@ -151,11 +153,7 @@ class AgentConfig:
 
     @property
     def active_api_key(self) -> str:
-        if self.agent_provider == "deepseek":
-            return self.deepseek_api_key
-        if self.agent_provider == "agnes":
-            return self.agnes_api_key
-        return ""
+        return self.deepseek_api_key
 
     @property
     def llm_available(self) -> bool:
@@ -163,8 +161,8 @@ class AgentConfig:
 
     @property
     def llm_unavailable_reason(self) -> str:
-        if self.agent_provider not in {"deepseek", "agnes"}:
-            return f"unsupported AGENT_PROVIDER: {self.agent_provider}"
+        if self.agent_provider != "deepseek":
+            return f"unsupported AGENT_PROVIDER: {self.agent_provider} (only 'deepseek' is supported for text LLM)"
         if not self.active_api_key:
             key_map = {
                 "deepseek": ENV_DEEPSEEK_API_KEY,
@@ -356,8 +354,6 @@ def load_bind_addr() -> tuple[str, int]:
 
 
 def default_model(provider: str) -> str:
-    if provider == "agnes":
-        return DEFAULT_AGNES_MODEL
     return DEFAULT_DEEPSEEK_MODEL
 
 
