@@ -15,6 +15,7 @@ import RightPanel from './components/RightPanel';
 import FileUpload from './components/FileUpload';
 import ConfirmDialog from './components/ConfirmDialog';
 import { McpPanel } from './components/McpPanel';
+import { MemoryPanel } from './components/MemoryPanel';
 import { TracePanel } from './components/TracePanel';
 import { BranchBanner } from './components/BranchBanner';
 import type { SkillItem, FileInfo } from './types';
@@ -36,6 +37,7 @@ const App: React.FC = () => {
   const [showSkillEditor, setShowSkillEditor] = useState(false);
   const [file, setFile] = useState<FileInfo | null>(null);
   const [showMcp, setShowMcp] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
   const [showTrace, setShowTrace] = useState(false);
   const [rpanelOpen, setRpanelOpen] = useState(false);
   const [showSkillList, setShowSkillList] = useState(false);
@@ -215,6 +217,7 @@ const App: React.FC = () => {
           onQuickSend={handleQuickSend}
           onOpenSkillEditor={() => setShowSkillList(true)}
           onOpenMcp={() => setShowMcp(true)}
+          onOpenMemory={() => setShowMemory(true)}
         />
       </div>
       {/* Sidebar resize handle — matches original HTML resize-handle */}
@@ -431,6 +434,9 @@ const App: React.FC = () => {
 
       {/* MCP Panel */}
       {showMcp && <McpPanel onClose={() => setShowMcp(false)} />}
+
+      {/* Memory Panel */}
+      {showMemory && <MemoryPanel onClose={() => setShowMemory(false)} />}
 
       {/* Trace Panel */}
       {showTrace && <TracePanel onClose={() => setShowTrace(false)} />}

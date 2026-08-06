@@ -25,7 +25,7 @@ from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
 from ..tools.rag import register_all as register_rag_tools
-from .routes import auth, chat, health, provider, sessions, tools, trace, upload
+from .routes import auth, chat, health, memory, provider, sessions, tools, trace, upload
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
@@ -302,6 +302,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(sessions.router)
     app.include_router(provider.router)
     app.include_router(trace.router)
+    app.include_router(memory.router)
 
     # MCP server management routes
     from .routes import mcp as mcp_routes

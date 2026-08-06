@@ -880,7 +880,8 @@ class ChatService:
             if updated and self.config.memory_sync_path:
                 json_path = Path(self.config.memory_sync_path) / f"{user_id}.json"
                 self.store.sync_profile_to_file(user_id, str(json_path))
-        except Exception:
+        except Exception as exc:
+            logger.warning("memory_extraction failed: %s", exc, exc_info=True)
             pass  # Memory extraction is best-effort
 
         # Run memory evolution (conflict resolution, consolidation, forgetting)

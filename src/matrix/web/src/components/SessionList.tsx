@@ -19,6 +19,7 @@ interface Props {
   onLogout?: () => void;
   onOpenSkillEditor?: () => void;
   onOpenMcp?: () => void;
+  onOpenMemory?: () => void;
 }
 
 const SessionList: React.FC<Props> = ({
@@ -26,7 +27,7 @@ const SessionList: React.FC<Props> = ({
     onSelect, onCreate, onRefresh, onDelete,
     onBatchArchive, onBatchUnarchive, onBatchDelete,
     onToggleArchive, onQuickSend,
-  username, onLogout, onOpenSkillEditor, onOpenMcp,
+  username, onLogout, onOpenSkillEditor, onOpenMcp, onOpenMemory,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [batchMode, setBatchMode] = useState(false);
@@ -258,6 +259,17 @@ const SessionList: React.FC<Props> = ({
                   <line x1="12" y1="17" x2="12" y2="21" />
                 </svg>
                 <span>MCP 服务</span>
+              </button>
+              <button
+                style={styles.userMenuItem}
+                onClick={() => { onOpenMemory?.(); setShowUserMenu(false); }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
+                </svg>
+                <span>记忆管理</span>
               </button>
               <div style={styles.userMenuDivider} />
               <button

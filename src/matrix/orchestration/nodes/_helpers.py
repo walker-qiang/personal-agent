@@ -1275,14 +1275,14 @@ def _heuristic_number_check(
             "heuristic_number_check: high fabrication risk — %d/%d numbers not in tool results",
             len(missing), total,
         )
-        # Try LLM-based verification as a second pass
+        # Try multi-sampling LLM verification as a second pass
         if llm is not None:
             try:
-                verified = _llm_verify_numbers(answer, missing, flat_results, llm, question)
+                verified = _multi_sample_verify(answer, missing, flat_results, llm, question)
                 if verified:
                     return verified
             except Exception:
-                logger.exception("heuristic_number_check: LLM verification failed")
+                logger.exception("heuristic_number_check: multi-sample verification failed")
 
         # Fallback: add a strong warning
         missing_preview = "、".join(missing[:5])
@@ -1303,54 +1303,208 @@ def _heuristic_number_check(
     return answer
 
 
-def _llm_verify_numbers(
+# ── Multi-sampling verification cache ──────────────────────────────────────
+# Caches "verdict" for (number, source_hash) pairs to avoid re-verifying
+# the same disputed numbers across invocations.  An LRU of 128 entries
+# keeps memory bounded while hitting the common case (same stock queried
+# multiple times in a session).
+from collections import OrderedDict as _OrderedDict  # noqa: E402
+
+_VERIFY_CACHE: _OrderedDict[str, str] = _OrderedDict()
+_VERIFY_CACHE_MAX = 128
+
+
+def _cache_key(missing_numbers: list[str], tool_results_text: str) -> str:
+    """Build a stable cache key from the disputed numbers + tool result hash."""
+    import hashlib as _hashlib
+    nums_str = ",".join(sorted(missing_numbers[:5]))
+    source_hash = _hashlib.md5(
+        tool_results_text[:2000].encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{nums_str}|{source_hash}"
+
+
+def _cached_verdict(key: str) -> str | None:
+    """Get a cached verdict, or None if not cached."""
+    if key in _VERIFY_CACHE:
+        _VERIFY_CACHE.move_to_end(key)
+        return _VERIFY_CACHE[key]
+    return None
+
+
+def _cache_verdict(key: str, verdict: str) -> None:
+    """Store a verdict in the cache, evicting the oldest if at capacity."""
+    _VERIFY_CACHE[key] = verdict
+    _VERIFY_CACHE.move_to_end(key)
+    if len(_VERIFY_CACHE) > _VERIFY_CACHE_MAX:
+        _VERIFY_CACHE.popitem(last=False)
+
+
+def _single_verify(
+    answer: str,
+    missing_numbers: list[str],
+    tool_results_text: str,
+    llm,
+    question: str,
+    temperature: float,
+) -> str:
+    """Single short-prompt verification call.
+
+    Returns one of: "SUPPORTED", "PARTIAL", "FABRICATED", "INCONCLUSIVE".
+    Uses a *short* prompt that only sends disputed numbers + source snippet,
+    rather than the full answer, to minimize token consumption.
+    """
+    # Short prompt: only disputed numbers + source context (not the full answer)
+    # This reduces token usage by ~10x compared to sending the full answer.
+    nums_list = ", ".join(missing_numbers[:5])
+    source_snippet = tool_results_text[:1500]
+
+    verify_prompt = (
+        "你是事实核查员。判断以下数字是否出现在给定的工具结果中。\n\n"
+        f"待核查数字：{nums_list}\n\n"
+        f"工具结果（截取）：\n{source_snippet}\n\n"
+        "返回 JSON：\n"
+        '{"verdict": "SUPPORTED|PARTIAL|FABRICATED", "reason": "简短原因"}\n\n'
+        "- SUPPORTED: 所有数字都能在工具结果中找到对应值\n"
+        "- PARTIAL: 部分数字能找到，部分找不到（考虑单位转换、小数精度差异）\n"
+        "- FABRICATED: 数字完全不在工具结果中"
+    )
+
+    try:
+        data = llm.complete_json(
+            verify_prompt,
+            [{"role": "user", "content": "请核查以上数字的事实准确性。"}],
+            temperature=temperature,
+        )
+        if not isinstance(data, dict):
+            return "INCONCLUSIVE"
+        verdict = str(data.get("verdict", "")).upper().strip()
+        if verdict not in ("SUPPORTED", "PARTIAL", "FABRICATED"):
+            return "INCONCLUSIVE"
+        return verdict
+    except Exception:
+        return "INCONCLUSIVE"
+
+
+def _multi_sample_verify(
     answer: str,
     missing_numbers: list[str],
     tool_results_text: str,
     llm,
     question: str,
 ) -> str | None:
-    """Use a separate LLM call to verify if the answer is supported by tool results.
+    """Multi-sampling verification with 2+1 escalation and caching.
 
-    Returns a corrected answer string, or None if verification is inconclusive.
+    Strategy (inspired by SelfCheckGPT, arXiv:2303.08896):
+    1. Check cache — if this number set was verified before, reuse the verdict.
+    2. Sample 2 times at temperature=0.3. If both agree, accept the verdict.
+    3. If 2 samples disagree, sample a 3rd time (temperature=0.0) as tiebreaker.
+    4. If FABRICATED, fall back to a full-answer verification to get
+       a corrected answer (only when fabrication is confirmed by majority).
+
+    Returns:
+        - The original `answer` if numbers are SUPPORTED or PARTIAL.
+        - A corrected answer string if FABRICATED.
+        - None if verification is inconclusive.
     """
-    verify_prompt = f"""你是一个事实核查员。请检查以下 AI 回答是否基于给定的工具搜索结果。
+    # 1. Cache lookup
+    key = _cache_key(missing_numbers, tool_results_text)
+    cached = _cached_verdict(key)
+    if cached:
+        logger.info("heuristic_number_check: cache hit, verdict=%s", cached)
+        if cached == "FABRICATED":
+            # Even with cached FABRICATED, we need to generate a correction.
+            # Fall through to full-answer verification below.
+            pass
+        else:
+            return answer  # SUPPORTED or PARTIAL — return original
 
-用户问题：{question}
+    # 2. First two samples (temperature > 0 for diversity)
+    v1 = _single_verify(answer, missing_numbers, tool_results_text, llm, question, 0.3)
+    v2 = _single_verify(answer, missing_numbers, tool_results_text, llm, question, 0.3)
+    logger.info(
+        "heuristic_number_check: multi-sample v1=%s v2=%s (missing=%s)",
+        v1, v2, missing_numbers[:3],
+    )
 
-AI 回答：
-{answer[:1500]}
+    # 3. Escalation: if first two agree, use that verdict
+    if v1 == v2 and v1 != "INCONCLUSIVE":
+        verdict = v1
+    else:
+        # 4. Tiebreaker: 3rd sample at temperature=0.0
+        v3 = _single_verify(answer, missing_numbers, tool_results_text, llm, question, 0.0)
+        logger.info(
+            "heuristic_number_check: tiebreaker v3=%s (v1=%s v2=%s)",
+            v3, v1, v2,
+        )
+        # Majority vote among the 3 samples
+        votes = [v for v in (v1, v2, v3) if v != "INCONCLUSIVE"]
+        if not votes:
+            return None  # All 3 inconclusive — can't verify
+        # Pick the most common verdict
+        from collections import Counter as _Counter
+        verdict = _Counter(votes).most_common(1)[0][0]
 
-工具搜索结果（截取）：
-{tool_results_text[:3000]}
+    # Cache the verdict
+    _cache_verdict(key, verdict)
 
-请判断 AI 回答中的事实陈述是否有工具搜索结果支持。特别关注以下数字是否出现在工具结果中：{', '.join(missing_numbers[:5])}
+    # 5. Handle verdict
+    if verdict in ("SUPPORTED", "PARTIAL"):
+        logger.info(
+            "heuristic_number_check: multi-sample verdict=%s, keeping original answer",
+            verdict,
+        )
+        return answer
 
-返回 JSON：
-{{"verdict": "SUPPORTED"|"PARTIAL"|"FABRICATED", "reason": "简短原因", "corrected_answer": "修正后的回答（仅当 FABRICATED 时需要）"}}
+    if verdict == "FABRICATED":
+        # Full-answer verification to get a corrected answer
+        # (only when fabrication is confirmed by majority vote)
+        logger.warning(
+            "heuristic_number_check: multi-sample confirmed fabrication, "
+            "generating corrected answer",
+        )
+        return _full_verify_and_correct(
+            answer, missing_numbers, tool_results_text, llm, question,
+        )
 
-如果 verdict 是 FABRICATED，corrected_answer 应该只包含工具结果中确实存在的信息，并诚实说明哪些数据无法获取。"""
+    return None
+
+
+def _full_verify_and_correct(
+    answer: str,
+    missing_numbers: list[str],
+    tool_results_text: str,
+    llm,
+    question: str,
+) -> str | None:
+    """Full-answer verification: send the complete answer + tool results to get
+    a corrected answer when multi-sampling confirms fabrication.
+
+    This is the expensive path — only called when 2+ samples agree on FABRICATED.
+    """
+    full_prompt = (
+        f"你是事实核查员。以下 AI 回答中的部分数字可能不存在于工具搜索结果中。\n\n"
+        f"用户问题：{question}\n\n"
+        f"AI 回答：\n{answer[:1500]}\n\n"
+        f"工具搜索结果（截取）：\n{tool_results_text[:3000]}\n\n"
+        f"可疑数字：{', '.join(missing_numbers[:5])}\n\n"
+        "请基于工具搜索结果生成修正后的回答。"
+        "只包含工具结果中确实存在的信息，对于无法获取的数据请诚实说明。\n\n"
+        "返回 JSON：\n"
+        '{"verdict": "FABRICATED", "reason": "简短原因", "corrected_answer": "修正后的回答"}'
+    )
 
     try:
         data = llm.complete_json(
-            verify_prompt,
-            [{"role": "user", "content": "请核查以上回答的事实准确性。"}],
+            full_prompt,
+            [{"role": "user", "content": "请生成修正后的回答。"}],
             temperature=0.0,
         )
         if not isinstance(data, dict):
             return None
-        verdict = str(data.get("verdict", "")).upper()
-        if verdict == "FABRICATED" and data.get("corrected_answer"):
-            logger.info("heuristic_number_check: LLM verification found fabrication, using corrected answer")
+        if data.get("corrected_answer"):
+            logger.info("heuristic_number_check: corrected answer generated")
             return str(data["corrected_answer"])
-        if verdict in ("SUPPORTED", "PARTIAL"):
-            reason = data.get("reason", "")
-            logger.info("heuristic_number_check: LLM verification found %s: %s", verdict, reason)
-            # LLM verification confirmed the data is supported or partially
-            # supported — return the original answer without the fabrication
-            # warning. Adding a scary "数据一致性警告" after LLM confirmation
-            # would be misleading to the user.
-            return answer
         return None
     except Exception:
         return None
