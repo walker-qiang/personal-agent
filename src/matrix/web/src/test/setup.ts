@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom';
+import { beforeEach } from 'vitest';
 import { MockEventSource } from './helpers/mockEventSource';
 
 // --- Node v26+ localStorage/sessionStorage polyfill ---

@@ -36,7 +36,7 @@ afterEach(() => {
 
 /** Send a message and return the MockEventSource that was created. */
 async function sendMessage(
-  result: ReturnType<typeof renderHook<ReturnType<typeof useChat>>>,
+  result: { current: ReturnType<typeof useChat> },
   message = 'hello',
   sessionId = 's1',
   fileId?: string,
