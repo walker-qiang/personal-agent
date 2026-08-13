@@ -15,16 +15,6 @@
       "enabled": false
     },
     {
-      "name": "wiki-search",
-      "transport": "stdio",
-      "command": "uv",
-      "args": ["--directory", "../personal-tools/archive/wiki-search", "run", "wiki-search-mcp"],
-      "env": {
-        "WIKI_SEARCH_API_URL": "http://127.0.0.1:8080"
-      },
-      "enabled": false
-    },
-    {
       "name": "http-example",
       "transport": "http",
       "url": "http://localhost:3000/mcp",
