@@ -92,6 +92,19 @@ class TestPreviewJson:
 class TestChatService:
     """Tests for stream_chat (LangGraph-based orchestration)."""
 
+    def test_memory_extraction_formats_json_prompt_and_persists(self, chat_service):
+        chat_service._pipeline_llm = FakeLLM([
+            '{"memories": [{"key": "language", "value": "中文", "type": "preference"}]}',
+        ])
+
+        chat_service._extract_memories(
+            "我希望以后都用中文回答。",
+            "好的，后续我会使用中文。",
+            "memory-user",
+        )
+
+        assert chat_service.store.get_profile("memory-user") == {"language": "中文"}
+
     def test_empty_message_returns_error(self, chat_service):
         events = list(chat_service.stream_chat(""))
         types = [e["type"] for e in events]

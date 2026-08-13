@@ -29,6 +29,7 @@ from ._helpers import (
     _check_early_stop,
     _classify_query_factuality,
     _evaluate_sufficiency,
+    _focus_tools_for_task,
     _get_configurable,
     _inject_agent_guidelines,
     _inject_data_index,
@@ -38,6 +39,7 @@ from ._helpers import (
     _now_ts,
     _prune_tools,
     _push_event,
+    _requires_browser,
     _run_budget_and_compact,
     _today_cn,
     _trace,
@@ -162,6 +164,15 @@ def react_llm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     # P2-2: Action Space pruning
     llm_tools = _prune_tools(llm_tools, messages, iteration=iteration,
                              circuit_breaker=cfg.get("circuit_breaker"))
+    llm_tools = _focus_tools_for_task(question, llm_tools)
+    if _requires_browser(question) and not any(
+        tool.get("function", {}).get("name", "").startswith("mcp_browser_")
+        for tool in llm_tools
+    ):
+        system_prompt += (
+            "\n\n当前运行环境没有可用的 browser MCP 工具。"
+            "请直接说明浏览器 MCP 未配置，不要改用 web_fetch。"
+        )
 
     with _trace_span(cfg, "react_llm", session_id=state.get("session_id", ""),
                      agent_id=agent_id, iteration=iteration):

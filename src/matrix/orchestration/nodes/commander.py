@@ -26,6 +26,7 @@ from ._helpers import (
     _classify_query_factuality,
     _evaluate_sufficiency,
     _extract_media_urls,
+    _focus_tools_for_task,
     _fix_media_answer,
     _get_configurable,
     _heuristic_number_check,
@@ -37,6 +38,7 @@ from ._helpers import (
     _is_refusal,
     _prune_tools,
     _push_event,
+    _requires_browser,
     _run_budget_and_compact,
     _today_cn,
     COMMANDER_AGGREGATE_PROMPT,
@@ -568,6 +570,25 @@ def _run_domain_agent_react(
     and _react_handle_content for clarity.
     """
     llm = cfg["llm"]
+
+    if _requires_browser(task):
+        browser_tools = [
+            name for name in tools.tool_names()
+            if name.startswith("mcp_browser_")
+        ]
+        if not browser_tools:
+            message = (
+                "当前运行环境未配置浏览器 MCP，无法执行浏览器打开、动态页面提取或页面交互。"
+                "请启用 browser MCP 后重试。"
+            )
+            logger.warning("browser task blocked: no browser MCP tools available")
+            return {
+                "answer": message,
+                "tool_results": [],
+                "findings": [],
+                "environment_blocked": True,
+            }
+
     tool_results: list[dict[str, Any]] = list(skill_results)
     iteration = 0
     prev_result_count = len(tool_results)
@@ -630,6 +651,7 @@ def _run_domain_agent_react(
         # P2-2: Action Space pruning
         llm_tools = _prune_tools(llm_tools, messages, iteration=iteration,
                                  circuit_breaker=cfg.get("circuit_breaker"))
+        llm_tools = _focus_tools_for_task(task, llm_tools)
         pipeline_llm = cfg.get("pipeline_llm")
         wm = cfg.get("working_memory", {})
         user_goal = wm.get("pinned", original_question)

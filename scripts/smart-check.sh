@@ -79,12 +79,12 @@ else
 
         while IFS= read -r file; do
             case "$file" in
+                src/matrix/agent/commander.py|src/matrix/agent/domain_agents/*|src/matrix/orchestration/nodes/_helpers.py)
+                    AGENT_CHANGED=true; PROMPT_CHANGED=true; ONLY_INFRA=false ;;
                 src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*)
                     AGENT_CHANGED=true; ONLY_INFRA=false ;;
                 ../personal-assets/技能/*|skills/*)
                     SKILL_CHANGED=true; ONLY_INFRA=false ;;
-                src/matrix/agent/commander.py|src/matrix/agent/domain_agents/*|src/matrix/orchestration/nodes/_helpers.py)
-                    PROMPT_CHANGED=true; ONLY_INFRA=false ;;
                 tests/*|docs/*|*.md|scripts/*)
                     # Infrastructure/docs — don't trigger eval
                     ;;

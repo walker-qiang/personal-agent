@@ -55,6 +55,7 @@ async def chat(request: Request):
         raw_session_id = payload.get("session_id")
         session_id = str(raw_session_id).strip() if raw_session_id else None
         file_id = str(payload.get("file_id", "")).strip() or None
+        mode = str(payload.get("mode", "")).strip()
     except (FinanceToolError, json.JSONDecodeError) as err:
         _trace_error(request, str(err))
         return JSONResponse(
@@ -72,7 +73,9 @@ async def chat(request: Request):
     # ---- END INPUT GUARD ----
 
     def iter_events():
-        for event in chat_service.stream_chat(message, session_id, user_id=user_id, file_id=file_id):
+        for event in chat_service.stream_chat(
+            message, session_id, user_id=user_id, file_id=file_id, mode=mode,
+        ):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)

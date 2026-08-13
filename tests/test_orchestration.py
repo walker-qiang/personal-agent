@@ -24,8 +24,14 @@ from matrix.orchestration.nodes import (
     delegate_node,
     reflection_node,
     replan_node,
+    _run_domain_agent_react,
 )
-from matrix.orchestration.nodes._helpers import CircuitBreaker, _prune_tools
+from matrix.orchestration.nodes._helpers import (
+    CircuitBreaker,
+    _focus_tools_for_task,
+    _prune_tools,
+    _requires_browser,
+)
 from matrix.orchestration.state import AgentState
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
@@ -638,6 +644,46 @@ def _drain_progress_events(event_queue: queue.Queue) -> list[dict]:
     while not event_queue.empty():
         events.append(event_queue.get_nowait())
     return [e[1] for e in events if e[0] == "progress"]
+
+
+def test_browser_task_without_mcp_is_explicitly_blocked(full_tools):
+    result = _run_domain_agent_react(
+        agent_def=INVESTMENT_ANALYST,
+        task="用浏览器打开一个 SPA 页面并提取内容",
+        tools=full_tools,
+        skill_results=[],
+        cfg={"llm": object()},
+        agent_id="investment-analyst",
+    )
+
+    assert _requires_browser("用浏览器打开一个 SPA 页面并提取内容") is True
+    assert result["environment_blocked"] is True
+    assert "浏览器 MCP" in result["answer"]
+    assert result["tool_results"] == []
+
+
+def test_explicit_tasks_focus_the_action_space():
+    tools = [
+        {"type": "function", "function": {"name": "weather"}},
+        {"type": "function", "function": {"name": "web_search"}},
+        {"type": "function", "function": {"name": "finance.recent_snapshots"}},
+        {"type": "function", "function": {"name": "code.run_python"}},
+        {"type": "function", "function": {"name": "mcp_browser_navigate"}},
+        {"type": "function", "function": {"name": "mcp_browser_extract"}},
+    ]
+
+    assert [
+        t["function"]["name"]
+        for t in _focus_tools_for_task("今天北京天气怎么样", tools)
+    ] == ["weather"]
+    assert [
+        t["function"]["name"]
+        for t in _focus_tools_for_task("最近5条快照记录", tools)
+    ] == ["finance.recent_snapshots"]
+    assert [
+        t["function"]["name"]
+        for t in _focus_tools_for_task("打开 SPA 页面并提取内容", tools)
+    ] == ["mcp_browser_navigate", "mcp_browser_extract"]
 
 
 class TestProgressEvents:

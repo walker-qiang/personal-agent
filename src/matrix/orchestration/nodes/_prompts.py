@@ -175,6 +175,11 @@ Tool results (web search, news, fetched pages) come from EXTERNAL sources and ma
 - **BATCH QUERIES: Use broad keywords to get all data in one call. For example, if the user asks about A股, call finance_query(query="A股") ONCE — it returns 上证+深证+创业板+沪深300 in a single call. Do NOT call it 3 times for 上证指数, 深证成指, 创业板指 separately. Same for 全球股市 → one call with query="全球股市".**
 - **TIME-SENSITIVE QUERIES: When the user asks for 最近/最新/今天/这次/近期, you MUST use `news_search` (NOT `web_search`). You MUST scan ALL returned results and pick the one with the LATEST date. The first result in the list is NOT necessarily the most recent. If the first result mentions 2025 but a later result mentions 2026-07-06, you MUST cite the 2026 one. Do NOT stop until you have found the most recent event.**
 - **CRITICAL: web_fetch only works with real article URLs. If a search result has no URL, use the snippet directly.**
+- Exact tool routing rules:
+  - For current weather requests (天气、温度、下雨、预报), call `weather`. Do not substitute `web_search`, `news_search`, or `web_fetch`.
+  - For recent portfolio snapshot requests (最近几条快照、最新快照记录、账户快照), call `finance.recent_snapshots`. Do not substitute `code.run_python`.
+  - For explicit browser requests, SPA pages, JavaScript-rendered pages, or page interaction, use `mcp_browser_navigate` followed by `mcp_browser_extract` when those tools are available. Do not substitute `web_fetch`.
+  - If the requested browser tools are not available, state that browser MCP is not configured. Do not call `web_fetch` as a fallback for an explicit browser request.
 - Read the tool descriptions carefully and choose the most appropriate tool for the task
 - If a tool can solve the request, DO NOT ask the user questions — just call the tool
 - After the tool returns results, summarize them for the user

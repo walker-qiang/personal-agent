@@ -50,6 +50,178 @@ class TraceSink(Protocol):
 logger = logging.getLogger("matrix.chat")
 
 
+def _normalize_research_result(
+    result: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    *,
+    code: str,
+    name: str,
+    object_type: str,
+    research_date: str,
+) -> dict[str, Any]:
+    """Make the model response persistence-ready without inventing facts."""
+    normalized = dict(result)
+    normalized.setdefault("schema_version", 2)
+    normalized.setdefault("type", "investment-research")
+    normalized.setdefault("object_type", object_type)
+    normalized.setdefault("research_date", research_date)
+    normalized.setdefault("data_date", research_date)
+    normalized.setdefault("subject", {"code": code, "name": name})
+    normalized.setdefault("tags", ["investment-research", object_type])
+
+    subject = normalized.get("subject")
+    if not isinstance(subject, dict):
+        normalized["subject"] = {"code": code, "name": name}
+    else:
+        subject.setdefault("code", code)
+        subject.setdefault("name", name)
+
+    metrics = normalized.get("metrics")
+    if isinstance(metrics, dict):
+        normalized["metrics"] = [
+            {"name": key, "value": value}
+            for key, value in metrics.items()
+        ]
+
+    existing_sources = normalized.get("sources")
+    sources = list(existing_sources) if isinstance(existing_sources, list) else []
+    seen = {
+        str(item.get("url") or item.get("title") or "").strip().lower()
+        for item in sources
+        if isinstance(item, dict)
+    }
+    info_items: list[dict[str, Any]] = []
+    for entry in evidence:
+        if entry.get("tool") != "personal_os.information_search":
+            continue
+        payload = entry.get("result")
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            info_items.extend(
+                item for item in payload["items"] if isinstance(item, dict)
+            )
+
+    for item in info_items:
+        title = str(item.get("title") or item.get("source_name") or "").strip()
+        url = str(item.get("url") or "").strip()
+        key = (url or title).lower()
+        if not key or key in seen:
+            continue
+        source_type = str(
+            item.get("source_type")
+            or ("official" if item.get("tier") == "official" else "supplementary")
+        )
+        date = str(
+            item.get("date")
+            or item.get("published_at")
+            or item.get("publishedAt")
+            or ""
+        ).strip()
+        sources.append({
+            "title": title or url,
+            "url": url,
+            "date": date,
+            "source_type": source_type,
+        })
+        seen.add(key)
+
+    if not sources:
+        sources = [
+            {
+                "title": entry["tool"],
+                "url": "",
+                "date": "",
+                "source_type": "tool",
+            }
+            for entry in evidence
+            if entry.get("tool", "").startswith("personal_os.")
+        ]
+    normalized["sources"] = sources
+    return normalized
+
+
+def _select_latest_official_url(
+    sources: list[dict[str, Any]],
+    research_year: str,
+) -> str | None:
+    """Prefer the newest official quarterly/earnings announcement."""
+    candidates = [
+        item for item in sources
+        if isinstance(item, dict)
+        and item.get("url")
+        and item.get("tier") == "official"
+    ]
+    if not candidates:
+        return None
+
+    def score(item: dict[str, Any]) -> int:
+        text = f"{item.get('title', '')} {item.get('url', '')}".lower()
+        value = 0
+        if research_year and research_year in text:
+            value += 10
+        if any(token in text for token in ("二季度", "第二季", "q2", "中期", "季度")):
+            value += 8
+        if any(token in text for token in ("业绩", "results", "earnings")):
+            value += 4
+        if "年报" in text or "annual" in text:
+            value += 1
+        return value
+
+    return max(candidates, key=score).get("url")
+
+
+def _extract_official_report_period(evidence: list[dict[str, Any]]) -> str:
+    """Extract an explicit reporting date from an official fetched document."""
+    import re
+
+    text_parts: list[str] = []
+    for entry in evidence:
+        if entry.get("tool") != "personal_os.web_fetch":
+            continue
+        result = entry.get("result")
+        if isinstance(result, dict):
+            text_parts.append(str(result.get("content") or result.get("text") or ""))
+    text = "\n".join(text_parts)
+    if not text:
+        return ""
+
+    arabic = re.search(r"(?:截至|as of|ended)\s*(\d{4})年?(\d{1,2})月?(\d{1,2})日", text, re.I)
+    if arabic:
+        return f"{int(arabic.group(1)):04d}-{int(arabic.group(2)):02d}-{int(arabic.group(3)):02d}"
+
+    chinese = re.search(
+        r"(?:截至|截至于)\s*([零〇一二三四五六七八九十百千万]+)年"
+        r"([零〇一二三四五六七八九十]+)月"
+        r"([零〇一二三四五六七八九十]+)日",
+        text,
+    )
+    if not chinese:
+        return ""
+    year = _parse_chinese_number(chinese.group(1))
+    month = _parse_chinese_number(chinese.group(2))
+    day = _parse_chinese_number(chinese.group(3))
+    if year <= 0 or month <= 0 or day <= 0:
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _parse_chinese_number(value: str) -> int:
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if all(char in digits for char in value):
+        result = 0
+        for char in value:
+            result = result * 10 + digits[char]
+        return result
+    if value == "十":
+        return 10
+    if "十" in value:
+        left, right = value.split("十", 1)
+        tens = digits.get(left, 1) if left else 1
+        ones = digits.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return digits.get(value, 0)
+
+
 class ChatService:
     """LangGraph-based chat orchestration: classify → react/plan/skill → summarize → reflection."""
 
@@ -73,6 +245,10 @@ class ChatService:
             agnes_api_key=config.agnes_api_key,
             model=config.agent_model,
             deepseek_base_url=config.deepseek_base_url,
+            codex_bin=config.codex_bin,
+            codex_workdir=config.codex_workdir,
+            codex_sandbox=config.codex_sandbox,
+            codex_reasoning_effort=config.codex_reasoning_effort,
             agnes_base_url=config.agnes_base_url,
             max_tokens=config.agent_max_tokens,
             timeout_sec=config.agent_model_timeout_sec,
@@ -93,6 +269,10 @@ class ChatService:
                 agnes_api_key=config.agnes_api_key,
                 model=config.pipeline_model,
                 deepseek_base_url=config.deepseek_base_url,
+                codex_bin=config.codex_bin,
+                codex_workdir=config.codex_workdir,
+                codex_sandbox=config.codex_sandbox,
+                codex_reasoning_effort=config.codex_reasoning_effort,
                 agnes_base_url=config.agnes_base_url,
                 max_tokens=config.agent_max_tokens,
                 timeout_sec=config.agent_model_timeout_sec,
@@ -171,10 +351,12 @@ class ChatService:
     def available_providers(self) -> list[dict[str, Any]]:
         """List available providers with their models."""
         providers = []
+        if self.config.llm_available or self.config.agent_provider == "codex":
+            from shutil import which
+            if which(self.config.codex_bin):
+                providers.append({"id": "codex", "name": "本地 Codex", "models": KNOWN_MODELS.get("codex", [])})
         if self.config.deepseek_api_key:
             providers.append({"id": "deepseek", "name": "DeepSeek", "models": KNOWN_MODELS.get("deepseek", [])})
-        if self.config.agnes_api_key:
-            providers.append({"id": "agnes", "name": "Agnes AI", "models": KNOWN_MODELS.get("agnes", [])})
         return providers
 
     @property
@@ -214,7 +396,7 @@ class ChatService:
         Returns:
             dict with 'ok', 'provider', and 'model' fields.
         """
-        if provider not in {"deepseek", "agnes"}:
+        if provider not in {"codex", "deepseek"}:
             return {"ok": False, "error": f"unsupported provider: {provider}"}
         if not self.store.set_provider(session_id, provider, model, user_id=user_id):
             return {"ok": False, "error": "session not found or belongs to another user"}
@@ -231,6 +413,10 @@ class ChatService:
                 agnes_api_key=self.config.agnes_api_key,
                 model=model or default_model(provider),
                 deepseek_base_url=self.config.deepseek_base_url,
+                codex_bin=self.config.codex_bin,
+                codex_workdir=self.config.codex_workdir,
+                codex_sandbox=self.config.codex_sandbox,
+                codex_reasoning_effort=self.config.codex_reasoning_effort,
                 agnes_base_url=self.config.agnes_base_url,
                 max_tokens=self.config.agent_max_tokens,
                 timeout_sec=self.config.agent_model_timeout_sec,
@@ -296,7 +482,14 @@ class ChatService:
                     }
         return ""
 
-    def stream_chat(self, message: str, session_id: str | None = None, user_id: str = "default", file_id: str | None = None) -> Iterator[dict[str, Any]]:
+    def stream_chat(
+        self,
+        message: str,
+        session_id: str | None = None,
+        user_id: str = "default",
+        file_id: str | None = None,
+        mode: str = "",
+    ) -> Iterator[dict[str, Any]]:
         """LangGraph-based streaming chat with classify → react/plan/skill → summarize → reflection."""
         started = time.perf_counter()
         sid = session_id or uuid.uuid4().hex
@@ -344,7 +537,7 @@ class ChatService:
 
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
-            reflexion_max=self.config.reflexion_max_attempts,
+            reflexion_max=0 if mode == "deep_research" else self.config.reflexion_max_attempts,
             attachments=attachments,
         )
 
@@ -357,6 +550,18 @@ class ChatService:
                 session_llm.model if hasattr(session_llm, 'model') else "?",
                 len(text),
             )
+
+            if getattr(session_llm, "provider", "") == "codex" and mode == "deep_research":
+                yield from self._stream_deep_research(
+                    session_llm, sid, text, history, user_id,
+                )
+                return
+
+            if getattr(session_llm, "provider", "") == "codex":
+                yield from self._stream_codex_direct(
+                    session_llm, sid, text, history, user_id,
+                )
+                return
 
             graph_config = self._build_graph_config(sid, session_llm, history, text, user_id, attachments)
 
@@ -385,6 +590,193 @@ class ChatService:
                 # Keep latest checkpoint for recovery (P0-4: 断点恢复)
                 self._prune_checkpoints(sid, keep_latest=True)
             yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
+
+    def _stream_codex_direct(
+        self,
+        llm: LLMClient,
+        session_id: str,
+        question: str,
+        history: list[dict[str, str]],
+        user_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Use one local Codex turn for the default backend.
+
+        The full LangGraph ReAct path is retained for DeepSeek. Codex already
+        owns its local agent tools, so wrapping it in another multi-step
+        planner would start several CLI processes for one user question.
+        """
+        system = (
+            "你是筋斗云的本地 Codex 助理。请直接回答用户问题。"
+            "可以读取个人系统工作区中的文件来获取上下文，但当前是只读沙箱，"
+            "不要修改文件或执行破坏性操作。回答使用中文，事实不确定时明确说明。"
+        )
+        messages = history[-8:] + [{"role": "user", "content": question}]
+        yield {"type": "classify", "intent": "codex-direct"}
+        yield {"type": "progress", "message": "本地 Codex 正在处理…"}
+        answer_parts: list[str] = []
+        try:
+            stream_agent = getattr(llm, "stream_agent", None)
+            if callable(stream_agent):
+                for event in stream_agent(system, messages):
+                    event_type = event.get("type")
+                    if event_type == "message":
+                        content = str(event.get("content") or "")
+                        if content:
+                            answer_parts.append(content)
+                            yield {"type": "token", "content": content}
+                    elif event_type not in {"done"}:
+                        yield event
+            else:
+                for token in llm.stream_complete(system, messages):
+                    answer_parts.append(token)
+                    yield {"type": "token", "content": token}
+            answer = "".join(answer_parts).strip()
+            if answer:
+                self._remember(session_id, question, answer, user_id=user_id)
+        except Exception as exc:
+            logger.error("codex direct chat failed: %s", exc, exc_info=True)
+            yield {"type": "error", "message": "本地 Codex 响应失败，请稍后重试"}
+
+    def _stream_deep_research(
+        self,
+        llm: LLMClient,
+        session_id: str,
+        question: str,
+        history: list[dict[str, str]],
+        user_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Prefetch personal-os evidence, then let Codex synthesize one JSON card."""
+        import re
+
+        code_match = re.search(r"标的代码[:：]\s*([A-Za-z0-9_.-]+)", question)
+        name_match = re.search(r"研究对象[:：]\s*(.+)", question)
+        code = code_match.group(1).strip() if code_match else ""
+        name = name_match.group(1).strip() if name_match else ""
+        research_date = (
+            question.split("研究日期：", 1)[1].splitlines()[0].strip()
+            if "研究日期：" in question
+            else ""
+        )
+        research_year = research_date[:4] or time.strftime("%Y")
+        if not code:
+            yield {"type": "error", "message": "深度研究缺少标的代码"}
+            return
+
+        agent_tools = self.agent_registry.build_tool_registry(
+            "investment-analyst", self.tools,
+        )
+        calls: list[tuple[str, dict[str, Any]]] = [
+            ("personal_os.market_quote", {"code": code}),
+            ("personal_os.financials", {"code": code, "periods": 8}),
+            ("personal_os.profile", {"code": code}),
+            ("personal_os.dividend", {"code": code, "years": 5}),
+            ("personal_os.valuation", {"code": code}),
+            ("personal_os.peers", {"code": code}),
+            ("personal_os.research_context", {"code": code, "name": name}),
+            (
+                "personal_os.information_search",
+                {
+                    "query": f"{name} {code} {research_year} 最新季报 二季度 业绩公告 年报 经营风险",
+                    "limit": 12,
+                },
+            ),
+        ]
+        evidence: list[dict[str, Any]] = []
+        yield {"type": "classify", "intent": "deep-research-prefetch"}
+        for tool_name, arguments in calls:
+            if tool_name not in agent_tools.tool_names():
+                evidence.append({"tool": tool_name, "error": "tool unavailable"})
+                yield {"type": "tool_result", "name": tool_name, "error": "tool unavailable"}
+                continue
+            yield {"type": "thinking", "content": f"正在调用 {tool_name} 获取数据…"}
+            yield {"type": "tool_call", "name": tool_name, "args": arguments}
+            result = agent_tools.call(tool_name, arguments, session_id=session_id)
+            evidence.append({"tool": tool_name, "result": result})
+            yield {
+                "type": "tool_result",
+                "name": tool_name,
+                "result": result,
+                "preview": preview_json(result),
+            }
+
+        info = next(
+            (item["result"] for item in evidence
+             if item["tool"] == "personal_os.information_search"
+             and isinstance(item.get("result"), dict)),
+            {},
+        )
+        sources = info.get("items", []) if isinstance(info, dict) else []
+        official_url = _select_latest_official_url(sources, research_year)
+        if official_url and "personal_os.web_fetch" in agent_tools.tool_names():
+            tool_name = "personal_os.web_fetch"
+            arguments = {"url": official_url}
+            yield {"type": "thinking", "content": f"正在调用 {tool_name} 核验官方正文…"}
+            yield {"type": "tool_call", "name": tool_name, "args": arguments}
+            result = agent_tools.call(tool_name, arguments, session_id=session_id)
+            evidence.append({"tool": tool_name, "result": result})
+            yield {
+                "type": "tool_result",
+                "name": tool_name,
+                "result": result,
+                "preview": preview_json(result),
+            }
+
+        evidence_text = json.dumps(evidence, ensure_ascii=False, default=str)
+        evidence_text = evidence_text[:60000]
+        system = """你是筋斗云的深度投资研究员。
+你只能使用下方 personal-os 工具证据，不得使用记忆补数字，不得编造来源。
+请输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码围栏。
+必须包含 schema_version=2、type=investment-research、status、object_type、
+subject、research_date、data_date、latest_report_period、
+information_completeness、decision、summary、highlights、thesis、antithesis、
+risks、metrics、triggers、sources、tags。
+如果证据不足，status 必须是 incomplete，information_completeness 必须是 low，
+并在 risks 中说明缺口；不要伪装成 deep。
+如果 personal_os.financials.metadata.stale 为 true，必须明确标记财报过期，
+不得把该期间称为当前最新经营数据，并优先使用最新季报/业绩公告补充。
+如果官方公告正文包含比 personal_os.financials 更新的报告期，必须使用官方公告
+报告期作为 latest_report_period，并在指标或风险中区分“聚合财报最新期”和“官方公告最新期”。
+metrics 必须是对象数组，每项至少包含 name 和 value；禁止把 Python map[...]、
+整段工具返回或未拆解的对象放进 value。
+sources 必须是对象数组，每项包含 title、url、date、source_type；url 和 date
+只能填写证据中真实出现的内容，找不到就留空。优先保留 information_search
+返回的文章标题、URL、发布日期和来源等级；personal_os 工具只能作为工具溯源。
+
+PERSONAL-OS EVIDENCE:
+""" + evidence_text
+        try:
+            result = llm.complete_json(
+                system,
+                [{"role": "user", "content": question}],
+            )
+            if isinstance(result, dict):
+                result = _normalize_research_result(
+                    result,
+                    evidence,
+                    code=code,
+                    name=name,
+                    object_type="fund" if "对象类型：fund" in question else "stock",
+                    research_date=research_date,
+                )
+                official_period = _extract_official_report_period(evidence)
+                if official_period and official_period > str(result.get("latest_report_period") or ""):
+                    result["latest_report_period"] = official_period
+                    metrics = result.get("metrics")
+                    if not isinstance(metrics, list):
+                        metrics = []
+                        result["metrics"] = metrics
+                    metrics.append({
+                        "name": "官方公告最新报告期",
+                        "value": official_period,
+                        "period": research_date,
+                        "source": "personal_os.web_fetch",
+                    })
+            answer = json.dumps(result, ensure_ascii=False)
+            self._remember(session_id, question, answer, user_id=user_id)
+            yield {"type": "token", "content": answer}
+        except Exception as exc:
+            logger.error("deep research synthesis failed: %s", exc, exc_info=True)
+            yield {"type": "error", "message": "深度研究汇总失败，请稍后重试"}
 
     def resume_chat(
         self, session_id: str, decision: str = "approve", user_id: str = "default",
@@ -691,6 +1083,7 @@ class ChatService:
                 "type": "agent_result",
                 "agent_id": ar.get("agent_id", ""),
                 "task": ar.get("task", ""),
+                "content": ar.get("result", ""),
                 "result": ar.get("result", "")[:500],
                 "error": ar.get("error", ""),
             }
@@ -720,6 +1113,7 @@ class ChatService:
                 "name": tr.get("name", ""),
                 "result": tr.get("result"),
                 "error": tr.get("error"),
+                "elapsed_ms": tr.get("elapsed_ms"),
                 "preview": preview_json(
                     tr.get("error", tr.get("result", {})),
                     limit=2000,

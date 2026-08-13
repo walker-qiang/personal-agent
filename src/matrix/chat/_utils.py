@@ -12,7 +12,7 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 -每个记忆条目需要标注类型：
   * "policy"：硬性规则/约束，不可被单次指令覆盖（如"投资组合中单只股票占比不超过 30%"、"禁止投资加密货币"）
   * "preference"：用户偏好，可以被覆盖（如"喜欢简洁回答"、"使用中文"、"每天早上查看持仓"）
--返回格式：{"memories": [{"key": "简短键名", "value": "事实描述", "type": "policy|preference"}]}
+-返回格式：{{"memories": [{{"key": "简短键名", "value": "事实描述", "type": "policy|preference"}}]}}
 
 可提取的信息类型：
 - 用户偏好（如"喜欢简洁回答"、"使用中文"）→ type: preference
@@ -21,7 +21,7 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 - 个人信息（如"我是软件工程师"、"我在北京"）→ type: preference
 - 硬性约束（如"不买亏损股票"、"最大回撤不超过 10%"）→ type: policy
 
-如果没有新信息，返回 {"memories": []}。
+如果没有新信息，返回 {{"memories": []}}。
 
 对话：
 用户：{question}
@@ -69,6 +69,7 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
                     "name": evt_data["name"],
                     "result": raw_result,
                     "error": raw_error,
+                    "elapsed_ms": evt_data.get("elapsed_ms"),
                     "preview": preview_json(
                         raw_result if raw_result is not None else (raw_error or ""),
                         limit=2000,

@@ -19,6 +19,8 @@ async def healthz(request: Request) -> dict:
         "cache_exists": config.cache_path.exists(),
         "provider": config.agent_provider,
         "model": config.agent_model,
+        "codex_bin": config.codex_bin,
+        "codex_available": config.llm_available if config.agent_provider == "codex" else False,
         "llm_available": config.llm_available,
         "llm_error": config.llm_unavailable_reason,
         "rag_available": getattr(request.app.state, "retriever", None) is not None,

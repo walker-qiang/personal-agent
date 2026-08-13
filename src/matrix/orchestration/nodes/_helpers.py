@@ -103,7 +103,7 @@ MAX_CONSECUTIVE_NO_PROGRESS = 3   # Stop if N consecutive steps add no new info
 
 MAX_SAME_TOOL_CALLS = 3           # Stop if same tool called N+ times (same name, regardless of args)
 
-MAX_TOTAL_TOOL_CALLS = 5          # Stop if total tool calls exceed this (across all tools)
+MAX_TOTAL_TOOL_CALLS = 12         # Deep investment research may need the full personal_os tool set
 
 EVALUATOR_INTERVAL = 2            # Run evaluator every N iterations
 
@@ -461,7 +461,66 @@ def _check_early_stop(
 
 # Domain-specific tools that return structured data — when they return valid
 # results, the data is very likely sufficient to answer the user's question.
-_DOMAIN_SUFFICIENCY_TOOLS = {"weather", "finance_query"}
+_DOMAIN_SUFFICIENCY_TOOLS = {
+    "weather",
+    "finance_query",
+    "finance.recent_snapshots",
+}
+
+_BROWSER_TASK_HINTS = (
+    "浏览器",
+    "browser",
+    "spa",
+    "动态页面",
+    "javascript 渲染",
+    "js 渲染",
+    "页面交互",
+    "点击页面",
+    "打开网页并提取",
+)
+
+
+def _requires_browser(task: str) -> bool:
+    """Return whether a task explicitly requires browser automation."""
+    lowered = task.lower()
+    return any(hint in lowered for hint in _BROWSER_TASK_HINTS)
+
+
+def _tool_name_for_llm(tool: dict[str, Any]) -> str:
+    """Read a tool name from the provider-facing function schema."""
+    return str(tool.get("function", {}).get("name", tool.get("name", "")))
+
+
+def _focus_tools_for_task(
+    task: str,
+    tool_defs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Restrict the initial action space for unambiguous task types."""
+    lowered = task.lower()
+    preferred: set[str] = set()
+
+    if any(term in lowered for term in ("天气", "温度", "下雨", "预报", "weather")):
+        preferred.add("weather")
+    elif any(term in lowered for term in ("快照", "snapshot")) and any(
+        term in lowered for term in ("最近", "最新", "记录", "recent", "latest")
+    ):
+        preferred.add("finance.recent_snapshots")
+    elif _requires_browser(task):
+        preferred = {
+            _tool_name_for_llm(tool)
+            for tool in tool_defs
+            if _tool_name_for_llm(tool).startswith("mcp_browser_")
+        }
+
+    if not preferred:
+        return tool_defs
+    available = {_tool_name_for_llm(tool) for tool in tool_defs}
+    if not (_requires_browser(task) or preferred & available):
+        return tool_defs
+    return [
+        tool for tool in tool_defs
+        if _tool_name_for_llm(tool) in preferred
+    ]
 
 
 def _check_domain_tool_sufficiency(

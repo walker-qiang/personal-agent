@@ -24,6 +24,7 @@ from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
+from ..tools.personal_os import register_all as register_personal_os_tools
 from ..tools.rag import register_all as register_rag_tools
 from .routes import auth, chat, health, memory, provider, sessions, tools, trace, upload
 from .middleware import AuthMiddleware
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_finance_tools(tools_registry, config.cache_path)
     register_web_tools(tools_registry)
     register_agnes_tools(tools_registry)
+    register_personal_os_tools(tools_registry)
 
     # ---- GUARDRAILS ----
     guard_config = GuardConfig.from_env()
@@ -155,13 +157,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         anthropic_api_key=config.anthropic_api_key,
                         agnes_api_key=config.agnes_api_key,
                         model=config.pipeline_model,
-                        base_url=(
+                        deepseek_base_url=(
                             config.agnes_base_url
                             if config.pipeline_provider == "agnes"
                             else config.deepseek_base_url
                         ),
+                        codex_bin=config.codex_bin,
+                        codex_workdir=config.codex_workdir,
+                        codex_sandbox=config.codex_sandbox,
+                        codex_reasoning_effort=config.codex_reasoning_effort,
                         max_tokens=config.agent_max_tokens,
-                        timeout=config.agent_model_timeout_sec,
+                        timeout_sec=config.agent_model_timeout_sec,
                     )
 
                     # Wire entity extractor with LLM

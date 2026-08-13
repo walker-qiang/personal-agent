@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import shutil
 from pathlib import Path
 
 
@@ -34,6 +35,10 @@ ENV_AGNES_API_KEY = "AGNES_API_KEY"
 ENV_AGENT_MODEL = "AGENT_MODEL"
 ENV_AGENT_MAX_TOKENS = "AGENT_MAX_TOKENS"
 ENV_AGENT_MODEL_TIMEOUT_SEC = "AGENT_MODEL_TIMEOUT_SEC"
+ENV_CODEX_BIN = "CODEX_BIN"
+ENV_CODEX_WORKDIR = "CODEX_WORKDIR"
+ENV_CODEX_SANDBOX = "CODEX_SANDBOX"
+ENV_CODEX_REASONING_EFFORT = "CODEX_REASONING_EFFORT"
 ENV_DEEPSEEK_BASE_URL = "DEEPSEEK_BASE_URL"
 ENV_AGNES_BASE_URL = "AGNES_BASE_URL"
 ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
@@ -69,9 +74,15 @@ ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_CODEX_MODEL = "codex-cli"
+DEFAULT_CODEX_SANDBOX = "read-only"
+DEFAULT_CODEX_REASONING_EFFORT = "medium"
 
 # Known models per provider (text/chat models only)
 KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
+    "codex": [
+        {"id": "codex-cli", "name": "本地 Codex", "desc": "本机 Agent"},
+    ],
     "deepseek": [
         {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "快速 · 1M上下文"},
         {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
@@ -103,8 +114,8 @@ VIDEO_MODELS: dict[str, list[dict[str, str]]] = {
 # (CircuitBreaker, anti-hallucination, Reflexion retry).
 ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
 ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
-DEFAULT_PIPELINE_PROVIDER = "deepseek"
-DEFAULT_PIPELINE_MODEL = DEFAULT_DEEPSEEK_MODEL
+DEFAULT_PIPELINE_PROVIDER = "codex"
+DEFAULT_PIPELINE_MODEL = DEFAULT_CODEX_MODEL
 
 
 @dataclass(frozen=True)
@@ -127,6 +138,10 @@ class AgentConfig:
     anthropic_api_key: str = ""
     agnes_api_key: str = ""
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    codex_bin: str = "codex"
+    codex_workdir: str = ""
+    codex_sandbox: str = DEFAULT_CODEX_SANDBOX
+    codex_reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT
     agnes_base_url: str = DEFAULT_AGNES_BASE_URL
     memory_max_turns: int = 8
     rate_limit_per_sec: float = 5.0
@@ -161,8 +176,12 @@ class AgentConfig:
 
     @property
     def llm_unavailable_reason(self) -> str:
+        if self.agent_provider == "codex":
+            if shutil.which(self.codex_bin):
+                return ""
+            return f"missing Codex CLI: {self.codex_bin}"
         if self.agent_provider != "deepseek":
-            return f"unsupported AGENT_PROVIDER: {self.agent_provider} (only 'deepseek' is supported for text LLM)"
+            return f"unsupported AGENT_PROVIDER: {self.agent_provider} (supported: codex, deepseek)"
         if not self.active_api_key:
             key_map = {
                 "deepseek": ENV_DEEPSEEK_API_KEY,
@@ -210,8 +229,16 @@ def load_config() -> AgentConfig:
         skills_base_dir = root / ".." / "personal-assets" / "技能"
 
     host, port = load_bind_addr()
-    provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
+    provider = os.environ.get(ENV_AGENT_PROVIDER, "codex").strip().lower() or "codex"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
+    codex_bin = os.environ.get(ENV_CODEX_BIN, "codex").strip() or "codex"
+    codex_workdir = os.environ.get(ENV_CODEX_WORKDIR, "").strip()
+    if not codex_workdir:
+        codex_workdir = str(root.parent)
+    codex_sandbox = os.environ.get(ENV_CODEX_SANDBOX, DEFAULT_CODEX_SANDBOX).strip() or DEFAULT_CODEX_SANDBOX
+    codex_reasoning_effort = os.environ.get(
+        ENV_CODEX_REASONING_EFFORT, DEFAULT_CODEX_REASONING_EFFORT
+    ).strip() or DEFAULT_CODEX_REASONING_EFFORT
 
     # Log level: map string to int
     level_str = os.environ.get(ENV_LOG_LEVEL, "INFO").strip().upper()
@@ -305,6 +332,10 @@ def load_config() -> AgentConfig:
         agnes_api_key=os.environ.get(ENV_AGNES_API_KEY, "").strip(),
         deepseek_base_url=os.environ.get(ENV_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL).strip()
         or DEFAULT_DEEPSEEK_BASE_URL,
+        codex_bin=codex_bin,
+        codex_workdir=codex_workdir,
+        codex_sandbox=codex_sandbox,
+        codex_reasoning_effort=codex_reasoning_effort,
         agnes_base_url=os.environ.get(ENV_AGNES_BASE_URL, DEFAULT_AGNES_BASE_URL).strip()
         or DEFAULT_AGNES_BASE_URL,
         memory_max_turns=clamp_int_env(ENV_MEMORY_MAX_TURNS, 8, 1, 30),
@@ -354,6 +385,8 @@ def load_bind_addr() -> tuple[str, int]:
 
 
 def default_model(provider: str) -> str:
+    if provider == "codex":
+        return DEFAULT_CODEX_MODEL
     return DEFAULT_DEEPSEEK_MODEL
 
 
