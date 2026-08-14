@@ -23,6 +23,7 @@ async def healthz(request: Request) -> dict:
         "codex_available": config.llm_available if config.agent_provider == "codex" else False,
         "llm_available": config.llm_available,
         "llm_error": config.llm_unavailable_reason,
+        "runtime_mode": config.runtime_mode,
         "rag_available": getattr(request.app.state, "retriever", None) is not None,
         "rag_error": getattr(request.app.state, "rag_error", ""),
         "mcp_available": getattr(request.app.state, "mcp_client", None) is not None,

@@ -40,6 +40,10 @@ class AgentState(BaseModel):
     messages: Annotated[list, add_messages] = Field(default_factory=list)
     user_message: str = ""
     session_id: str = ""
+    owner_id: str = "default"
+    runtime_mode: str = "legacy"
+    orchestration_run_id: str = ""
+    runtime_operation_ids: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
     call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
     # Classification

@@ -1177,11 +1177,11 @@ class TestPlanAndExecuteGraph:
     """Integration tests for the full Plan-and-Execute graph flow."""
 
     def test_graph_has_all_nodes(self):
-        """Verify all 10 nodes are present in the compiled graph."""
+        """Verify all 11 nodes are present in the compiled graph."""
         graph = build_graph()
         expected = {
             "commander_plan", "react_prepare", "react_llm", "react_tool",
-            "react_evaluate", "delegate", "confirm", "aggregate",
+            "react_evaluate", "delegate", "runtime_agent", "runtime_confirm", "runtime_delegate", "confirm", "aggregate",
             "reflection", "replan_node",
         }
         actual = set(graph.nodes.keys())

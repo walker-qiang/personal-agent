@@ -46,6 +46,10 @@ class ToolRegistry:
         """Return the set of registered tool names."""
         return set(self._tools.keys())
 
+    def get_definition(self, name: str) -> ToolDefinition | None:
+        """Return immutable metadata for Runtime adapters."""
+        return self._tools.get(name)
+
     def call(
         self,
         name: str,

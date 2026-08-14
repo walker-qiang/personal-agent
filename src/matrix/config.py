@@ -69,6 +69,7 @@ ENV_CODE_SANDBOX_TIMEOUT_SEC = "MATRIX_CODE_SANDBOX_TIMEOUT_SEC"
 ENV_CODE_SANDBOX_MAX_MEMORY_MB = "MATRIX_CODE_SANDBOX_MAX_MEMORY_MB"
 ENV_CODE_SANDBOX_MAX_OUTPUT_CHARS = "MATRIX_CODE_SANDBOX_MAX_OUTPUT_CHARS"
 ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
+ENV_RUNTIME_MODE = "MATRIX_RUNTIME_MODE"
 
 # ---- Defaults ----
 
@@ -165,6 +166,7 @@ class AgentConfig:
     code_sandbox_max_memory_mb: int = 512  # Memory limit
     code_sandbox_max_output_chars: int = 10000  # Output truncation
     code_sandbox_network: bool = False  # Network access in sandbox
+    runtime_mode: str = "legacy"  # legacy | shadow | runtime
 
     @property
     def active_api_key(self) -> str:
@@ -195,6 +197,12 @@ class AgentConfig:
 def load_config() -> AgentConfig:
     """Load agent configuration from environment variables."""
     root = find_root(Path.cwd())
+
+    runtime_mode = os.environ.get(ENV_RUNTIME_MODE, "legacy").strip().lower() or "legacy"
+    if runtime_mode not in {"legacy", "shadow", "runtime"}:
+        raise ValueError(
+            f"invalid {ENV_RUNTIME_MODE}: {runtime_mode}; expected legacy, shadow, or runtime"
+        )
 
     # Cache path: PERSONAL_OS_CACHE_PATH > MATRIX_CACHE_PATH > default
     cache_path = _resolve_path(
@@ -362,6 +370,7 @@ def load_config() -> AgentConfig:
         code_sandbox_max_memory_mb=code_sandbox_max_memory_mb,
         code_sandbox_max_output_chars=code_sandbox_max_output_chars,
         code_sandbox_network=code_sandbox_network,
+        runtime_mode=runtime_mode,
     )
 
 

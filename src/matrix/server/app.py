@@ -74,6 +74,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config, tools_registry, trace,
         output_guard=guardrails.output,
     )
+    incomplete = app.state.chat._runtime_store.list_incomplete()
+    if incomplete:
+        logger.warning(
+            "runtime: found %d incomplete operation(s); no side effects were replayed",
+            len(incomplete),
+        )
     # Bootstrap admin user on first run (no users in DB yet)
     if config.admin_password_hash:
         if app.state.chat.store.user_count() == 0:

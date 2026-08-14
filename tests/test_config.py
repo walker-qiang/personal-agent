@@ -140,6 +140,16 @@ class TestAgentConfig:
 
 
 class TestLoadConfig:
+    def test_runtime_mode_defaults_to_legacy(self, monkeypatch):
+        monkeypatch.delenv("MATRIX_RUNTIME_MODE", raising=False)
+        monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests")
+        assert load_config().runtime_mode == "legacy"
+
+    def test_runtime_mode_rejects_unknown_value(self, monkeypatch):
+        monkeypatch.setenv("MATRIX_RUNTIME_MODE", "unexpected")
+        with pytest.raises(ValueError, match="expected legacy, shadow, or runtime"):
+            load_config()
+
     def test_loads_defaults(self, monkeypatch):
         """load_config should work with defaults in the personal-agent repo."""
         monkeypatch.delenv("PERSONAL_OS_CACHE_PATH", raising=False)

@@ -30,6 +30,10 @@ from ..orchestration.nodes._helpers import CircuitBreaker, _today_cn
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
+from ..runtime.adapters.sqlite_store import SQLiteRuntimeStore
+from ..runtime import AgentRuntime, ResumeInput
+from ..runtime.adapters.model import MatrixModelAdapter
+from ..runtime.adapters.tools import MatrixToolAdapter
 from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ..memory import EvolutionConfig, MemoryEvolution
 from ..memory.lesson_store import LessonStore
@@ -329,6 +333,9 @@ class ChatService:
 
         # Store pending confirmations for HITL resume
         self._pending_confirms: dict[str, dict[str, Any]] = {}
+        # Runtime state is authoritative in the same SQLite file as sessions,
+        # but uses dedicated runtime_* tables and an independent store API.
+        self._runtime_store = SQLiteRuntimeStore(config.store_path)
 
     def __enter__(self) -> "ChatService":
         return self
@@ -344,6 +351,8 @@ class ChatService:
             self.store.close()
         if hasattr(self, "_ref_store") and self._ref_store:
             self._ref_store.close()
+        if hasattr(self, "_runtime_store") and self._runtime_store:
+            self._runtime_store.close()
 
     # ---- Public API ----
 
@@ -535,15 +544,31 @@ class ChatService:
         # Clean up stale checkpoint from previous call (P0-4: prevents reducer merge)
         self._cleanup_stale_checkpoint(sid, call_id)
 
+        session_llm = self._get_llm(sid, user_id=user_id)
+        runtime_mode = self.config.runtime_mode
+        # Codex owns its own Agent/tool loop; Deep Research is an application
+        # workflow. Keep both paths on legacy even when Runtime is enabled.
+        if getattr(session_llm, "provider", "") == "codex" or mode == "deep_research" or attachments:
+            runtime_mode = "legacy"
+
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
             reflexion_max=0 if mode == "deep_research" else self.config.reflexion_max_attempts,
             attachments=attachments,
+            owner_id=user_id,
+            runtime_mode=runtime_mode,
+            orchestration_run_id=call_id,
         )
+
+        runtime_user_entry_written = False
+        if runtime_mode == "runtime":
+            self._runtime_store.append_session_entry(
+                user_id, sid, "user", {"content": text},
+            )
+            runtime_user_entry_written = True
 
         interrupted = False
         try:
-            session_llm = self._get_llm(sid, user_id=user_id)
             logger.debug(
                 "llm_request: provider=%s model=%s message_len=%d",
                 session_llm.provider if hasattr(session_llm, 'provider') else "?",
@@ -569,7 +594,11 @@ class ChatService:
                 final_state = yield from self._stream_graph_events(
                     initial_state, graph_config, emit_classify=True,
                 )
-                yield from self._finalize_stream(final_state, sid, text, session_llm, history, user_id)
+                yield from self._finalize_stream(
+                    final_state, sid, text, session_llm, history, user_id,
+                    runtime_mode=runtime_mode,
+                    runtime_user_entry_written=runtime_user_entry_written,
+                )
 
             except GraphInterrupt as gi:
                 interrupted = True
@@ -792,6 +821,12 @@ PERSONAL-OS EVIDENCE:
         """
         started = time.perf_counter()
         pending = self._pending_confirms.get(session_id)
+        runtime_operation = self._runtime_store.find_active(user_id, session_id)
+        if runtime_operation is not None:
+            yield from self._resume_runtime_chat(
+                runtime_operation.operation_id, session_id, decision, user_id,
+            )
+            return
         if not pending:
             yield {"type": "error", "message": "no pending confirmation for this session"}
             yield {"type": "done", "session_id": session_id, "duration_ms": 0}
@@ -852,6 +887,54 @@ PERSONAL-OS EVIDENCE:
             duration_ms = round((time.perf_counter() - started) * 1000)
             self._prune_checkpoints(session_id, keep_latest=False)
             yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
+
+    def _resume_runtime_chat(
+        self, operation_id: str, session_id: str, decision: str, user_id: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Resume durable Runtime state after a process restart."""
+        started = time.perf_counter()
+        operation = self._runtime_store.load(user_id, operation_id)
+        if operation is None:
+            yield {"type": "error", "message": "operation not found or belongs to another user"}
+            yield {"type": "done", "session_id": session_id, "duration_ms": 0}
+            return
+        try:
+            agent_def = self.agent_registry.get(operation.agent_id)
+            if agent_def is None:
+                raise ValueError(f"Agent not found: {operation.agent_id}")
+            agent_tools = self.agent_registry.build_tool_registry(operation.agent_id, self.tools)
+            runtime = AgentRuntime(
+                self._runtime_store,
+                model=MatrixModelAdapter(self._get_llm(session_id, user_id=user_id)),
+                tools=MatrixToolAdapter(agent_tools, session_id=session_id),
+            )
+            pending = operation.state.get("pending_tool_call", {})
+            handle = runtime.resume(
+                user_id, operation_id,
+                ResumeInput(
+                    kind="approval", decision=decision,
+                    payload={"approval_id": pending.get("approval_id", "")},
+                ),
+            )
+            events = list(handle.events())
+            result = handle.result()
+            for event in events:
+                if event.event_type.value == "tool_start":
+                    yield {"type": "tool_call", "name": event.payload.get("name", ""), "operation_id": operation_id}
+                elif event.event_type.value == "tool_end":
+                    yield {"type": "tool_result", "name": event.payload.get("name", ""), "error": event.payload.get("error", ""), "operation_id": operation_id}
+            if result.final_message:
+                yield {"type": "token", "content": result.final_message}
+                self._remember(session_id, "", result.final_message, user_id=user_id, runtime_mode="runtime")
+            if result.outcome.value == "suspended":
+                yield {"type": "confirm_required", "actions": [result.suspension.payload if result.suspension else {}], "session_id": session_id}
+            elif result.error:
+                yield {"type": "error", "message": result.error}
+        except Exception as err:
+            logger.error("runtime resume error: %s", err, exc_info=True)
+            yield {"type": "error", "message": "恢复 Runtime 操作失败，请稍后重试"}
+        finally:
+            yield {"type": "done", "session_id": session_id, "duration_ms": round((time.perf_counter() - started) * 1000)}
 
     # ---- Internal ----
 
@@ -1146,6 +1229,7 @@ PERSONAL-OS EVIDENCE:
                 "circuit_breaker": CircuitBreaker(),
                 "lesson_store": self._lesson_store,
                 "user_id": user_id,
+                "runtime_store": self._runtime_store,
             },
             "thread_id": sid,
         }
@@ -1153,6 +1237,7 @@ PERSONAL-OS EVIDENCE:
     def _finalize_stream(
         self, final_state: dict[str, Any], sid: str, text: str,
         session_llm: LLMClient, history: list[dict], user_id: str,
+        runtime_mode: str = "legacy", runtime_user_entry_written: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Handle output after graph streaming completes: summarize or direct answer."""
         if final_state.get("needs_summary"):
@@ -1181,7 +1266,10 @@ PERSONAL-OS EVIDENCE:
                 answer = "抱歉，暂时无法生成回复。请稍后重试或换一种方式提问。"
                 yield {"type": "token", "content": answer}
             if answer:
-                self._remember(sid, text, answer, user_id=user_id)
+                self._remember(
+                    sid, text, answer, user_id=user_id, runtime_mode=runtime_mode,
+                    runtime_user_entry_written=runtime_user_entry_written,
+                )
         else:
             final_answer = final_state.get("final_answer", "")
             # ── FINAL SAFETY NET: strip any leaked verification tags ----
@@ -1203,7 +1291,10 @@ PERSONAL-OS EVIDENCE:
                 # ── Graceful degradation: no answer produced at all ──
                 final_answer = "抱歉，暂时无法生成回复。请稍后重试或换一种方式提问。"
             yield {"type": "token", "content": final_answer}
-            self._remember(sid, text, final_answer, user_id=user_id)
+            self._remember(
+                sid, text, final_answer, user_id=user_id, runtime_mode=runtime_mode,
+                runtime_user_entry_written=runtime_user_entry_written,
+            )
 
     def _handle_hitl_interrupt(
         self, gi: Any, sid: str, graph_config: dict[str, Any],
@@ -1242,9 +1333,22 @@ PERSONAL-OS EVIDENCE:
             history.insert(0, {"role": "system", "content": formatted})
         return history
 
-    def _remember(self, session_id: str, question: str, answer: str, user_id: str = "default") -> None:
-        self.store.save_message(session_id, "user", question, user_id=user_id)
+    def _remember(
+        self, session_id: str, question: str, answer: str,
+        user_id: str = "default", runtime_mode: str = "legacy",
+        runtime_user_entry_written: bool = False,
+    ) -> None:
+        if question:
+            self.store.save_message(session_id, "user", question, user_id=user_id)
         self.store.save_message(session_id, "assistant", answer, user_id=user_id)
+        if runtime_mode == "runtime":
+            if not runtime_user_entry_written and question:
+                self._runtime_store.append_session_entry(
+                    user_id, session_id, "user", {"content": question},
+                )
+            self._runtime_store.append_session_entry(
+                user_id, session_id, "assistant", {"content": answer},
+            )
         self.store.update_title(session_id, question[:30].strip(), user_id=user_id)
         # Extract memories in background thread (non-blocking)
         threading.Thread(

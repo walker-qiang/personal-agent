@@ -60,6 +60,9 @@ class ToolDefinition:
     input_schema: dict[str, Any]
     handler: ToolHandler = field(repr=False)
     capabilities: list[str] = field(default_factory=list)
+    # Runtime metadata is optional so all existing registrations remain valid.
+    requires_approval: bool = False
+    recovery_policy: str = "manual"
 
     def to_dict(self) -> dict[str, Any]:
         """Return the tool definition in the format expected by LLM planners."""

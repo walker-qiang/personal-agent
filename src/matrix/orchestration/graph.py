@@ -33,6 +33,9 @@ from .nodes import (
     react_tool_node,
     reflection_node,
     replan_node,
+    runtime_agent_node,
+    runtime_confirm_node,
+    runtime_delegate_node,
 )
 from .state import AgentState
 
@@ -54,6 +57,9 @@ def build_graph() -> StateGraph:
     # Add nodes
     graph.add_node("commander_plan", commander_plan_node)
     graph.add_node("react_prepare", react_prepare_node)
+    graph.add_node("runtime_agent", runtime_agent_node)
+    graph.add_node("runtime_confirm", runtime_confirm_node)
+    graph.add_node("runtime_delegate", runtime_delegate_node)
     graph.add_node("react_llm", react_llm_node)
     graph.add_node("react_tool", react_tool_node)
     graph.add_node("react_evaluate", react_evaluate_node)
@@ -74,7 +80,9 @@ def build_graph() -> StateGraph:
         _route_dag_first,
         {
             "react_prepare": "react_prepare",
-            "delegate": "delegate",
+            "runtime_agent": "runtime_agent",
+        "delegate": "delegate",
+        "runtime_delegate": "runtime_delegate",
             "aggregate": "aggregate",
         },
     )
@@ -82,6 +90,13 @@ def build_graph() -> StateGraph:
     # ---- Top-level ReAct loop (single-step plans) ----
     # react_prepare → react_llm
     graph.add_edge("react_prepare", "react_llm")
+    graph.add_conditional_edges(
+        "runtime_agent",
+        lambda state: "runtime_confirm" if state.get("needs_confirmation") else "aggregate",
+        {"runtime_confirm": "runtime_confirm", "aggregate": "aggregate"},
+    )
+    graph.add_edge("runtime_confirm", "aggregate")
+    graph.add_edge("runtime_delegate", "replan_node")
 
     # react_llm → conditional: tool calls → react_tool, otherwise → react_evaluate
     graph.add_conditional_edges(
@@ -170,6 +185,8 @@ def _route_dag_first(state: AgentState):
     """
     plan = state.get("delegation_plan", [])
     if len(plan) <= 1:
+        if state.get("runtime_mode") == "runtime":
+            return "runtime_agent"
         return "react_prepare"
 
     completed = state.get("completed_steps", [])
@@ -178,13 +195,17 @@ def _route_dag_first(state: AgentState):
     if not ready:
         return "aggregate"
 
+    target = "runtime_delegate" if state.get("runtime_mode") == "runtime" else "delegate"
     return [
-        Send("delegate", {
+        Send(target, {
             "current_step": _plan_index(plan, s["step"]),
             "delegation_plan": plan,
             "plan_type": state.get("plan_type", "agent"),
             "user_message": state.get("user_message", ""),
-            "session_id": state.get("session_id", ""),
+        "session_id": state.get("session_id", ""),
+            "owner_id": state.get("owner_id", "default"),
+            "runtime_mode": state.get("runtime_mode", "legacy"),
+            "orchestration_run_id": state.get("orchestration_run_id", ""),
         })
         for s in ready
     ]
@@ -219,13 +240,17 @@ def _route_after_replan(state: AgentState):
         # All steps done or no more executable steps
         return "aggregate"
 
+    target = "runtime_delegate" if state.get("runtime_mode") == "runtime" else "delegate"
     return [
-        Send("delegate", {
+        Send(target, {
             "current_step": _plan_index(plan, s["step"]),
             "delegation_plan": plan,
             "plan_type": state.get("plan_type", "agent"),
             "user_message": state.get("user_message", ""),
             "session_id": state.get("session_id", ""),
+            "owner_id": state.get("owner_id", "default"),
+            "runtime_mode": state.get("runtime_mode", "legacy"),
+            "orchestration_run_id": state.get("orchestration_run_id", ""),
         })
         for s in ready
     ]
