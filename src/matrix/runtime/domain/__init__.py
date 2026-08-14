@@ -8,9 +8,10 @@ from .errors import (
     RuntimeValidationError,
 )
 from .events import RuntimeEvent, RuntimeEventType
+from .debug import DebugTraceEvent
 from .messages import Message, ToolCall
 from .operations import OperationPhase, OperationState, StateTransition
-from .requests import ExecutionOptions, ResumeInput, RunRequest
+from .requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
 from .results import RunOutcome, RunResult, Suspension
 from .tools import RecoveryPolicy, ToolRequest, ToolResult, ToolSpec
 
@@ -18,7 +19,9 @@ __all__ = [
     "Approval",
     "ApprovalDecision",
     "ApprovalStatus",
+    "DebugTraceEvent",
     "ExecutionOptions",
+    "ExecutionPolicy",
     "Message",
     "OperationConflictError",
     "OperationPhase",

@@ -16,6 +16,7 @@ from langgraph.types import RunnableConfig
 
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
+from ...tools.principal import tool_principal
 from ...agent.registry import AgentRegistry
 from ...context import ToolResultRefStore
 from ...context.compaction import compact_messages
@@ -421,7 +422,14 @@ def _execute_single_tool(
         _push_event(cfg, "tool_call", {"name": name, "args": arguments})
 
     try:
-        tool_result = agent_tools.call(name, arguments, session_id=session_id)
+        policy = cfg.get("execution_policy")
+        with tool_principal(
+            str(cfg.get("user_id", "default")),
+            session_id,
+            getattr(policy, "mode", "read_only"),
+            bool(getattr(policy, "allow_external_effects", False)),
+        ):
+            tool_result = agent_tools.call(name, arguments, session_id=session_id)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
         # call() returns {"error": ...} on tool execution failures (Phase 2 pipeline).

@@ -43,6 +43,9 @@ const App: React.FC = () => {
   const [showSkillList, setShowSkillList] = useState(false);
   const [showBranchBanner, setShowBranchBanner] = useState(false);
   const [branchCount, setBranchCount] = useState(0);
+  const [debugTraceEnabled, setDebugTraceEnabled] = useState(
+    () => localStorage.getItem('mx-debug-trace') === '1',
+  );
 
   const chatRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -117,8 +120,8 @@ const App: React.FC = () => {
 
     setInput('');
     setFile(null);
-    send(text, sid || '', file?.file_id);
-  }, [input, sending, currentId, file, send, setCurrentId, loadSessions]);
+    send(text, sid || '', file?.file_id, debugTraceEnabled);
+  }, [input, sending, currentId, file, send, setCurrentId, loadSessions, debugTraceEnabled]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -134,8 +137,16 @@ const App: React.FC = () => {
       setCurrentId(sid);
       loadSessions();
     }
-    send(question, sid || '');
-  }, [currentId, send, setCurrentId, loadSessions]);
+    send(question, sid || '', undefined, debugTraceEnabled);
+  }, [currentId, send, setCurrentId, loadSessions, debugTraceEnabled]);
+
+  const toggleDebugTrace = useCallback(() => {
+    setDebugTraceEnabled((enabled) => {
+      const next = !enabled;
+      localStorage.setItem('mx-debug-trace', next ? '1' : '0');
+      return next;
+    });
+  }, []);
 
   const handleNewSession = useCallback(async () => {
     switchSession(null);
@@ -234,7 +245,7 @@ const App: React.FC = () => {
 
       {/* Main chat area */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* Top bar — matches original HTML header exactly: Matrix + Trace only */}
+          {/* Top bar — Matrix, ephemeral Runtime debug toggle and durable Trace */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '12px 20px', borderBottom: '1px solid var(--border)',
@@ -246,15 +257,29 @@ const App: React.FC = () => {
             background: 'linear-gradient(135deg, var(--accent), #a78bfa)',
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
           }}>Matrix</span>
-          <button
-            onClick={() => setShowTrace(true)}
-            style={{
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={toggleDebugTrace}
+              title="仅当前运行期间显示脱敏 Runtime 调试事件，不写入长期存储"
+              style={{
+                padding: '4px 10px', borderRadius: 'var(--radius)',
+                background: debugTraceEnabled ? 'rgba(99,102,241,0.12)' : 'var(--surface)',
+                color: debugTraceEnabled ? 'var(--accent)' : 'var(--text-secondary)', fontSize: 12,
+                border: `1px solid ${debugTraceEnabled ? 'var(--accent)' : 'var(--border)'}`,
+                cursor: 'pointer', fontFamily: 'var(--font)',
+              }}
+            >
+              Debug {debugTraceEnabled ? '开' : '关'}
+            </button>
+            <button
+              onClick={() => setShowTrace(true)}
+              style={{
               padding: '4px 12px', borderRadius: 'var(--radius)',
               background: 'var(--surface)', color: 'var(--text-secondary)', fontSize: 12,
               border: '1px solid var(--border)', cursor: 'pointer',
               fontFamily: 'var(--font)', display: 'flex', alignItems: 'center', gap: 5,
               transition: 'background 0.12s, border-color 0.12s, color 0.12s',
-            }}
+              }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = 'rgba(99,102,241,0.08)';
               e.currentTarget.style.borderColor = 'var(--accent)';
@@ -265,9 +290,10 @@ const App: React.FC = () => {
               e.currentTarget.style.borderColor = 'var(--border)';
               e.currentTarget.style.color = 'var(--text-secondary)';
             }}
-          >
-            Trace
-          </button>
+            >
+              Trace
+            </button>
+          </div>
         </div>
 
         {/* Messages — matches original HTML main area */}

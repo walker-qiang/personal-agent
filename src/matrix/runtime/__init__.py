@@ -6,12 +6,15 @@ yet.  WP1 freezes the lower-level contracts; execution is added in WP2.
 
 from .core.runtime import AgentRuntime, RunHandle
 from .domain.events import RuntimeEvent, RuntimeEventType
-from .domain.requests import ExecutionOptions, ResumeInput, RunRequest
+from .domain.debug import DebugTraceEvent
+from .domain.requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
 from .domain.results import RunOutcome, RunResult
 
 __all__ = [
     "AgentRuntime",
+    "DebugTraceEvent",
     "ExecutionOptions",
+    "ExecutionPolicy",
     "ResumeInput",
     "RunHandle",
     "RunOutcome",

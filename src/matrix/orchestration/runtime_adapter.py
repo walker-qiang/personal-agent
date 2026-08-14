@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..runtime.domain.requests import RunRequest
+from ..runtime.domain.requests import ExecutionPolicy, RunRequest
 from ..runtime.domain.messages import Message
 from ..runtime.adapters.tools import tool_specs
 from ..runtime.adapters.model import MatrixModelAdapter
@@ -42,6 +42,7 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
         ),
         model=getattr(cfg["llm"], "model", ""),
         tools=tool_specs(registry),
+        execution_policy=cfg.get("execution_policy", ExecutionPolicy()),
         orchestration_run_id=state.get("orchestration_run_id", ""),
         metadata={
             "operation_scope": "dag_step",
@@ -57,7 +58,13 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
     registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
     runtime = AgentRuntime(
         cfg["runtime_store"], MatrixModelAdapter(cfg["llm"]),
-        MatrixToolAdapter(registry, session_id=request.session_id),
+        MatrixToolAdapter(
+            registry,
+            session_id=request.session_id,
+            owner_id=request.owner_id,
+            mode=request.execution_policy.mode,
+            allow_external_effects=request.execution_policy.allow_external_effects,
+        ),
     )
     handle = runtime.start(request)
     events = list(handle.events())

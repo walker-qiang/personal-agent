@@ -19,6 +19,7 @@ class RuntimeEventType(str, Enum):
     TOOL_UPDATE = "tool_update"
     TOOL_END = "tool_end"
     APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_DECIDED = "approval_decided"
     RETRY_SCHEDULED = "retry_scheduled"
     RETRY_START = "retry_start"
     RETRY_END = "retry_end"

@@ -25,7 +25,8 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
 
   const hasThinking = message.thinking && message.thinking.length > 0;
   const hasToolResults = message.toolResults && message.toolResults.length > 0;
-  const hasThinkingGroup = hasThinking || hasToolResults;
+  const hasDebugTrace = message.debugTrace && message.debugTrace.length > 0;
+  const hasThinkingGroup = hasThinking || hasToolResults || hasDebugTrace;
 
   // Auto-expand during streaming, collapse when answer arrives
   const expandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -115,6 +116,21 @@ const MessageBubble: React.FC<Props> = ({ message, onBranch }) => {
                   ))}
                   {hasToolResults && (
                     <ToolSection results={message.toolResults!} embedded />
+                  )}
+                  {hasDebugTrace && (
+                    <div style={styles.debugTraceBody}>
+                      <div style={styles.debugTraceTitle}>Runtime DebugTrace（临时）</div>
+                      {message.debugTrace!.map((trace) => (
+                        <div key={`${trace.sequence}-${trace.kind}`} style={styles.debugTraceItem}>
+                          <div style={styles.debugTraceKind}>
+                            #{trace.sequence} {trace.kind}
+                          </div>
+                          <pre style={styles.debugTracePayload}>
+                            {JSON.stringify(trace.payload, null, 2)}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               )}
@@ -245,6 +261,24 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
     background: 'rgba(99, 102, 241, 0.02)',
     maxHeight: 200, overflowY: 'auto' as const,
+  },
+  debugTraceBody: {
+    margin: '8px 14px', padding: '8px', borderRadius: 'var(--radius-sm)',
+    background: 'rgba(15, 23, 42, 0.04)', border: '1px solid var(--border)',
+  },
+  debugTraceTitle: {
+    marginBottom: 6, fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600,
+  },
+  debugTraceItem: {
+    marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border)',
+  },
+  debugTraceKind: {
+    fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono, monospace)',
+  },
+  debugTracePayload: {
+    margin: '4px 0 0', maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word', fontSize: 10, lineHeight: 1.4,
+    color: 'var(--text-secondary)', fontFamily: 'var(--font-mono, monospace)',
   },
   // Empty state — lightweight hint
   emptyState: {

@@ -63,6 +63,7 @@ class ToolDefinition:
     # Runtime metadata is optional so all existing registrations remain valid.
     requires_approval: bool = False
     recovery_policy: str = "manual"
+    side_effect: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Return the tool definition in the format expected by LLM planners."""

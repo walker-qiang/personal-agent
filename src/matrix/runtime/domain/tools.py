@@ -24,6 +24,7 @@ class ToolSpec:
     input_schema: dict[str, Any] = field(default_factory=dict)
     recovery_policy: RecoveryPolicy = RecoveryPolicy.MANUAL
     requires_approval: bool = False
+    side_effect: bool = False
 
 
 @dataclass(frozen=True)

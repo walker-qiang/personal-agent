@@ -176,6 +176,22 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 
 这使 Commander 能够在规划时做出更精准的 Agent 选择，例如："需要实时行情数据 → 选 investment-analyst（有 market_data 能力）"。
 
+### 独立 Runtime 的执行策略与调试边界
+
+标准 function-calling 单 Agent 路径可以通过 Runtime Adapter 进入独立 AgentRuntime；Commander、LangGraph DAG、replan、aggregate 和 reflection
+仍由上层编排。Runtime 只接收应用层已经解析好的 ExecutionPolicy，不反向
+依赖 AgentRegistry、LangGraph 或 FastAPI。
+
+- read_only 是默认策略；标记为 side_effect 的工具会在 Runtime 工具边界被拦截。
+- writeback 只允许受审批的外部 effect；它不等于开放任意文件或 Vault 写入。
+- WritebackService 第一批只开放 `finance.snapshot.create`，采用 plan → approval → execute；
+  `MATRIX_WRITEBACK_APPROVAL_MODE=auto_allowlist` 可对显式 allowlist 操作启用策略自动审批，
+  但仍会创建 Runtime approval 和 effect journal。
+- preset（当前 default、investment_research）只是命名配置，负责输出风格和策略参数，不是另一套 Agent。
+- DebugTrace 默认关闭。开启后只挂在当前 RunHandle 和 SSE 调试事件上，保存模型请求/响应、工具轨迹和策略诊断的脱敏内存副本，不写 Runtime SQLite durable events，也不写 Vault。
+
+HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默认行为。
+
 ### 编排系统
 
 #### Plan-and-Execute 流程

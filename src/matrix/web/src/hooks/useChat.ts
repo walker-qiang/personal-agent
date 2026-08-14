@@ -1,13 +1,18 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { Message, ToolCall, ToolResult, AgentStep } from '../types';
+import type { Message, ToolCall, ToolResult, AgentStep, DebugTraceEvent } from '../types';
 import { buildStreamUrl, fetchStreamTicket, api } from '../utils/api';
 import { genId } from '../utils/format';
 
 interface ConfirmAction {
-  agent: string;
-  tool: string;
+  agent?: string;
+  tool?: string;
+  name?: string;
   args: Record<string, unknown>;
-  summary: string;
+  summary?: string;
+  reason?: string;
+  risk?: string;
+  approval_id?: string;
+  operation_id?: string;
 }
 
 export interface RightPanelData {
@@ -19,7 +24,7 @@ export interface RightPanelData {
 
 export interface UseChatReturn {
   messages: Message[];
-  send: (message: string, sessionId: string, fileId?: string) => void;
+  send: (message: string, sessionId: string, fileId?: string, debugTrace?: boolean) => void;
   stop: () => void;
   sending: boolean;
   clearMessages: () => void;
@@ -323,6 +328,38 @@ const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
       }
     });
 
+    // ephemeral Runtime debug trace — never loaded from session history
+    es.addEventListener('debug_trace', (event: MessageEvent) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        const raw = parsed.data || parsed;
+        const trace = raw.event || raw.trace || raw;
+        if (!trace || !trace.kind) return;
+        const item: DebugTraceEvent = {
+          sequence: Number(trace.sequence || 0),
+          kind: String(trace.kind),
+          timestamp: Number(trace.timestamp || 0),
+          payload: (trace.payload && typeof trace.payload === 'object')
+            ? trace.payload as Record<string, unknown>
+            : {},
+        };
+        updateSessionMessages(sessionId, (prev) => {
+          const updated = [...prev];
+          const lastIdx = updated.length - 1;
+          const last = updated[lastIdx];
+          if (last && last.role === 'assistant') {
+            updated[lastIdx] = {
+              ...last,
+              debugTrace: [...(last.debugTrace || []), item],
+            };
+          }
+          return updated;
+        });
+      } catch {
+        // ignore malformed optional diagnostics
+      }
+    });
+
     // progress
     es.addEventListener('progress', (event: MessageEvent) => {
       try {
@@ -466,7 +503,7 @@ const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
   }, [updateSessionMessages, updateSessionSending, flushTokens]);
 
   const send = useCallback(
-    (message: string, sessionId: string, fileId?: string) => {
+    (message: string, sessionId: string, fileId?: string, debugTrace = false) => {
       // Close only the current session's EventSource (not others)
       const currentSession = activeSessionRef.current;
       if (currentSession) {
@@ -513,7 +550,7 @@ const sessionStatesRef = useRef<Map<string, SessionState>>(new Map());
           // If the user stopped or switched away while we were fetching,
           // don't open a stale stream.
           if (activeSessionRef.current !== sid || !sessionState.sending) return;
-          const url = buildStreamUrl(message, sid, ticket, fileId);
+          const url = buildStreamUrl(message, sid, ticket, fileId, debugTrace);
           const es = new EventSource(url);
           sessionState.eventSource = es;
           setupEventListeners(es, sid);

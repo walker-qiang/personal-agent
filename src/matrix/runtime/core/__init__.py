@@ -2,5 +2,9 @@
 
 from .reducer import validate_transition, with_next_phase
 from .runtime import AgentRuntime, RunHandle
+from .debug import EphemeralDebugTrace
 
-__all__ = ["AgentRuntime", "RunHandle", "validate_transition", "with_next_phase"]
+__all__ = [
+    "AgentRuntime", "EphemeralDebugTrace", "RunHandle",
+    "validate_transition", "with_next_phase",
+]

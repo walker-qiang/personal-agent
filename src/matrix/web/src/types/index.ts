@@ -78,6 +78,14 @@ export interface Message {
   isStreaming?: boolean;
   thinking?: string[];
   progress?: string[];
+  debugTrace?: DebugTraceEvent[];
+}
+
+export interface DebugTraceEvent {
+  sequence: number;
+  kind: string;
+  timestamp: number;
+  payload: Record<string, unknown>;
 }
 
 export interface SSEEvent {
@@ -152,9 +160,14 @@ export interface BranchesResponse {
 
 // Confirm dialog types
 export interface ConfirmAction {
-  tool: string;
+  tool?: string;
+  name?: string;
   args: Record<string, unknown>;
-  reason: string;
+  reason?: string;
+  summary?: string;
+  risk?: string;
+  approval_id?: string;
+  operation_id?: string;
 }
 
 // Model group types

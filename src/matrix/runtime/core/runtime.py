@@ -16,7 +16,7 @@ from ..domain.errors import OperationConflictError, RuntimeNotImplementedError
 from ..domain.approvals import ApprovalDecision, ApprovalStatus
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.operations import OperationPhase, OperationState, StateTransition
-from ..domain.requests import ExecutionOptions, ResumeInput, RunRequest
+from ..domain.requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
 from ..domain.messages import Message
 from ..domain.tools import RecoveryPolicy, ToolSpec
 from ..domain.results import RunOutcome, RunResult
@@ -24,6 +24,7 @@ from ..ports.model import ModelPort
 from ..ports.store import OperationStorePort
 from ..ports.tools import ToolExecutorPort
 from .loop import execute_operation
+from .debug import EphemeralDebugTrace
 from .reducer import with_next_phase
 
 
@@ -39,6 +40,7 @@ class RunHandle:
     _result: RunResult | None = field(default=None, repr=False)
     _started: bool = field(default=False, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
+    _debug: EphemeralDebugTrace | None = field(default=None, repr=False)
 
     def events(self) -> Iterator[RuntimeEvent]:
         if not self._started:
@@ -58,6 +60,17 @@ class RunHandle:
     def cancel(self, reason: str = "") -> None:
         del reason
         self._cancel_requested = True
+
+    def debug_trace(self) -> list[dict[str, object]]:
+        """Return the current run's ephemeral diagnostics, if enabled."""
+        if self._debug is None:
+            return []
+        return [event.to_dict() for event in self._debug.snapshot()]
+
+    def clear_debug_trace(self) -> None:
+        """Release diagnostic payloads held by this handle."""
+        if self._debug is not None:
+            self._debug.clear()
 
 
 class AgentRuntime:
@@ -94,6 +107,7 @@ class AgentRuntime:
                         "input_schema": tool.input_schema,
                         "recovery_policy": tool.recovery_policy.value,
                         "requires_approval": tool.requires_approval,
+                        "side_effect": tool.side_effect,
                     }
                     for tool in request.tools
                 ],
@@ -102,6 +116,16 @@ class AgentRuntime:
                     "max_tool_calls": request.execution_options.max_tool_calls,
                     "timeout_seconds": request.execution_options.timeout_seconds,
                     "max_model_retries": request.execution_options.max_model_retries,
+                },
+                "execution_policy": {
+                    "mode": request.execution_policy.mode,
+                    "preset": request.execution_policy.preset,
+                    "allow_external_effects": request.execution_policy.allow_external_effects,
+                    "require_approval": request.execution_policy.require_approval,
+                    "approval_mode": request.execution_policy.approval_mode,
+                    "auto_approve_operations": list(request.execution_policy.auto_approve_operations),
+                    "debug_trace": request.execution_policy.debug_trace,
+                    "output_style": request.execution_policy.output_style,
                 },
                 "metadata": request.metadata,
                 "runtime_messages": [
@@ -118,7 +142,10 @@ class AgentRuntime:
             },
         )
         self.store.create(operation)
-        handle = RunHandle(operation_id=operation_id)
+        handle = RunHandle(
+            operation_id=operation_id,
+            _debug=EphemeralDebugTrace() if request.execution_policy.debug_trace else None,
+        )
         handle._run = lambda current_handle: execute_operation(
             request=request,
             operation=operation,
@@ -126,6 +153,7 @@ class AgentRuntime:
             store=self.store,
             model=self.model,
             tools=self.tools,
+            debug_trace=current_handle._debug,
         )
         return handle
 
@@ -149,7 +177,18 @@ class AgentRuntime:
         approval = self.store.get_approval(owner_id, approval_id)
         if approval is None:
             raise OperationConflictError("approval not found or owner mismatch")
-        handle = RunHandle(operation_id=operation_id)
+        policy_data = operation.state.get("execution_policy", {})
+        policy = ExecutionPolicy(**{
+            key: value for key, value in policy_data.items()
+            if key in {
+                "mode", "preset", "allow_external_effects", "require_approval",
+                "approval_mode", "auto_approve_operations", "debug_trace", "output_style",
+            }
+        })
+        handle = RunHandle(
+            operation_id=operation_id,
+            _debug=EphemeralDebugTrace() if policy.debug_trace else None,
+        )
         approval_decision = (
             ApprovalDecision.APPROVE if decision == "approve" else ApprovalDecision.SKIP
         )
@@ -159,6 +198,7 @@ class AgentRuntime:
             operation_id=operation_id,
             approval_id=approval.approval_id,
             decision=approval_decision,
+            policy=policy,
         )
         return handle
 
@@ -170,6 +210,7 @@ class AgentRuntime:
         operation_id: str,
         approval_id: str,
         decision: ApprovalDecision,
+        policy: ExecutionPolicy,
     ) -> tuple[list[RuntimeEvent], RunResult]:
         operation = self.store.load(owner_id, operation_id)
         if operation is None:
@@ -246,12 +287,14 @@ class AgentRuntime:
                 input_schema=item.get("input_schema", {}),
                 recovery_policy=RecoveryPolicy(item.get("recovery_policy", "manual")),
                 requires_approval=bool(item.get("requires_approval", False)),
+                side_effect=bool(item.get("side_effect", False)),
             ) for item in state.get("tools", [])],
             execution_options=ExecutionOptions(**{
                 key: value
                 for key, value in state.get("execution_options", {}).items()
                 if key in {"max_turns", "max_tool_calls", "timeout_seconds", "max_model_retries"}
             }),
+            execution_policy=policy,
             metadata=dict(state.get("metadata", {})),
             orchestration_run_id=resumed_state.orchestration_run_id,
         )
@@ -262,6 +305,7 @@ class AgentRuntime:
             store=self.store,
             model=self.model,
             tools=self.tools,
+            debug_trace=handle._debug,
             resume_approval_id=resolved.approval_id,
             resume_decision=resolved.decision.value if resolved.decision else decision.value,
             committed_events=(resume_event,),

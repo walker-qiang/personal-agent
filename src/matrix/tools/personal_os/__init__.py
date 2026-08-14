@@ -6,9 +6,11 @@ import json
 import os
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any
 
 from ..base import ToolDefinition, tool_error
+from ..principal import current_principal
 from ..registry import ToolRegistry
 
 
@@ -30,6 +32,70 @@ def _get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, dict) and "error" in payload:
         return {"error": str(payload["error"])}
     return payload if isinstance(payload, dict) else {"result": payload}
+
+
+def _post(path: str, payload: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
+    base_url = os.environ.get("PERSONAL_OS_API_URL", "http://127.0.0.1:7001").rstrip("/")
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "personal-agent/writeback-tools",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return {"error": f"personal-os writeback request failed: {exc}"}
+    if isinstance(body, dict) and body.get("error"):
+        return {
+            "error": str(body["error"]),
+            "error_code": body.get("error_code", "WRITEBACK_FAILED"),
+        }
+    return body if isinstance(body, dict) else {"result": body}
+
+
+def writeback_prepare(
+    operation: str,
+    payload: dict[str, Any],
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    owner_id, session_id, _, _ = current_principal()
+    return _post(
+        "/api/writeback/plan",
+        {
+            "operation": operation,
+            "payload": payload,
+            "owner_id": owner_id,
+            "session_id": session_id,
+            "request_id": "req_" + uuid.uuid4().hex,
+            "idempotency_key": idempotency_key,
+        },
+    )
+
+
+def writeback_execute(plan: dict[str, Any], plan_hash: str) -> dict[str, Any]:
+    owner_id, session_id, mode, allow_external_effects = current_principal()
+    if mode != "writeback" or not allow_external_effects:
+        return {
+            "error": "writeback execution is blocked outside approved writeback mode",
+            "error_code": "APPROVAL_REQUIRED",
+        }
+    return _post(
+        "/api/writeback/execute",
+        {
+            "plan": plan,
+            "plan_hash": plan_hash,
+            "owner_id": owner_id,
+            "session_id": session_id,
+            "request_id": "req_" + uuid.uuid4().hex,
+        },
+        timeout=60.0,
+    )
 
 
 def market_quote(code: str) -> dict[str, Any]:
@@ -210,5 +276,48 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=web_fetch,
             capabilities=["web_fetch", "source_provenance"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="writeback.prepare",
+            description=(
+                "生成结构化 durable 写入计划，只校验和预览，不写文件、不提交 Git。"
+                "当前只支持 finance.snapshot.create。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "enum": ["finance.snapshot.create"]},
+                    "payload": {"type": "object"},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["operation", "payload"],
+            },
+            handler=writeback_prepare,
+            capabilities=["writeback_plan"],
+            recovery_policy="idempotent",
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="writeback.execute_plan",
+            description=(
+                "执行已经生成的 durable 写入计划。该工具有外部副作用，"
+                "仅在 writeback 模式且通过 Runtime approval 后执行。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "plan": {"type": "object"},
+                    "plan_hash": {"type": "string"},
+                },
+                "required": ["plan", "plan_hash"],
+            },
+            handler=writeback_execute,
+            capabilities=["durable_writeback"],
+            requires_approval=True,
+            recovery_policy="idempotent",
+            side_effect=True,
         )
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import logging
 import queue
 import sqlite3
@@ -17,7 +18,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 
-from ..agent import AgentRegistry
+from ..agent import AgentRegistry, resolve_agent_policy
 from ..agent.commander import COMMANDER
 from ..agent.domain_agents import CODING_ASSISTANT, INVESTMENT_ANALYST, KNOWLEDGE_MANAGER, MEDIA_GENERATOR
 from ..config import AgentConfig, IMAGE_MODELS, KNOWN_MODELS, VIDEO_MODELS, default_model
@@ -31,7 +32,7 @@ from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..runtime.adapters.sqlite_store import SQLiteRuntimeStore
-from ..runtime import AgentRuntime, ResumeInput
+from ..runtime import AgentRuntime, ExecutionPolicy, ResumeInput
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..context import ToolResultRefStore, make_get_stored_data_tool
@@ -498,6 +499,9 @@ class ChatService:
         user_id: str = "default",
         file_id: str | None = None,
         mode: str = "",
+        agent_mode: str = "",
+        preset: str = "",
+        debug_trace: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """LangGraph-based streaming chat with classify → react/plan/skill → summarize → reflection."""
         started = time.perf_counter()
@@ -537,6 +541,15 @@ class ChatService:
             yield {"type": "done", "session_id": sid, "duration_ms": 0}
             return
 
+        try:
+            execution_policy = resolve_agent_policy(mode=agent_mode, preset=preset)
+            if debug_trace:
+                execution_policy = replace(execution_policy, debug_trace=True)
+        except ValueError as err:
+            yield {"type": "error", "message": str(err)}
+            yield {"type": "done", "session_id": sid, "duration_ms": 0}
+            return
+
         # Load conversation history for context injection into LLM calls
         history = self._get_history(sid, user_id)
         call_id = str(uuid.uuid4())
@@ -550,6 +563,10 @@ class ChatService:
         # workflow. Keep both paths on legacy even when Runtime is enabled.
         if getattr(session_llm, "provider", "") == "codex" or mode == "deep_research" or attachments:
             runtime_mode = "legacy"
+        if execution_policy.mode == "writeback":
+            # Durable writeback must go through Runtime approval/effect journal;
+            # the legacy graph executes tools before its confirmation node.
+            runtime_mode = "runtime"
 
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
@@ -587,6 +604,7 @@ class ChatService:
             else:
                 graph_config = self._build_graph_config(
                     sid, session_llm, history, text, user_id, attachments,
+                    agent_policy=execution_policy,
                 )
                 try:
                     final_state = yield from self._stream_graph_events(
@@ -912,7 +930,13 @@ PERSONAL-OS EVIDENCE:
             runtime = AgentRuntime(
                 self._runtime_store,
                 model=MatrixModelAdapter(self._get_llm(session_id, user_id=user_id)),
-                tools=MatrixToolAdapter(agent_tools, session_id=session_id),
+                tools=MatrixToolAdapter(
+                    agent_tools,
+                    session_id=session_id,
+                    owner_id=user_id,
+                    mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
+                    allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+                ),
             )
             pending = operation.state.get("pending_tool_call", {})
             handle = runtime.resume(
@@ -924,6 +948,12 @@ PERSONAL-OS EVIDENCE:
             )
             events = list(handle.events())
             result = handle.result()
+            for trace_event in handle.debug_trace():
+                yield {
+                    "type": "debug_trace",
+                    "operation_id": operation_id,
+                    "event": trace_event,
+                }
             for event in events:
                 if event.event_type.value == "tool_start":
                     yield {"type": "tool_call", "name": event.payload.get("name", ""), "operation_id": operation_id}
@@ -1220,6 +1250,7 @@ PERSONAL-OS EVIDENCE:
         self, sid: str, session_llm: LLMClient, history: list[dict],
         user_message: str = "", user_id: str = "default",
         attachments: list[dict[str, Any]] | None = None,
+        agent_policy: ExecutionPolicy | None = None,
     ) -> dict[str, Any]:
         """Build the LangGraph config dict for a streaming session."""
         return {
@@ -1241,6 +1272,7 @@ PERSONAL-OS EVIDENCE:
                 "lesson_store": self._lesson_store,
                 "user_id": user_id,
                 "runtime_store": self._runtime_store,
+                "execution_policy": agent_policy or ExecutionPolicy(),
             },
             "thread_id": sid,
         }

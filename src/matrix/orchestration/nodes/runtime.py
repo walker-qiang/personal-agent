@@ -6,7 +6,7 @@ from typing import Any
 
 from langgraph.types import RunnableConfig, interrupt
 
-from ...runtime import AgentRuntime, RunRequest
+from ...runtime import AgentRuntime, ExecutionPolicy, RunRequest
 from ...runtime.adapters.model import MatrixModelAdapter
 from ...runtime.adapters.tools import MatrixToolAdapter, tool_specs
 from ...runtime.domain.messages import Message
@@ -70,17 +70,30 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         model=getattr(cfg["llm"], "model", ""),
         tools=tool_specs(agent_tools),
         tool_context={"session_id": state.get("session_id", "")},
+        execution_policy=cfg.get("execution_policy", ExecutionPolicy()),
         orchestration_run_id=state.get("orchestration_run_id", ""),
     )
     runtime = AgentRuntime(
         cfg.get("runtime_store") or MemoryOperationStore(),
         model=MatrixModelAdapter(cfg["llm"]),
-        tools=MatrixToolAdapter(agent_tools, session_id=state.get("session_id", "")),
+        tools=MatrixToolAdapter(
+            agent_tools,
+            session_id=state.get("session_id", ""),
+            owner_id=state.get("owner_id", cfg.get("user_id", "default")),
+            mode=cfg.get("execution_policy", ExecutionPolicy()).mode,
+            allow_external_effects=cfg.get("execution_policy", ExecutionPolicy()).allow_external_effects,
+        ),
     )
     handle = runtime.start(request)
     _push_event(cfg, "progress", {"message": "独立 Runtime 正在执行 Agent 任务...", "operation_id": handle.operation_id})
     events = list(handle.events())
     result = handle.result()
+    if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
+        for trace_event in handle.debug_trace():
+            _push_event(cfg, "debug_trace", {
+                "operation_id": handle.operation_id,
+                "event": trace_event,
+            })
     for event in events:
         if event.event_type.value == "tool_start":
             _push_event(cfg, "tool_call", {
@@ -149,7 +162,11 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
     agent_tools = cfg["agent_registry"].build_tool_registry(operation.agent_id, cfg["full_tools"])
     runtime = AgentRuntime(
         cfg["runtime_store"], model=MatrixModelAdapter(cfg["llm"]),
-        tools=MatrixToolAdapter(agent_tools, session_id=operation.session_id),
+        tools=MatrixToolAdapter(
+            agent_tools, session_id=operation.session_id, owner_id=operation.owner_id,
+            mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
+            allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+        ),
     )
     approval_id = actions[0].get("approval_id", "") if actions else ""
     handle = runtime.resume(
@@ -160,6 +177,12 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
     )
     events = list(handle.events())
     result = handle.result()
+    if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
+        for trace_event in handle.debug_trace():
+            _push_event(cfg, "debug_trace", {
+                "operation_id": handle.operation_id,
+                "event": trace_event,
+            })
     return {
         "confirmed": True,
         "needs_confirmation": False,

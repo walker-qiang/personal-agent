@@ -56,6 +56,9 @@ async def chat(request: Request):
         session_id = str(raw_session_id).strip() if raw_session_id else None
         file_id = str(payload.get("file_id", "")).strip() or None
         mode = str(payload.get("mode", "")).strip()
+        agent_mode = str(payload.get("agent_mode", "")).strip()
+        preset = str(payload.get("preset", "")).strip()
+        debug_trace = payload.get("debug_trace") is True
     except (FinanceToolError, json.JSONDecodeError) as err:
         _trace_error(request, str(err))
         return JSONResponse(
@@ -75,6 +78,8 @@ async def chat(request: Request):
     def iter_events():
         for event in chat_service.stream_chat(
             message, session_id, user_id=user_id, file_id=file_id, mode=mode,
+            agent_mode=agent_mode, preset=preset,
+            debug_trace=debug_trace,
         ):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
@@ -89,6 +94,9 @@ async def chat_stream(
     message: str = Query(..., description="User message"),
     session_id: str = Query(default="", description="Session ID"),
     file_id: str = Query(default="", description="Uploaded file ID"),
+    agent_mode: str = Query(default="", description="read_only or writeback"),
+    preset: str = Query(default="", description="Named Agent preset"),
+    debug_trace: bool = Query(default=False, description="Emit ephemeral debug trace"),
 ):
     """SSE streaming via EventSource (GET). Compatible with all browsers."""
     chat_service: ChatService = request.app.state.chat
@@ -109,7 +117,11 @@ async def chat_stream(
     # ---- END INPUT GUARD ----
 
     def iter_events():
-        for event in chat_service.stream_chat(message, session_id, user_id=user_id, file_id=file_id):
+        for event in chat_service.stream_chat(
+            message, session_id, user_id=user_id, file_id=file_id,
+            agent_mode=agent_mode, preset=preset,
+            debug_trace=debug_trace,
+        ):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)

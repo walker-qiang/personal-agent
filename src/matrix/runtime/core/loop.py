@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 from ..domain.events import RuntimeEvent, RuntimeEventType
-from ..domain.approvals import Approval
+from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
 from ..domain.messages import Message, ToolCall
 from ..domain.operations import OperationPhase, OperationState, StateTransition
 from ..domain.requests import RunRequest
@@ -22,6 +22,7 @@ from ..ports.model import ModelPort, ModelRequest, ModelResponse
 from ..ports.store import OperationStorePort
 from ..ports.tools import ToolExecutorPort
 from .reducer import with_next_phase
+from .debug import EphemeralDebugTrace
 
 
 def execute_operation(
@@ -35,6 +36,7 @@ def execute_operation(
     resume_approval_id: str = "",
     resume_decision: str = "",
     committed_events: tuple[RuntimeEvent, ...] = (),
+    debug_trace: EphemeralDebugTrace | None = None,
 ) -> tuple[list[RuntimeEvent], RunResult]:
     """Execute one operation and return committed events plus its result."""
 
@@ -79,6 +81,10 @@ def execute_operation(
                 tool_request,
                 tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
             )
+            _debug(debug_trace, "tool_result", {
+                "name": pending_call.name, "call_id": pending_call.call_id,
+                "result": result.result, "error": result.error,
+            })
         else:
             result = ToolResult(
                 call_id=pending_call.call_id, name=pending_call.name,
@@ -125,6 +131,7 @@ def execute_operation(
                 store=store,
                 operation=current,
                 events=events,
+                debug_trace=debug_trace,
             )
             if response is None:
                 return _finish(
@@ -191,7 +198,48 @@ def execute_operation(
                 tool_spec = next(
                     (spec for spec in request.tools if spec.name == tool_call.name), None
                 )
-                if tool_spec is not None and tool_spec.requires_approval:
+                requires_approval = bool(
+                    tool_spec is not None and (
+                        tool_spec.requires_approval
+                        or (tool_spec.side_effect and request.execution_policy.require_approval)
+                    )
+                )
+                if tool_spec is not None and tool_spec.side_effect and not request.execution_policy.allow_external_effects:
+                    result = ToolResult(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        error=(
+                            f"tool {tool_call.name} is blocked by agent mode "
+                            f"{request.execution_policy.mode}; use an approved writeback operation"
+                        ),
+                        is_error=True,
+                    )
+                    _debug(debug_trace, "tool_blocked", {
+                        "name": tool_call.name, "call_id": tool_call.call_id,
+                        "mode": request.execution_policy.mode,
+                    })
+                    current = _commit_state(
+                        store, current,
+                        _event(current, RuntimeEventType.TOOL_START, {
+                            "call_id": tool_call.call_id, "name": tool_call.name,
+                        }), events,
+                    )
+                    current = _commit_state(
+                        store, current,
+                        _event(current, RuntimeEventType.TOOL_END, {
+                            "call_id": result.call_id, "name": result.name,
+                            "is_error": True, "error": result.error,
+                        }), events,
+                    )
+                    tool_results.append(result)
+                    messages.append(Message(
+                        role="tool", content=_tool_content(result), tool_call_id=result.call_id,
+                    ))
+                    continue
+                auto_approved = _can_auto_approve(
+                    tool_call.name, tool_call.arguments, request.execution_policy,
+                )
+                if requires_approval and not auto_approved:
                     approval = Approval(
                         approval_id=uuid.uuid4().hex,
                         owner_id=current.owner_id,
@@ -202,6 +250,11 @@ def execute_operation(
                         risk="tool_requires_approval",
                     )
                     store.create_approval(approval)
+                    _debug(debug_trace, "approval_required", {
+                        "approval_id": approval.approval_id,
+                        "name": tool_call.name,
+                        "mode": request.execution_policy.mode,
+                    })
                     current = replace(
                         current,
                         state={
@@ -240,6 +293,33 @@ def execute_operation(
                             payload={"tool_name": tool_call.name, "arguments": dict(tool_call.arguments)},
                         ),
                     )
+                if auto_approved:
+                    approval = Approval(
+                        approval_id=uuid.uuid4().hex,
+                        owner_id=current.owner_id,
+                        operation_id=current.operation_id,
+                        tool_call_id=tool_call.call_id,
+                        tool_name=tool_call.name,
+                        sanitized_arguments=dict(tool_call.arguments),
+                        risk="auto_allowlist",
+                        status=ApprovalStatus.APPROVED,
+                        decision=ApprovalDecision.APPROVE,
+                    )
+                    store.create_approval(approval)
+                    _debug(debug_trace, "approval_auto_approved", {
+                        "approval_id": approval.approval_id,
+                        "name": tool_call.name,
+                        "operation": _approval_operation(tool_call.name, tool_call.arguments),
+                    })
+                    current = _commit_state(
+                        store, current,
+                        _event(current, RuntimeEventType.APPROVAL_DECIDED, {
+                            "approval_id": approval.approval_id,
+                            "decision": "approve",
+                            "source": "policy",
+                            "operation": _approval_operation(tool_call.name, tool_call.arguments),
+                        }), events,
+                    )
                 current = _commit_state(
                     store, current,
                     _event(current, RuntimeEventType.TOOL_START, {
@@ -254,12 +334,21 @@ def execute_operation(
                     name=tool_call.name,
                     arguments=tool_call.arguments,
                 )
+                _debug(debug_trace, "tool_request", {
+                    "name": tool_request.name,
+                    "call_id": tool_request.call_id,
+                    "arguments": tool_request.arguments,
+                })
                 result = _execute_tool_effect(
                     store,
                     tools,
                     tool_request,
                     tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
                 )
+                _debug(debug_trace, "tool_result", {
+                    "name": tool_call.name, "call_id": tool_call.call_id,
+                    "result": result.result, "error": result.error,
+                })
                 tool_results.append(result)
                 messages.append(Message(
                     role="tool",
@@ -301,20 +390,48 @@ def _complete_with_retry(
     store: OperationStorePort,
     operation: OperationState,
     events: list[RuntimeEvent],
+    debug_trace: EphemeralDebugTrace | None = None,
 ) -> tuple[ModelResponse | None, OperationState]:
     attempts = request.execution_options.max_model_retries + 1
     for attempt in range(attempts):
         if handle._cancel_requested:
             return None, operation
         try:
-            return model.complete(ModelRequest(
+            model_request = ModelRequest(
                 system_prompt=request.system_prompt,
                 messages=list(messages),
                 tools=request.tools,
                 model=request.model,
-                metadata=request.metadata,
-            )), operation
+                metadata={
+                    **request.metadata,
+                    "agent_mode": request.execution_policy.mode,
+                    "agent_preset": request.execution_policy.preset,
+                    "output_style": request.execution_policy.output_style,
+                },
+            )
+            _debug(debug_trace, "model_request", {
+                "model": model_request.model,
+                "system_prompt": model_request.system_prompt,
+                "messages": [_message_debug_value(message) for message in model_request.messages],
+                "tools": [tool.name for tool in model_request.tools],
+                "metadata": model_request.metadata,
+                "attempt": attempt,
+            })
+            response = model.complete(model_request)
+            _debug(debug_trace, "model_response", {
+                "content": response.content,
+                "tool_calls": [
+                    {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+                    for call in response.tool_calls
+                ],
+                "finish_reason": response.finish_reason,
+                "usage": response.usage,
+            })
+            return response, operation
         except Exception as exc:
+            _debug(debug_trace, "model_error", {
+                "attempt": attempt, "error": f"{type(exc).__name__}: {exc}",
+            })
             if attempt + 1 >= attempts:
                 raise
             operation = _commit_state(
@@ -339,6 +456,39 @@ def _execute_tool_effect(
     result = tools.execute(request)
     store.settle_tool_effect(request, result)
     return result
+
+
+def _approval_operation(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Resolve the business operation represented by an approval tool call."""
+    if tool_name == "writeback.execute_plan":
+        plan = arguments.get("plan", {})
+        if isinstance(plan, dict):
+            return str(plan.get("operation", ""))
+    return tool_name
+
+
+def _can_auto_approve(tool_name: str, arguments: dict[str, Any], policy: Any) -> bool:
+    if policy.approval_mode != "auto_allowlist" or not policy.allow_external_effects:
+        return False
+    operation = _approval_operation(tool_name, arguments)
+    return bool(operation and operation in set(policy.auto_approve_operations))
+
+
+def _debug(trace: EphemeralDebugTrace | None, kind: str, payload: dict[str, Any]) -> None:
+    if trace is not None:
+        trace.emit(kind, payload)
+
+
+def _message_debug_value(message: Message) -> dict[str, Any]:
+    return {
+        "role": message.role,
+        "content": message.content,
+        "tool_call_id": message.tool_call_id,
+        "tool_calls": [
+            {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+            for call in message.tool_calls
+        ],
+    }
 
 
 def _finish(

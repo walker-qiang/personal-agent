@@ -58,6 +58,7 @@ export function buildStreamUrl(
   sessionId: string,
   ticket: string,
   fileId?: string,
+  debugTrace = false,
 ): string {
   const params = new URLSearchParams({
     message,
@@ -66,6 +67,9 @@ export function buildStreamUrl(
   });
   if (fileId) {
     params.set('file_id', fileId);
+  }
+  if (debugTrace) {
+    params.set('debug_trace', 'true');
   }
   return `/chat/stream?${params.toString()}`;
 }

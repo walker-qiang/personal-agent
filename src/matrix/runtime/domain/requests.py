@@ -11,6 +11,42 @@ from .tools import ToolSpec
 
 
 @dataclass(frozen=True)
+class ExecutionPolicy:
+    """Resolved capability policy supplied by the application layer.
+
+    The Runtime does not resolve user-facing presets.  It only enforces this
+    already-resolved, provider-neutral policy at the tool boundary.
+    """
+
+    mode: str = "read_only"
+    preset: str = "default"
+    allow_external_effects: bool = False
+    require_approval: bool = True
+    approval_mode: str = "manual"
+    auto_approve_operations: tuple[str, ...] = ()
+    debug_trace: bool = False
+    output_style: str = "default"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"read_only", "writeback"}:
+            raise RuntimeValidationError(
+                f"unsupported agent mode: {self.mode}; expected read_only or writeback"
+            )
+        if not self.preset.strip():
+            raise RuntimeValidationError("agent preset must not be empty")
+        if self.mode == "read_only" and self.allow_external_effects:
+            raise RuntimeValidationError("read_only mode cannot allow external effects")
+        if self.mode == "writeback" and not self.require_approval:
+            raise RuntimeValidationError("writeback mode requires approval")
+        if self.approval_mode not in {"manual", "auto_allowlist"}:
+            raise RuntimeValidationError(
+                "unsupported approval_mode; expected manual or auto_allowlist"
+            )
+        if self.approval_mode == "auto_allowlist" and self.mode != "writeback":
+            raise RuntimeValidationError("auto_allowlist requires writeback mode")
+
+
+@dataclass(frozen=True)
 class ExecutionOptions:
     """Boundaries for one single-Agent execution."""
 
@@ -47,6 +83,7 @@ class RunRequest:
     tools: list[ToolSpec] = field(default_factory=list)
     tool_context: dict[str, Any] = field(default_factory=dict)
     execution_options: ExecutionOptions = field(default_factory=ExecutionOptions)
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     metadata: dict[str, Any] = field(default_factory=dict)
     orchestration_run_id: str = ""
 
