@@ -34,9 +34,15 @@ class OperationStorePort(Protocol):
     def get_approval(self, owner_id: str, approval_id: str) -> Approval | None:
         ...
 
-    def decide_approval(
-        self, owner_id: str, approval_id: str, decision: ApprovalDecision,
+    def resolve_approval(
+        self,
+        owner_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+        decided_at: float,
+        transition: StateTransition,
     ) -> Approval:
+        """Consume a pending approval and commit the resume transition atomically."""
         ...
 
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:

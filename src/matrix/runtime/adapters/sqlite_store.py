@@ -85,45 +85,7 @@ class SQLiteRuntimeStore:
             conn = self._get_conn()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                current = conn.execute(
-                    "SELECT * FROM runtime_operations WHERE operation_id=?",
-                    (transition.new_state.operation_id,),
-                ).fetchone()
-                if current is None:
-                    raise OperationConflictError("operation does not exist")
-                if int(current["version"]) != transition.previous_version:
-                    raise OperationConflictError(
-                        f"operation version conflict: expected {transition.previous_version}, "
-                        f"actual {current['version']}"
-                    )
-                if transition.new_state.version != transition.previous_version + 1:
-                    raise OperationConflictError("operation version must increase by one")
-                state = transition.new_state
-                cur = conn.execute(
-                    """UPDATE runtime_operations SET phase=?, turn_index=?, version=?,
-                    state_schema_version=?, last_event_sequence=?, state_json=?, updated_at=?
-                    WHERE operation_id=? AND owner_id=? AND version=?""",
-                    (
-                        state.phase.value, state.turn_index, state.version,
-                        state.state_schema_version, state.last_event_sequence,
-                        json.dumps(state.state, ensure_ascii=False, default=str), time.time(),
-                        state.operation_id, state.owner_id, transition.previous_version,
-                    ),
-                )
-                if cur.rowcount != 1:
-                    raise OperationConflictError("operation compare-and-swap failed")
-                for event in transition.events:
-                    conn.execute(
-                        """INSERT INTO runtime_events
-                        (event_id, owner_id, operation_id, session_id, sequence,
-                         event_type, timestamp, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            event.event_id, event.owner_id, event.operation_id,
-                            event.session_id, event.sequence, event.event_type.value,
-                            event.timestamp, json.dumps(event.payload, ensure_ascii=False, default=str),
-                        ),
-                    )
+                _apply_transition(conn, transition)
                 conn.commit()
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
@@ -198,31 +160,98 @@ class SQLiteRuntimeStore:
             ).fetchone()
         return _approval_from_row(row) if row else None
 
-    def decide_approval(self, owner_id: str, approval_id: str, decision: ApprovalDecision) -> Approval:
+    def resolve_approval(
+        self,
+        owner_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+        decided_at: float,
+        transition: StateTransition,
+    ) -> Approval:
         with self._lock:
             conn = self._get_conn()
-            row = conn.execute(
-                "SELECT * FROM runtime_approvals WHERE owner_id=? AND approval_id=?",
-                (owner_id, approval_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(approval_id)
-            if row["status"] != ApprovalStatus.PENDING.value:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM runtime_approvals WHERE owner_id=? AND approval_id=?",
+                    (owner_id, approval_id),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(approval_id)
                 existing = _approval_from_row(row)
-                if existing.decision == decision:
+                if row["operation_id"] != transition.new_state.operation_id:
+                    raise OperationConflictError("approval operation does not match transition")
+                operation = conn.execute(
+                    "SELECT owner_id, phase, version FROM runtime_operations WHERE operation_id=?",
+                    (row["operation_id"],),
+                ).fetchone()
+                if operation is None or operation["owner_id"] != owner_id:
+                    raise OperationConflictError("approval operation not found or owner mismatch")
+                if operation["phase"] != OperationPhase.WAITING_APPROVAL.value:
+                    raise OperationConflictError("operation is not waiting for approval")
+                if int(operation["version"]) != transition.previous_version:
+                    raise OperationConflictError(
+                        f"operation version conflict: expected {transition.previous_version}, "
+                        f"actual {operation['version']}"
+                    )
+                if existing.status is ApprovalStatus.EXPIRED:
+                    conn.commit()
                     return existing
-                raise OperationConflictError("approval is no longer pending")
-            status = ApprovalStatus.APPROVED if decision == ApprovalDecision.APPROVE else ApprovalStatus.SKIPPED
-            conn.execute(
-                "UPDATE runtime_approvals SET status=?, decision=?, version=version+1, updated_at=? "
-                "WHERE approval_id=? AND owner_id=? AND status=?",
-                (status.value, decision.value, time.time(), approval_id, owner_id, ApprovalStatus.PENDING.value),
-            )
-            conn.commit()
-            updated = conn.execute(
-                "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
-            ).fetchone()
-        return _approval_from_row(updated)
+                if existing.status is not ApprovalStatus.PENDING:
+                    raise OperationConflictError("approval is no longer pending")
+                if existing.expires_at is not None and existing.expires_at <= decided_at:
+                    cur = conn.execute(
+                        "UPDATE runtime_approvals SET status=?, decision=NULL, version=version+1, updated_at=? "
+                        "WHERE approval_id=? AND owner_id=? AND status=? AND version=?",
+                        (
+                            ApprovalStatus.EXPIRED.value,
+                            decided_at,
+                            approval_id,
+                            owner_id,
+                            ApprovalStatus.PENDING.value,
+                            existing.version,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise OperationConflictError("approval compare-and-swap failed")
+                    conn.commit()
+                    expired = conn.execute(
+                        "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
+                    ).fetchone()
+                    return _approval_from_row(expired)
+
+                _apply_transition(conn, transition)
+                status = (
+                    ApprovalStatus.APPROVED
+                    if decision is ApprovalDecision.APPROVE
+                    else ApprovalStatus.SKIPPED
+                )
+                cur = conn.execute(
+                    "UPDATE runtime_approvals SET status=?, decision=?, version=version+1, updated_at=? "
+                    "WHERE approval_id=? AND owner_id=? AND status=? AND version=?",
+                    (
+                        status.value,
+                        decision.value,
+                        decided_at,
+                        approval_id,
+                        owner_id,
+                        ApprovalStatus.PENDING.value,
+                        existing.version,
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise OperationConflictError("approval compare-and-swap failed")
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
+                ).fetchone()
+                return _approval_from_row(updated)
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise OperationConflictError(str(exc)) from exc
+            except Exception:
+                conn.rollback()
+                raise
 
     def append_session_entry(
         self, owner_id: str, session_id: str, entry_type: str, payload: dict[str, Any],
@@ -303,6 +332,61 @@ def _operation_values(operation: OperationState) -> tuple[Any, ...]:
         operation.last_event_sequence, json.dumps(operation.state, ensure_ascii=False, default=str),
         time.time(), time.time(),
     )
+
+
+def _apply_transition(conn: sqlite3.Connection, transition: StateTransition) -> None:
+    """Apply one operation snapshot and its events inside the caller's transaction."""
+
+    current = conn.execute(
+        "SELECT * FROM runtime_operations WHERE operation_id=?",
+        (transition.new_state.operation_id,),
+    ).fetchone()
+    if current is None:
+        raise OperationConflictError("operation does not exist")
+    if int(current["version"]) != transition.previous_version:
+        raise OperationConflictError(
+            f"operation version conflict: expected {transition.previous_version}, "
+            f"actual {current['version']}"
+        )
+    if transition.new_state.version != transition.previous_version + 1:
+        raise OperationConflictError("operation version must increase by one")
+    state = transition.new_state
+    cur = conn.execute(
+        """UPDATE runtime_operations SET phase=?, turn_index=?, version=?,
+        state_schema_version=?, last_event_sequence=?, state_json=?, updated_at=?
+        WHERE operation_id=? AND owner_id=? AND version=?""",
+        (
+            state.phase.value,
+            state.turn_index,
+            state.version,
+            state.state_schema_version,
+            state.last_event_sequence,
+            json.dumps(state.state, ensure_ascii=False, default=str),
+            time.time(),
+            state.operation_id,
+            state.owner_id,
+            transition.previous_version,
+        ),
+    )
+    if cur.rowcount != 1:
+        raise OperationConflictError("operation compare-and-swap failed")
+    for event in transition.events:
+        conn.execute(
+            """INSERT INTO runtime_events
+            (event_id, owner_id, operation_id, session_id, sequence,
+             event_type, timestamp, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event.event_id,
+                event.owner_id,
+                event.operation_id,
+                event.session_id,
+                event.sequence,
+                event.event_type.value,
+                event.timestamp,
+                json.dumps(event.payload, ensure_ascii=False, default=str),
+            ),
+        )
 
 
 def _operation_from_row(row: sqlite3.Row) -> OperationState:

@@ -33,6 +33,7 @@ from matrix.orchestration.nodes._helpers import (
     _requires_browser,
 )
 from matrix.orchestration.state import AgentState
+from matrix.orchestration.runtime_adapter import build_dag_run_request
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
 from matrix.agent import AgentRegistry
@@ -155,6 +156,100 @@ def make_config(llm, full_tools, agent_registry, trace=None, circuit_breaker=Non
             "circuit_breaker": circuit_breaker,
         },
     }
+
+
+def test_runtime_dag_request_injects_only_declared_dependencies(full_tools, agent_registry):
+    state = AgentState(
+        user_message="analyze",
+        session_id="runtime-dag",
+        owner_id="owner-a",
+        orchestration_run_id="run-1",
+        agent_results=[
+            {
+                "step": 1,
+                "output_key": "source",
+                "agent_id": "investment-analyst",
+                "result": "dependency-marker",
+                "operation_id": "op-1",
+            },
+            {
+                "step": 99,
+                "output_key": "unrelated",
+                "agent_id": "investment-analyst",
+                "result": "must-not-appear",
+                "operation_id": "op-99",
+            },
+        ],
+    )
+    step = {
+        "step": 2,
+        "agent_id": "investment-analyst",
+        "task": "use source",
+        "depends_on": [1],
+        "output_key": "analysis",
+    }
+
+    request = build_dag_run_request(
+        state,
+        {"agent_registry": agent_registry, "full_tools": full_tools, "llm": FakeLLM([])},
+        step,
+    )
+
+    assert request.metadata["dependency_results"][0]["result"] == "dependency-marker"
+    assert "dependency-marker" in request.messages[0].content
+    assert "must-not-appear" not in request.messages[0].content
+
+
+def test_runtime_dag_request_rejects_missing_dependency(full_tools, agent_registry):
+    state = AgentState(
+        user_message="analyze",
+        session_id="runtime-dag",
+        owner_id="owner-a",
+        orchestration_run_id="run-1",
+        agent_results=[],
+    )
+
+    with pytest.raises(ValueError, match="missing DAG dependency"):
+        build_dag_run_request(
+            state,
+            {"agent_registry": agent_registry, "full_tools": full_tools, "llm": FakeLLM([])},
+            {
+                "step": 2,
+                "agent_id": "investment-analyst",
+                "task": "use source",
+                "depends_on": [1],
+            },
+        )
+
+
+def test_runtime_dag_next_batch_carries_completed_results():
+    state = AgentState(
+        delegation_plan=[
+            {
+                "step": 1,
+                "agent_id": "investment-analyst",
+                "task": "collect source",
+                "depends_on": [],
+            },
+            {
+                "step": 2,
+                "agent_id": "investment-analyst",
+                "task": "use source",
+                "depends_on": [1],
+            },
+        ],
+        completed_steps=[1],
+        agent_results=[{"step": 1, "result": "dependency-marker"}],
+        runtime_mode="runtime",
+    )
+
+    routed = _route_after_replan(state)
+
+    assert len(routed) == 1
+    assert routed[0].node == "runtime_delegate"
+    assert routed[0].arg["agent_results"] == [
+        {"step": 1, "result": "dependency-marker"},
+    ]
 
 
 # ---- Commander Plan ----

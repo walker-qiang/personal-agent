@@ -580,31 +580,30 @@ class ChatService:
                 yield from self._stream_deep_research(
                     session_llm, sid, text, history, user_id,
                 )
-                return
-
-            if getattr(session_llm, "provider", "") == "codex":
+            elif getattr(session_llm, "provider", "") == "codex":
                 yield from self._stream_codex_direct(
                     session_llm, sid, text, history, user_id,
                 )
-                return
-
-            graph_config = self._build_graph_config(sid, session_llm, history, text, user_id, attachments)
-
-            try:
-                final_state = yield from self._stream_graph_events(
-                    initial_state, graph_config, emit_classify=True,
+            else:
+                graph_config = self._build_graph_config(
+                    sid, session_llm, history, text, user_id, attachments,
                 )
-                yield from self._finalize_stream(
-                    final_state, sid, text, session_llm, history, user_id,
-                    runtime_mode=runtime_mode,
-                    runtime_user_entry_written=runtime_user_entry_written,
-                )
-
-            except GraphInterrupt as gi:
-                interrupted = True
-                yield from self._handle_hitl_interrupt(gi, sid, graph_config, session_llm, user_id)
-                return
-
+                try:
+                    final_state = yield from self._stream_graph_events(
+                        initial_state, graph_config, emit_classify=True,
+                    )
+                    yield from self._finalize_stream(
+                        final_state, sid, text, session_llm, history, user_id,
+                        runtime_mode=runtime_mode,
+                        runtime_user_entry_written=runtime_user_entry_written,
+                    )
+                except GraphInterrupt as gi:
+                    interrupted = True
+                    yield from self._handle_hitl_interrupt(
+                        gi, sid, graph_config, session_llm, user_id,
+                    )
+        except GeneratorExit:
+            raise
         except Exception as err:
             logger.error("stream_chat error: %s\n%s", err, traceback.format_exc())
             yield {"type": "error", "message": "系统内部错误，请稍后重试"}
@@ -614,11 +613,14 @@ class ChatService:
                 "建议：稍等片刻后重新提问，或尝试换一种方式描述您的问题。"
             )}
         finally:
-            duration_ms = round((time.perf_counter() - started) * 1000)
             if not interrupted:
                 # Keep latest checkpoint for recovery (P0-4: 断点恢复)
                 self._prune_checkpoints(sid, keep_latest=True)
-            yield {"type": "done", "session_id": sid, "duration_ms": duration_ms}
+        yield {
+            "type": "done",
+            "session_id": sid,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        }
 
     def _stream_codex_direct(
         self,
@@ -879,14 +881,18 @@ PERSONAL-OS EVIDENCE:
                 "actions": pending_actions,
                 "session_id": session_id,
             }
-            return
+        except GeneratorExit:
+            raise
         except Exception as err:
             logger.error("resume error: %s\n%s", err, traceback.format_exc())
             yield {"type": "error", "message": "恢复会话失败，请稍后重试"}
         finally:
-            duration_ms = round((time.perf_counter() - started) * 1000)
             self._prune_checkpoints(session_id, keep_latest=False)
-            yield {"type": "done", "session_id": session_id, "duration_ms": duration_ms}
+        yield {
+            "type": "done",
+            "session_id": session_id,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        }
 
     def _resume_runtime_chat(
         self, operation_id: str, session_id: str, decision: str, user_id: str,
@@ -930,11 +936,16 @@ PERSONAL-OS EVIDENCE:
                 yield {"type": "confirm_required", "actions": [result.suspension.payload if result.suspension else {}], "session_id": session_id}
             elif result.error:
                 yield {"type": "error", "message": result.error}
+        except GeneratorExit:
+            raise
         except Exception as err:
             logger.error("runtime resume error: %s", err, exc_info=True)
             yield {"type": "error", "message": "恢复 Runtime 操作失败，请稍后重试"}
-        finally:
-            yield {"type": "done", "session_id": session_id, "duration_ms": round((time.perf_counter() - started) * 1000)}
+        yield {
+            "type": "done",
+            "session_id": session_id,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        }
 
     # ---- Internal ----
 

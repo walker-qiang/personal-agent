@@ -34,23 +34,20 @@ def execute_operation(
     tools: ToolExecutorPort,
     resume_approval_id: str = "",
     resume_decision: str = "",
+    committed_events: tuple[RuntimeEvent, ...] = (),
 ) -> tuple[list[RuntimeEvent], RunResult]:
     """Execute one operation and return committed events plus its result."""
 
     current = operation
-    events: list[RuntimeEvent] = []
+    events: list[RuntimeEvent] = list(committed_events)
     messages = _messages_from_state(operation.state) or list(request.messages)
     tool_results: list[ToolResult] = []
     total_tool_calls = 0
     usage: dict[str, Any] = {}
 
     if resume_approval_id:
-        current = _commit_phase(
-            store, current, OperationPhase.RESUMING,
-            _event(current, RuntimeEventType.RUN_RESUMED, {
-                "approval_id": resume_approval_id, "decision": resume_decision,
-            }), events,
-        )
+        if current.phase is not OperationPhase.RESUMING:
+            raise ValueError("resumed operation must already be in resuming phase")
         pending = current.state.get("pending_tool_call", {})
         if pending.get("approval_id") != resume_approval_id:
             raise ValueError("approval does not match suspended tool call")
@@ -60,10 +57,28 @@ def execute_operation(
         )
         if resume_decision == "approve":
             current = _commit_phase(store, current, OperationPhase.EXECUTING_TOOLS, None, events)
-            result = tools.execute(ToolRequest(
+            current = _commit_state(
+                store,
+                current,
+                _event(current, RuntimeEventType.TOOL_START, {
+                    "call_id": pending_call.call_id,
+                    "name": pending_call.name,
+                }),
+                events,
+            )
+            tool_request = ToolRequest(
                 operation_id=current.operation_id, call_id=pending_call.call_id,
                 name=pending_call.name, arguments=pending_call.arguments,
-            ))
+            )
+            tool_spec = next(
+                (spec for spec in request.tools if spec.name == pending_call.name), None
+            )
+            result = _execute_tool_effect(
+                store,
+                tools,
+                tool_request,
+                tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+            )
         else:
             result = ToolResult(
                 call_id=pending_call.call_id, name=pending_call.name,
@@ -239,14 +254,12 @@ def execute_operation(
                     name=tool_call.name,
                     arguments=tool_call.arguments,
                 )
-                if hasattr(store, "begin_tool_effect"):
-                    store.begin_tool_effect(
-                        tool_request,
-                        tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
-                    )
-                result = tools.execute(tool_request)
-                if hasattr(store, "settle_tool_effect"):
-                    store.settle_tool_effect(tool_request, result)
+                result = _execute_tool_effect(
+                    store,
+                    tools,
+                    tool_request,
+                    tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+                )
                 tool_results.append(result)
                 messages.append(Message(
                     role="tool",
@@ -312,6 +325,20 @@ def _complete_with_retry(
                 }),
                 events,
             )
+
+
+def _execute_tool_effect(
+    store: OperationStorePort,
+    tools: ToolExecutorPort,
+    request: ToolRequest,
+    recovery_policy: RecoveryPolicy,
+) -> ToolResult:
+    """Execute one external tool call through the persistent effect journal."""
+
+    store.begin_tool_effect(request, recovery_policy)
+    result = tools.execute(request)
+    store.settle_tool_effect(request, result)
+    return result
 
 
 def _finish(

@@ -151,6 +151,15 @@ class TestChatService:
         tokens = [e for e in events if e["type"] == "token"]
         assert len(tokens) >= 1, f"events={[(e['type'], e.get('content','')[:60]) for e in events]}"
 
+    def test_client_disconnect_closes_stream_without_yielding_done(self, chat_service):
+        llm = FakeLLM(["unused"])
+        llm.provider = "codex"
+        chat_service._default_llm = llm
+        stream = chat_service.stream_chat("close after first event", session_id="disconnect-test")
+
+        assert next(stream)["type"] == "classify"
+        stream.close()
+
     def test_session_memory_persists(self, chat_service):
         chat_service._default_llm = FakeLLM([
             "持仓健康。",

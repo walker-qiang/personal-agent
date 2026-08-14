@@ -7,7 +7,7 @@ from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 
 from ..domain.errors import OperationConflictError
-from ..domain.operations import OperationState, StateTransition
+from ..domain.operations import OperationPhase, OperationState, StateTransition
 
 
 class MemoryOperationStore:
@@ -95,12 +95,42 @@ class MemoryOperationStore:
             return None
         return approval
 
-    def decide_approval(self, owner_id: str, approval_id: str, decision: ApprovalDecision) -> Approval:
+    def resolve_approval(
+        self,
+        owner_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+        decided_at: float,
+        transition: StateTransition,
+    ) -> Approval:
         approval = self.get_approval(owner_id, approval_id)
         if approval is None:
             raise KeyError(approval_id)
-        if approval.status != ApprovalStatus.PENDING:
+        operation = self.operations.get(approval.operation_id)
+        if operation is None or operation.owner_id != owner_id:
+            raise OperationConflictError("approval operation not found or owner mismatch")
+        if transition.new_state.operation_id != operation.operation_id:
+            raise OperationConflictError("approval operation does not match transition")
+        if operation.phase is not OperationPhase.WAITING_APPROVAL:
+            raise OperationConflictError("operation is not waiting for approval")
+        if operation.version != transition.previous_version:
+            raise OperationConflictError(
+                f"operation version conflict: expected {transition.previous_version}, "
+                f"actual {operation.version}"
+            )
+        if approval.status is ApprovalStatus.EXPIRED:
+            return approval
+        if approval.status is not ApprovalStatus.PENDING:
             raise OperationConflictError("approval is no longer pending")
+        if approval.expires_at is not None and approval.expires_at <= decided_at:
+            expired = replace(
+                approval,
+                status=ApprovalStatus.EXPIRED,
+                version=approval.version + 1,
+            )
+            self.approvals[approval_id] = expired
+            return expired
+        self.commit(transition)
         updated = replace(
             approval,
             status=(ApprovalStatus.APPROVED if decision == ApprovalDecision.APPROVE else ApprovalStatus.SKIPPED),

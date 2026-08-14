@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import time
+
 from matrix.runtime.core.runtime import AgentRuntime
+from matrix.runtime.domain.approvals import ApprovalStatus
 from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
-from matrix.runtime.domain.requests import ExecutionOptions, RunRequest
+from matrix.runtime.domain.operations import OperationPhase
+from matrix.runtime.domain.requests import ExecutionOptions, ResumeInput, RunRequest
 from matrix.runtime.domain.results import RunOutcome
-from matrix.runtime.domain.tools import ToolSpec
+from matrix.runtime.domain.tools import RecoveryPolicy, ToolSpec
 from matrix.runtime.ports.model import ModelResponse
 from matrix.runtime.testing.fake_model import FakeModel, tool_call
 from matrix.runtime.testing.fake_tools import FakeToolExecutor
@@ -114,3 +119,115 @@ def test_runtime_retries_transient_model_failure() -> None:
 
     assert result.outcome is RunOutcome.COMPLETED
     assert result.final_message == "ok"
+
+
+def _suspend_for_approval(store: MemoryOperationStore):
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([
+            ModelResponse(
+                tool_calls=(tool_call("call-approval", "lookup", {"q": "x"}),),
+                finish_reason="tool_calls",
+            ),
+        ]),
+        tools=FakeToolExecutor({"lookup": lambda args: {"value": args["q"]}}),
+    )
+    handle = runtime.start(RunRequest(
+        owner_id="user-a",
+        session_id="approval-session",
+        agent_id="assistant",
+        messages=[Message(role="user", content="run lookup")],
+        tools=[ToolSpec(
+            name="lookup",
+            requires_approval=True,
+            recovery_policy=RecoveryPolicy.MANUAL,
+        )],
+    ))
+    result = handle.result()
+    operation = store.load("user-a", handle.operation_id)
+    return handle.operation_id, operation.state["pending_tool_call"]["approval_id"], result
+
+
+def test_approved_resume_uses_effect_journal() -> None:
+    store = MemoryOperationStore()
+    operation_id, approval_id, suspended = _suspend_for_approval(store)
+    tools = FakeToolExecutor({"lookup": lambda args: {"value": args["q"]}})
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([ModelResponse(content="approved")]),
+        tools=tools,
+    )
+
+    handle = runtime.resume(
+        "user-a",
+        operation_id,
+        ResumeInput(
+            kind="approval",
+            decision="approve",
+            payload={"approval_id": approval_id},
+        ),
+    )
+    events = list(handle.events())
+    result = handle.result()
+
+    assert suspended.outcome is RunOutcome.SUSPENDED
+    assert result.outcome is RunOutcome.COMPLETED
+    assert len(tools.requests) == 1
+    assert store.effects[(operation_id, "call-approval")]["status"] == "settled"
+    assert RuntimeEventType.RUN_RESUMED in [event.event_type for event in events]
+    assert RuntimeEventType.TOOL_START in [event.event_type for event in events]
+
+
+def test_skipped_resume_does_not_create_effect() -> None:
+    store = MemoryOperationStore()
+    operation_id, approval_id, _ = _suspend_for_approval(store)
+    tools = FakeToolExecutor({"lookup": lambda args: {"value": args["q"]}})
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([ModelResponse(content="skipped")]),
+        tools=tools,
+    )
+
+    result = runtime.resume(
+        "user-a",
+        operation_id,
+        ResumeInput(
+            kind="approval",
+            decision="skip",
+            payload={"approval_id": approval_id},
+        ),
+    ).result()
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert tools.requests == []
+    assert store.effects == {}
+
+
+def test_expired_approval_aborts_without_executing_tool() -> None:
+    store = MemoryOperationStore()
+    operation_id, approval_id, _ = _suspend_for_approval(store)
+    store.approvals[approval_id] = replace(
+        store.approvals[approval_id], expires_at=time.time() - 1,
+    )
+    tools = FakeToolExecutor({"lookup": lambda args: {"value": args["q"]}})
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([ModelResponse(content="must not run")]),
+        tools=tools,
+    )
+
+    result = runtime.resume(
+        "user-a",
+        operation_id,
+        ResumeInput(
+            kind="approval",
+            decision="approve",
+            payload={"approval_id": approval_id},
+        ),
+    ).result()
+
+    assert result.outcome is RunOutcome.ABORTED
+    assert result.error == "approval expired"
+    assert tools.requests == []
+    assert store.approvals[approval_id].status is ApprovalStatus.EXPIRED
+    assert store.load("user-a", operation_id).phase is OperationPhase.ABORTED

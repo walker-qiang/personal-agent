@@ -206,6 +206,7 @@ def _route_dag_first(state: AgentState):
             "owner_id": state.get("owner_id", "default"),
             "runtime_mode": state.get("runtime_mode", "legacy"),
             "orchestration_run_id": state.get("orchestration_run_id", ""),
+            "agent_results": state.get("agent_results", []),
         })
         for s in ready
     ]
@@ -251,6 +252,7 @@ def _route_after_replan(state: AgentState):
             "owner_id": state.get("owner_id", "default"),
             "runtime_mode": state.get("runtime_mode", "legacy"),
             "orchestration_run_id": state.get("orchestration_run_id", ""),
+            "agent_results": state.get("agent_results", []),
         })
         for s in ready
     ]

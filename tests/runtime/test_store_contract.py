@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from matrix.runtime import AgentRuntime, ResumeInput, RunRequest
+from matrix.runtime.adapters.sqlite_store import SQLiteRuntimeStore
 from matrix.runtime.core.reducer import with_next_phase
+from matrix.runtime.domain.approvals import ApprovalStatus
 from matrix.runtime.domain.errors import OperationConflictError
+from matrix.runtime.domain.messages import Message
 from matrix.runtime.domain.operations import OperationPhase, OperationState, StateTransition
+from matrix.runtime.domain.results import RunOutcome
+from matrix.runtime.domain.tools import RecoveryPolicy, ToolSpec
+from matrix.runtime.ports.model import ModelResponse
+from matrix.runtime.testing.fake_model import FakeModel, tool_call
+from matrix.runtime.testing.fake_tools import FakeToolExecutor
 from matrix.runtime.testing.memory_store import MemoryOperationStore
 
 
@@ -54,3 +65,104 @@ def test_memory_store_lists_only_incomplete_operations() -> None:
     store.create(failed)
 
     assert [item.operation_id for item in store.list_incomplete()] == ["op-1"]
+
+
+def _suspend_sqlite(store: SQLiteRuntimeStore) -> tuple[str, str]:
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([
+            ModelResponse(
+                tool_calls=(tool_call("sqlite-call", "write", {"value": 1}),),
+                finish_reason="tool_calls",
+            ),
+        ]),
+        tools=FakeToolExecutor({"write": lambda args: {"ok": True}}),
+    )
+    handle = runtime.start(RunRequest(
+        owner_id="owner-a",
+        session_id="sqlite-approval",
+        agent_id="assistant",
+        messages=[Message(role="user", content="write")],
+        tools=[ToolSpec(
+            name="write",
+            requires_approval=True,
+            recovery_policy=RecoveryPolicy.MANUAL,
+        )],
+    ))
+    assert handle.result().outcome is RunOutcome.SUSPENDED
+    operation = store.load("owner-a", handle.operation_id)
+    return handle.operation_id, operation.state["pending_tool_call"]["approval_id"]
+
+
+def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> None:
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteRuntimeStore(db_path)
+    operation_id, approval_id = _suspend_sqlite(store)
+    store.close()
+
+    store = SQLiteRuntimeStore(db_path)
+    with pytest.raises(OperationConflictError, match="owner mismatch"):
+        AgentRuntime(store, FakeModel(), FakeToolExecutor()).resume(
+            "owner-b",
+            operation_id,
+            ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+        )
+    tools = FakeToolExecutor({"write": lambda args: {"ok": True}})
+    result = AgentRuntime(
+        store,
+        FakeModel([ModelResponse(content="done")]),
+        tools,
+    ).resume(
+        "owner-a",
+        operation_id,
+        ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+    ).result()
+
+    effect = store._get_conn().execute(
+        "SELECT status, recovery_policy FROM runtime_tool_effects "
+        "WHERE operation_id=? AND tool_call_id=?",
+        (operation_id, "sqlite-call"),
+    ).fetchone()
+    assert result.outcome is RunOutcome.COMPLETED
+    assert len(tools.requests) == 1
+    assert tuple(effect) == ("settled", "manual")
+    assert store.get_approval("owner-a", approval_id).status is ApprovalStatus.APPROVED
+    with pytest.raises(OperationConflictError, match="not waiting"):
+        AgentRuntime(store, FakeModel(), FakeToolExecutor()).resume(
+            "owner-a",
+            operation_id,
+            ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+        )
+    store.close()
+
+
+def test_sqlite_expired_approval_never_executes_effect(tmp_path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime-expired.db")
+    operation_id, approval_id = _suspend_sqlite(store)
+    store._get_conn().execute(
+        "UPDATE runtime_approvals SET expires_at=? WHERE approval_id=?",
+        (time.time() - 1, approval_id),
+    )
+    store._get_conn().commit()
+    tools = FakeToolExecutor({"write": lambda args: {"ok": True}})
+
+    result = AgentRuntime(
+        store,
+        FakeModel([ModelResponse(content="must not run")]),
+        tools,
+    ).resume(
+        "owner-a",
+        operation_id,
+        ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+    ).result()
+
+    effect_count = store._get_conn().execute(
+        "SELECT count(*) FROM runtime_tool_effects WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()[0]
+    assert result.outcome is RunOutcome.ABORTED
+    assert tools.requests == []
+    assert effect_count == 0
+    assert store.get_approval("owner-a", approval_id).status is ApprovalStatus.EXPIRED
+    assert store.load("owner-a", operation_id).phase is OperationPhase.ABORTED
+    store.close()
