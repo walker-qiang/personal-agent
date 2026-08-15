@@ -23,12 +23,11 @@ from matrix.memory.evolution import (
 
 @pytest.fixture
 def store():
-    with Path("/tmp") as _tmp:
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            db_path = Path(d) / "evolution_test.db"
-            s = SessionStore(str(db_path))
-            yield s
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "evolution_test.db"
+        s = SessionStore(str(db_path))
+        yield s
 
 
 @pytest.fixture

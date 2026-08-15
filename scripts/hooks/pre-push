@@ -18,9 +18,25 @@ set -e
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# Always prefer the project environment.  The macOS system Python may be
+# present as `python3`, but it is not guaranteed to contain Matrix's locked
+# dependencies; some machines also do not provide a `python` alias at all.
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+else
+    echo "✗ Python not found. Create .venv or install Python 3.10+." >&2
+    exit 1
+fi
+export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+echo "  Python: $PYTHON_BIN"
+
 # ---- 1. Unit tests (fail-fast) ----
 echo "▶ Running unit tests..."
-python -m pytest tests/ -x -q 2>&1 | tail -5
+"$PYTHON_BIN" -m pytest tests/ -x -q 2>&1 | tail -5
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo ""
     echo "✗ Unit tests failed. Push blocked."
@@ -30,7 +46,7 @@ fi
 
 # ---- 2. Skill format validation ----
 echo "▶ Validating skills..."
-python -m matrix.evaluation.cli check-skills 2>&1
+"$PYTHON_BIN" -m matrix.evaluation.cli check-skills 2>&1
 if [ $? -ne 0 ]; then
     echo ""
     echo "✗ Skill validation failed. Push blocked."

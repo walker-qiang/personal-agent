@@ -334,7 +334,7 @@ class TestPythonToolModule:
         try:
             result = _run_python("print('test')")
             assert result["exit_code"] == -1
-            assert "not initialized" in result["error"]
+            assert "尚未初始化" in result["error"]
         finally:
             pt._executor = original
 

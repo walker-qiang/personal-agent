@@ -22,11 +22,16 @@ rag = [
     "networkx>=3.0",
 ]
 mcp = [
-    "mcp>=1.27.0",
+    "mcp>=1.27.0,<2.0",
 ]
 browser = [
     "playwright>=1.40.0",
-    "mcp>=1.27.0",
+    "mcp>=1.27.0,<2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
 ]
 
 [project.scripts]
