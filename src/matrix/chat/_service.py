@@ -230,6 +230,8 @@ def _parse_chinese_number(value: str) -> int:
 class ChatService:
     """LangGraph-based chat orchestration: classify → react/plan/skill → summarize → reflection."""
 
+    _BRANCH_SUMMARY_MAX_ATTEMPTS = 2
+
     def __init__(
         self,
         config: AgentConfig,
@@ -337,6 +339,9 @@ class ChatService:
         # Runtime state is authoritative in the same SQLite file as sessions,
         # but uses dedicated runtime_* tables and an independent store API.
         self._runtime_store = SQLiteRuntimeStore(config.store_path)
+        self._branch_summary_lock = threading.Lock()
+        self._branch_summary_tasks: set[str] = set()
+        self._recover_branch_summaries()
 
     def __enter__(self) -> "ChatService":
         return self
@@ -473,62 +478,163 @@ class ChatService:
         )
         if not messages:
             return
-        threading.Thread(
-            target=self._generate_branch_summary,
-            args=(session_id, from_message_id, abandoned_leaf_id or "", user_id, messages),
-            daemon=True,
-            name="branch-summary",
-        ).start()
+        abandoned_leaf = abandoned_leaf_id or ""
+        try:
+            entry_id, payload = self._runtime_store.ensure_branch_summary_entry(
+                user_id, session_id, from_message_id, abandoned_leaf, len(messages),
+            )
+            if payload.get("status") == "completed":
+                return
+            if payload.get("status") == "failed":
+                # A new explicit branch request is the user-level retry
+                # boundary; automatic restart recovery keeps the old count.
+                payload["attempts"] = 0
+            payload.update({
+                "status": "scheduled",
+                "error": "",
+                "message_count": len(messages),
+            })
+            if not self._runtime_store.update_session_entry(user_id, entry_id, payload):
+                logger.warning("branch_summary entry missing: %s", entry_id)
+                return
+        except Exception as exc:
+            # The branch has already been committed.  Summary persistence is
+            # best effort and must not turn a successful branch into a 500.
+            logger.warning("branch_summary scheduling persistence failed: %s", exc)
+            return
+        self._enqueue_branch_summary(
+            entry_id, session_id, from_message_id, abandoned_leaf, user_id, messages,
+        )
 
-    def _generate_branch_summary(
+    def _recover_branch_summaries(self) -> None:
+        """Requeue branch summaries left scheduled/running by a restart."""
+        for entry in self._runtime_store.list_pending_session_entries(
+            "branch_summary", ("scheduled", "running"),
+        ):
+            payload = entry["payload"]
+            from_message_id = str(payload.get("from_message_id", "")).strip()
+            abandoned_leaf_id = str(payload.get("abandoned_leaf_id", "")).strip()
+            if not from_message_id or not abandoned_leaf_id:
+                continue
+            messages = self.store.get_abandoned_branch(
+                entry["session_id"], from_message_id, abandoned_leaf_id,
+                user_id=entry["owner_id"],
+            )
+            if messages:
+                self._enqueue_branch_summary(
+                    entry["entry_id"], entry["session_id"], from_message_id,
+                    abandoned_leaf_id, entry["owner_id"], messages,
+                )
+
+    def _enqueue_branch_summary(
         self,
+        entry_id: str,
         session_id: str,
         from_message_id: str,
         abandoned_leaf_id: str,
         user_id: str,
         messages: list[dict[str, str]],
     ) -> None:
-        payload: dict[str, Any] = {
-            "from_message_id": from_message_id,
-            "abandoned_leaf_id": abandoned_leaf_id,
-            "message_count": len(messages),
-            "status": "failed",
-            "summary": "",
-        }
+        with self._branch_summary_lock:
+            if entry_id in self._branch_summary_tasks:
+                return
+            self._branch_summary_tasks.add(entry_id)
+        threading.Thread(
+            target=self._generate_branch_summary,
+            args=(entry_id, session_id, from_message_id, abandoned_leaf_id, user_id, messages),
+            daemon=True,
+            name=f"branch-summary-{entry_id}",
+        ).start()
+
+    def _generate_branch_summary(
+        self,
+        entry_id: str,
+        session_id: str,
+        from_message_id: str,
+        abandoned_leaf_id: str,
+        user_id: str,
+        messages: list[dict[str, str]],
+    ) -> None:
+        payload: dict[str, Any] = {}
         try:
+            entry = self._runtime_store.get_session_entry(user_id, entry_id)
+            payload = dict(entry.get("payload", {})) if entry else {}
+            payload.update({
+                "from_message_id": from_message_id,
+                "abandoned_leaf_id": abandoned_leaf_id,
+                "message_count": len(messages),
+                "status": "running",
+                "started_at": time.time(),
+                "error": "",
+            })
+            if not self._runtime_store.update_session_entry(user_id, entry_id, payload):
+                logger.warning("branch_summary entry missing: %s", entry_id)
+                return
             transcript = "\n".join(
                 f"{item['role']}: {item['content'][:3000]}" for item in messages
             )[:24000]
-            result = self._pipeline_llm.complete_json(
-                """
+            summary_result: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            for attempt in range(self._BRANCH_SUMMARY_MAX_ATTEMPTS):
+                current_attempts = int(payload.get("attempts", 0))
+                if current_attempts >= self._BRANCH_SUMMARY_MAX_ATTEMPTS:
+                    break
+                payload["attempts"] = current_attempts + 1
+                payload["last_attempt_at"] = time.time()
+                if not self._runtime_store.update_session_entry(user_id, entry_id, payload):
+                    raise RuntimeError("branch summary entry disappeared during retry")
+                try:
+                    result = self._pipeline_llm.complete_json(
+                        """
 你负责生成会话分支摘要。请只输出 JSON，不要 Markdown：
 {"summary":"不超过 500 字的中文摘要","key_points":["不超过 5 条"],"unresolved":"未解决问题，没有则为空"}
 摘要只描述用户和助手已经讨论的事实，不要补充推测，不要输出隐式思维链。
 """.strip(),
-                [{"role": "user", "content": transcript}],
-                temperature=0.2,
-            )
-            if not isinstance(result, dict):
-                raise ValueError("branch summary response is not an object")
-            summary = str(result.get("summary", "")).strip()
-            if not summary:
-                raise ValueError("branch summary is empty")
+                        [{"role": "user", "content": transcript}],
+                        temperature=0.2,
+                    )
+                    if not isinstance(result, dict):
+                        raise ValueError("branch summary response is not an object")
+                    summary = str(result.get("summary", "")).strip()
+                    if not summary:
+                        raise ValueError("branch summary is empty")
+                    summary_result = {
+                        "summary": summary[:2000],
+                        "key_points": [str(item)[:300] for item in result.get("key_points", [])][:5]
+                        if isinstance(result.get("key_points", []), list) else [],
+                        "unresolved": str(result.get("unresolved", ""))[:500],
+                    }
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt + 1 < self._BRANCH_SUMMARY_MAX_ATTEMPTS:
+                        logger.warning(
+                            "branch_summary retry entry=%s attempt=%d error=%s",
+                            entry_id, attempt + 1, exc,
+                        )
+                        time.sleep(0.5)
+            if summary_result is None:
+                raise last_error or ValueError("branch summary attempts exhausted")
             payload.update({
                 "status": "completed",
-                "summary": summary[:2000],
-                "key_points": [str(item)[:300] for item in result.get("key_points", [])][:5]
-                if isinstance(result.get("key_points", []), list) else [],
-                "unresolved": str(result.get("unresolved", ""))[:500],
+                **summary_result,
+                "completed_at": time.time(),
             })
         except Exception as exc:
             logger.warning("branch_summary failed: %s", exc)
-            payload["error"] = str(exc)[:300]
-        try:
-            self._runtime_store.append_session_entry(
-                user_id, session_id, "branch_summary", payload,
-            )
-        except Exception as exc:
-            logger.warning("branch_summary persistence failed: %s", exc)
+            payload.update({
+                "status": "failed",
+                "error": str(exc)[:300],
+                "failed_at": time.time(),
+            })
+        finally:
+            try:
+                if not self._runtime_store.update_session_entry(user_id, entry_id, payload):
+                    logger.warning("branch_summary entry missing: %s", entry_id)
+            except Exception as exc:
+                logger.warning("branch_summary persistence failed: %s", exc)
+            with self._branch_summary_lock:
+                self._branch_summary_tasks.discard(entry_id)
 
     def _load_file_content(self, file_id: str) -> str | dict[str, Any]:
         """Load uploaded file content for injection into chat messages.

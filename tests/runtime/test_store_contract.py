@@ -166,3 +166,28 @@ def test_sqlite_expired_approval_never_executes_effect(tmp_path) -> None:
     assert store.get_approval("owner-a", approval_id).status is ApprovalStatus.EXPIRED
     assert store.load("owner-a", operation_id).phase is OperationPhase.ABORTED
     store.close()
+
+
+def test_sqlite_branch_summary_entry_is_idempotent_and_status_filtered(tmp_path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "branch-summary.db")
+
+    entry_id, payload = store.ensure_branch_summary_entry(
+        "owner-a", "session-a", "from-1", "leaf-1", 2,
+    )
+    duplicate_id, duplicate_payload = store.ensure_branch_summary_entry(
+        "owner-a", "session-a", "from-1", "leaf-1", 99,
+    )
+
+    assert duplicate_id == entry_id
+    assert duplicate_payload["message_count"] == 2
+    assert payload["status"] == "scheduled"
+    assert [item["entry_id"] for item in store.list_pending_session_entries(
+        "branch_summary", ("scheduled", "running"),
+    )] == [entry_id]
+
+    payload["status"] = "completed"
+    assert store.update_session_entry("owner-a", entry_id, payload)
+    assert store.list_pending_session_entries(
+        "branch_summary", ("scheduled", "running"),
+    ) == []
+    store.close()

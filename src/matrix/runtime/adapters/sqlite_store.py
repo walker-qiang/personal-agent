@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -329,6 +330,134 @@ class SQLiteRuntimeStore:
             )
             conn.commit()
         return entry_id
+
+    def ensure_branch_summary_entry(
+        self,
+        owner_id: str,
+        session_id: str,
+        from_message_id: str,
+        abandoned_leaf_id: str,
+        message_count: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Create or find the durable entry for one abandoned branch.
+
+        The branch identity is stable, so repeated requests for the same
+        fork reuse one entry instead of scheduling duplicate summaries.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT entry_id, payload_json FROM session_entries "
+                "WHERE owner_id=? AND session_id=? AND entry_type='branch_summary'",
+                (owner_id, session_id),
+            ).fetchall()
+            for row in rows:
+                try:
+                    existing = json.loads(row[1] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("from_message_id") == from_message_id
+                    and existing.get("abandoned_leaf_id") == abandoned_leaf_id
+                ):
+                    return row[0], existing
+
+            identity = "\x1f".join((owner_id, session_id, from_message_id, abandoned_leaf_id))
+            entry_id = "bs_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+            payload = {
+                "from_message_id": from_message_id,
+                "abandoned_leaf_id": abandoned_leaf_id,
+                "message_count": message_count,
+                "status": "scheduled",
+                "summary": "",
+                "key_points": [],
+                "unresolved": "",
+                "attempts": 0,
+            }
+            parent = conn.execute(
+                "SELECT entry_id FROM session_entries WHERE owner_id=? AND session_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (owner_id, session_id),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO session_entries(entry_id, owner_id, session_id, parent_entry_id, "
+                "entry_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry_id, owner_id, session_id, parent[0] if parent else None,
+                    "branch_summary", json.dumps(payload, ensure_ascii=False), time.time(),
+                ),
+            )
+            conn.commit()
+            return entry_id, payload
+
+    def get_session_entry(self, owner_id: str, entry_id: str) -> dict[str, Any] | None:
+        """Read one internal session entry owned by the caller."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT entry_id, entry_type, payload_json, created_at "
+                "FROM session_entries WHERE owner_id=? AND entry_id=?",
+                (owner_id, entry_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row[2] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        return {
+            "entry_id": row[0],
+            "entry_type": row[1],
+            "payload": payload if isinstance(payload, dict) else {},
+            "created_at": float(row[3]),
+        }
+
+    def update_session_entry(
+        self, owner_id: str, entry_id: str, payload: dict[str, Any],
+    ) -> bool:
+        """Replace one internal session entry payload atomically."""
+        with self._lock:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "UPDATE session_entries SET payload_json=? "
+                "WHERE owner_id=? AND entry_id=?",
+                (json.dumps(payload, ensure_ascii=False, default=str), owner_id, entry_id),
+            )
+            conn.commit()
+        return cur.rowcount == 1
+
+    def list_pending_session_entries(
+        self, entry_type: str, statuses: tuple[str, ...], limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List internal entries that need process-restart recovery."""
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        bounded_limit = max(1, min(limit, 500))
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT entry_id, owner_id, session_id, payload_json, created_at "
+                "FROM session_entries WHERE entry_type=? "
+                f"AND json_extract(payload_json, '$.status') IN ({placeholders}) "
+                "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                (entry_type, *statuses, bounded_limit),
+            ).fetchall()
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row[3] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("status") not in statuses:
+                continue
+            entries.append({
+                "entry_id": row[0],
+                "owner_id": row[1],
+                "session_id": row[2],
+                "payload": payload,
+                "created_at": float(row[4]),
+            })
+        return entries
 
     def list_session_entries(
         self,

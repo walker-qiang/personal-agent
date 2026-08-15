@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,54 @@ class TestChat:
         text = resp.text
         assert text.startswith("event: ")
         assert "event: done" in text
+
+    def test_branch_summary_http_flow(self, client, auth_token):
+        class BranchSummaryLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, system, messages, **kwargs):
+                self.calls += 1
+                return {
+                    "summary": "旧分支讨论了测试事实。",
+                    "key_points": ["测试事实"],
+                    "unresolved": "",
+                }
+
+        chat = client.app.state.chat
+        llm = BranchSummaryLLM()
+        chat._pipeline_llm = llm
+        session_id = "http-branch-summary"
+        from_message_id = chat.store.save_message(
+            session_id, "user", "分叉起点", user_id="admin",
+        )
+        abandoned_leaf_id = chat.store.save_message(
+            session_id, "assistant", "旧分支内容", user_id="admin",
+        )
+
+        response = client.post(
+            f"/sessions/{session_id}/branch",
+            json={"from_message_id": from_message_id},
+            headers=_auth_headers(auth_token),
+        )
+        assert response.status_code == 200
+        assert response.json()["summary_scheduled"] is True
+
+        summaries = []
+        for _ in range(100):
+            response = client.get(
+                f"/sessions/{session_id}/branch-summaries",
+                headers=_auth_headers(auth_token),
+            )
+            assert response.status_code == 200
+            summaries = response.json()["summaries"]
+            if summaries and summaries[0]["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+        assert len(summaries) == 1
+        assert summaries[0]["summary"] == "旧分支讨论了测试事实。"
+        assert llm.calls == 1
 
 
 class TestReset:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -228,3 +229,65 @@ class TestChatService:
         tool_calls = [e for e in events if e["type"] == "tool_call"]
         assert len(tool_calls) >= 1, "Should have tool_call events"
         assert len(tokens) >= 1, "Should have streaming token events"
+
+    def test_branch_summary_is_idempotent_and_recovered(self, chat_service):
+        session_id = "branch-summary-recovery"
+        user_id = "branch-user"
+        from_message_id = chat_service.store.save_message(
+            session_id, "user", "分叉起点", user_id=user_id,
+        )
+        abandoned_leaf_id = chat_service.store.save_message(
+            session_id, "assistant", "旧分支内容", user_id=user_id,
+        )
+        chat_service._pipeline_llm = FakeLLM([
+            {"summary": "旧分支讨论了一个事实。", "key_points": ["事实"], "unresolved": ""},
+        ])
+
+        entry_id, _ = chat_service._runtime_store.ensure_branch_summary_entry(
+            user_id, session_id, from_message_id, abandoned_leaf_id, 1,
+        )
+        chat_service._recover_branch_summaries()
+        for _ in range(100):
+            entry = chat_service._runtime_store.get_session_entry(user_id, entry_id)
+            if entry and entry["payload"].get("status") == "completed":
+                break
+            time.sleep(0.01)
+
+        assert entry is not None
+        assert entry["payload"]["status"] == "completed"
+        assert len(chat_service._pipeline_llm.calls) == 1
+        chat_service._recover_branch_summaries()
+        assert len(chat_service._runtime_store.list_session_entries(
+            user_id, session_id, entry_type="branch_summary",
+        )) == 1
+
+    def test_branch_summary_retries_and_persists_failure(self, chat_service):
+        class AlwaysFailLLM(FakeLLM):
+            def complete_json(self, system, messages, schema=None, **kwargs):
+                self.calls.append(("complete_json", messages))
+                raise RuntimeError("temporary model failure")
+
+        session_id = "branch-summary-failure"
+        user_id = "branch-user"
+        from_message_id = chat_service.store.save_message(
+            session_id, "user", "分叉起点", user_id=user_id,
+        )
+        abandoned_leaf_id = chat_service.store.save_message(
+            session_id, "assistant", "旧分支内容", user_id=user_id,
+        )
+        entry_id, _ = chat_service._runtime_store.ensure_branch_summary_entry(
+            user_id, session_id, from_message_id, abandoned_leaf_id, 1,
+        )
+        chat_service._pipeline_llm = AlwaysFailLLM([])
+
+        chat_service._generate_branch_summary(
+            entry_id, session_id, from_message_id, abandoned_leaf_id,
+            user_id, [{"role": "assistant", "content": "旧分支内容"}],
+        )
+
+        entry = chat_service._runtime_store.get_session_entry(user_id, entry_id)
+        assert entry is not None
+        assert entry["payload"]["status"] == "failed"
+        assert entry["payload"]["attempts"] == 2
+        assert "temporary model failure" in entry["payload"]["error"]
+        assert len(chat_service._pipeline_llm.calls) == 2
