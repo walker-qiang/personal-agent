@@ -3,6 +3,8 @@
 > 基于 7 Phase 实现后的差距评估，针对 5 个未完全达标的 Phase 制定后续优化方案。
 > 按"投入小、收益大"优先排序。
 
+> **阶段更新（2026-08-15）**：在完成上述 Phase 收尾后，已补充 Runtime 状态与审批历史查询闭环，作为 Agent 可观测性增强，不改变 Runtime 与 LangGraph 的依赖边界。
+
 ## 总览
 
 ```
@@ -175,11 +177,11 @@ def holdings_summary(cache_path: str = "") -> dict[str, Any]:
 
 ## Fix 3: 事件系统迁移完成（Phase 6 遗留）
 
-> **实现状态（2026-07-29）**：尚未执行 ❌。`_push_event` 仍 put `(string, dict)` tuple 到 queue，`events.py` 定义的 13 种结构化事件未被激活。
+> **实现状态（2026-08-15）**：已完成 ✅。编排节点和 Runtime adapter 现在将结构化事件对象直接写入 queue，SSE 适配层统一通过 `to_dict()` 消费；保留 tuple 读取兼容逻辑，便于旧扩展平滑迁移。
 
 ### 问题
 
-`events.py` 定义了 13 种结构化事件，`make_event()` 工厂函数写了，但实际系统行为零变化 — `_push_event` 仍然 put `(string, dict)` 元组到 queue，SSE 序列化仍然用字符串。
+`events.py` 定义了 13 种结构化事件。此前 `_push_event` 仍然把 `(string, dict)` 元组写入 queue，导致结构化事件只停留在影子层；现在 queue 的内部写入已经统一为结构化事件对象，SSE 适配层仍输出兼容的事件字典。
 
 ### 设计
 
@@ -242,15 +244,15 @@ def _drain_queue(q, emitted):
 
 **诚实评估**：迁移的价值主要是类型安全 — 防止 typo 产生未知事件类型。当前字符串方式在实际运行中没有出过问题。如果优先级不高，可以 defer。
 
-**建议**：做 Step A（后端内部迁移），因为改动小（3 个文件），不影响前端，且能激活 `events.py` 的价值。不做 Step B（不需要做）。
+**实现结果**：已完成 Step A（后端内部迁移），没有改动 SSE 协议和前端消费方式；旧 tuple 仍可被 `_drain_queue` 读取。
 
 ### 改动范围
 
 | 文件 | 改动 |
 |------|------|
 | `src/matrix/orchestration/nodes/_helpers.py` | `_push_event` 改为 put dataclass |
-| `src/matrix/chat/_utils.py` | `_drain_queue` 改为处理 dataclass + 兼容 tuple |
-| `src/matrix/chat/_service.py` | `_emit_agent_events` / `_emit_tool_events` 同上 |
+| `src/matrix/orchestration/runtime_adapter.py` | Runtime tool event 改为 put dataclass |
+| `src/matrix/chat/_utils.py` | `_drain_queue` 处理 dataclass + 兼容 tuple |
 
 ---
 
@@ -386,3 +388,51 @@ def load_project_context_files(cwd: Path | None = None) -> list[tuple[Path, str]
 | Fix 2: tool_error 落地 | 小（5-6 文件改错误路径） | 中（模型纠错能力提升） | 紧跟做 |
 | Fix 3: 事件迁移 | 中（3 文件改事件流） | 低（类型安全，当前无 bug） | 按需做 |
 | Fix 4: 前端集成 | 中大（后端小改 + 前端 100+ 行 JS） | 高（用户可用 branch 功能） | 单独规划 |
+
+## 阶段 8：Runtime 状态与审批历史查询
+
+> **实现状态（2026-08-15）：已完成 ✅**
+
+Runtime 的 durable snapshot、approval 和 event 已经可以按当前用户、会话和状态查询，供调试和 UI 恢复使用。查询层只返回用户可见字段，不暴露 owner_id 或完整 Runtime state 快照。
+
+### 接口
+
+    GET /api/runtime/operations?session_id=&phase=&limit=
+    GET /api/runtime/approvals?session_id=&status=&limit=
+    GET /api/runtime/operations/{operation_id}/events?limit=
+
+personal-os 通过 /api/agent/runtime/* 代理这些只读接口；macOS App 在 AI 助理侧栏展示当前会话最近的 Runtime phase 和审批记录数量。原始隐式思维链仍不落盘，DebugTrace 仍只属于当前运行。
+
+### 设计约束
+
+- Store 查询必须带 owner_id，会话过滤在 SQLite JOIN 内完成。
+- operation/approval 的创建与恢复流程不改变，查询只读，不参与状态转移。
+- Runtime 只依赖自己的 domain/ports；HTTP 路由依赖 Runtime store，但 Runtime 不反向依赖 FastAPI、LangGraph 或 Agent Registry。
+
+## 阶段 9：macOS 会话分支入口
+
+> **实现状态（2026-08-15）：已完成 ✅**
+
+会话树后端原有的 branch 能力已接入当前主 UI（macOS App）：历史消息保留 `message_id`，用户可在消息上下文菜单选择“从此消息分叉”，分叉后重新读取当前 leaf。personal-os 同步代理 POST `/api/agent/sessions/{session_id}/branch`。
+
+本阶段只复用现有 append-only 会话树，不在同步 branch 请求中生成摘要、不删除旧分支，也不改 Runtime 或 LangGraph 边界；异步摘要随后作为阶段 10 独立实现。
+
+## 阶段 10：分支摘要
+
+> **实现状态（2026-08-15）：已完成 ✅**
+
+分支切换后，SessionStore 先识别被放弃分支的消息范围；ChatService 再通过后台 Pipeline LLM 生成摘要。摘要生成不阻塞分支切换，失败会以失败状态写入 `session_entries`，并保留可诊断错误。
+
+### 接口与展示
+
+```text
+GET /sessions/{session_id}/branch-summaries
+```
+
+摘要以 `branch_summary` entry 保存，仅持久化摘要、关键点、未解决问题和分支标识，不持久化模型原始隐式思维链。macOS App 在 AI 助理侧栏展示最近成功的分支摘要。
+
+### 边界
+
+- 分支切换仍是 append-only，不删除或覆盖旧消息。
+- 摘要生成失败不回滚 leaf，也不阻塞下一轮对话。
+- 摘要功能位于 Session/Chat 应用层，不进入独立 Runtime 核心，不引入对 LangGraph 的反向依赖。

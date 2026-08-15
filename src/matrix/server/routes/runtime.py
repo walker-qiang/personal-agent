@@ -1,0 +1,108 @@
+"""Read-only Runtime status and approval history endpoints."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from ...runtime.domain.approvals import Approval
+from ...runtime.domain.operations import OperationState
+
+router = APIRouter(prefix="/api/runtime", tags=["runtime"])
+
+
+def _store(request: Request):
+    return request.app.state.runtime_store
+
+
+@router.get("/operations")
+async def list_operations(
+    request: Request,
+    session_id: str | None = Query(None),
+    phase: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List Runtime operation snapshots owned by the authenticated user."""
+    operations = _store(request).list_operations(
+        _user_id(request), session_id=session_id, phase=phase, limit=limit,
+    )
+    return {"operations": [_operation_dict(operation) for operation in operations]}
+
+
+@router.get("/approvals")
+async def list_approvals(
+    request: Request,
+    session_id: str | None = Query(None),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List approval history owned by the authenticated user."""
+    store = _store(request)
+    approvals = store.list_approvals(
+        _user_id(request), session_id=session_id, status=status, limit=limit,
+    )
+    return {
+        "approvals": [
+            _approval_dict(approval, store.load(_user_id(request), approval.operation_id))
+            for approval in approvals
+        ]
+    }
+
+
+@router.get("/operations/{operation_id}/events")
+async def operation_events(
+    request: Request,
+    operation_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Return ordered durable events for one user-owned operation."""
+    store = _store(request)
+    operation = store.load(_user_id(request), operation_id)
+    if operation is None:
+        raise HTTPException(status_code=404, detail="runtime operation not found")
+    return {
+        "operation_id": operation_id,
+        "events": [
+            {key: value for key, value in event.to_dict().items() if key != "owner_id"}
+            for event in store.list_events(_user_id(request), operation_id, limit=limit)
+        ],
+    }
+
+
+def _user_id(request: Request) -> str:
+    return getattr(request.state, "user_id", "default")
+
+
+def _operation_dict(operation: OperationState) -> dict:
+    return {
+        "operation_id": operation.operation_id,
+        "session_id": operation.session_id,
+        "agent_id": operation.agent_id,
+        "orchestration_run_id": operation.orchestration_run_id,
+        "operation_scope": operation.operation_scope,
+        "step_id": operation.step_id,
+        "phase": operation.phase.value,
+        "turn_index": operation.turn_index,
+        "version": operation.version,
+        "last_event_sequence": operation.last_event_sequence,
+        "created_at": operation.created_at,
+        "updated_at": operation.updated_at,
+        "terminal": operation.is_terminal,
+    }
+
+
+def _approval_dict(approval: Approval, operation: OperationState | None) -> dict:
+    return {
+        "approval_id": approval.approval_id,
+        "operation_id": approval.operation_id,
+        "session_id": operation.session_id if operation else "",
+        "tool_call_id": approval.tool_call_id,
+        "tool_name": approval.tool_name,
+        "sanitized_arguments": approval.sanitized_arguments,
+        "risk": approval.risk,
+        "status": approval.status.value,
+        "decision": approval.decision.value if approval.decision else None,
+        "expires_at": approval.expires_at,
+        "version": approval.version,
+        "created_at": approval.created_at,
+        "updated_at": approval.updated_at,
+    }

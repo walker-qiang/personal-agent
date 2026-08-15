@@ -20,12 +20,33 @@ class AgentEvent:
     """Base event type."""
     type: str
     timestamp: float = field(default_factory=time.time)
+    _legacy_payload: dict[str, Any] = field(
+        default_factory=dict, init=False, repr=False, compare=False,
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for SSE/JSON transport."""
         d = asdict(self)
         # Remove None values to keep payload compact
         return {k: v for k, v in d.items() if v is not None}
+
+    def __getitem__(self, index: int) -> Any:
+        """Expose the historical ``(type, payload)`` indexing shape.
+
+        Internal queues now carry structured events, but a few integrations
+        still inspect queued values as tuples.  Keeping this read-only bridge
+        makes that migration incremental without changing the SSE contract.
+        """
+        if index == 0:
+            return self.type
+        if index == 1:
+            if self._legacy_payload:
+                return dict(self._legacy_payload)
+            payload = self.to_dict()
+            payload.pop("type", None)
+            payload.pop("timestamp", None)
+            return payload
+        raise IndexError(index)
 
 
 # ---- Layer 1: Agent lifecycle ----
@@ -133,6 +154,22 @@ class ReplanEvent(AgentEvent):
     attempt: int = 0
 
 
+@dataclass
+class DebugTraceEvent(AgentEvent):
+    """Ephemeral diagnostic data for the current Runtime execution."""
+    type: str = "debug_trace"
+    operation_id: str = ""
+    event: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConfirmRequiredEvent(AgentEvent):
+    """A side-effecting action is waiting for user approval."""
+    type: str = "confirm_required"
+    actions: list[dict[str, Any]] = field(default_factory=list)
+    session_id: str = ""
+
+
 # ---- Union type ----
 
 AgentSessionEvent = (
@@ -142,6 +179,7 @@ AgentSessionEvent = (
     ToolCallEvent | ToolResultEvent |
     ProgressEvent |
     PlanCreatedEvent | StepStartEvent | StepDoneEvent | StepErrorEvent | ReplanEvent
+    | DebugTraceEvent | ConfirmRequiredEvent
 )
 
 
@@ -181,9 +219,23 @@ def make_event(event_type: str, payload: dict[str, Any]) -> AgentSessionEvent:
         ),
         "step_error": lambda p: StepErrorEvent(step=p.get("step", 0), error=p.get("error", "")),
         "replan": lambda p: ReplanEvent(reason=p.get("reason", ""), attempt=p.get("attempt", 0)),
+        "debug_trace": lambda p: DebugTraceEvent(
+            operation_id=p.get("operation_id", ""), event=p.get("event", {}),
+        ),
+        "confirm_required": lambda p: ConfirmRequiredEvent(
+            actions=p.get("actions", []), session_id=p.get("session_id", ""),
+        ),
     }
     factory = factories.get(event_type)
     if factory:
-        return factory(payload)
-    # Unknown event type: wrap in base AgentEvent
-    return AgentEvent(type=event_type)
+        event = factory(payload)
+        # Keep the original payload for older integrations that inspect the
+        # queue using the historical (event_type, payload) shape.  Typed
+        # consumers use the dataclass fields and to_dict() instead.
+        event._legacy_payload = dict(payload)
+        return event
+    # Unknown event type: wrap in base AgentEvent while retaining its payload
+    # for the compatibility adapter and future event-specific consumers.
+    event = AgentEvent(type=event_type)
+    event._legacy_payload = dict(payload)
+    return event

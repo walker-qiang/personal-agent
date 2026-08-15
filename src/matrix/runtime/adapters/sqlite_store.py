@@ -102,6 +102,31 @@ class SQLiteRuntimeStore:
             ).fetchall()
         return [_operation_from_row(row) for row in rows]
 
+    def list_operations(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        phase: str | None = None,
+        limit: int = 50,
+    ) -> list[OperationState]:
+        clauses = ["owner_id=?"]
+        params: list[Any] = [owner_id]
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(session_id)
+        if phase:
+            clauses.append("phase=?")
+            params.append(phase)
+        params.append(max(1, min(limit, 200)))
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT * FROM runtime_operations WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [_operation_from_row(row) for row in rows]
+
     def has_active(self, owner_id: str, session_id: str) -> bool:
         row = self._get_conn().execute(
             """SELECT 1 FROM runtime_operations
@@ -125,10 +150,16 @@ class SQLiteRuntimeStore:
         return _operation_from_row(row) if row else None
 
     def events(self, owner_id: str, operation_id: str) -> list[RuntimeEvent]:
+        return self.list_events(owner_id, operation_id)
+
+    def list_events(
+        self, owner_id: str, operation_id: str, limit: int = 200,
+    ) -> list[RuntimeEvent]:
         with self._lock:
             rows = self._get_conn().execute(
-                "SELECT * FROM runtime_events WHERE owner_id=? AND operation_id=? ORDER BY sequence",
-                (owner_id, operation_id),
+                "SELECT * FROM runtime_events WHERE owner_id=? AND operation_id=? "
+                "ORDER BY sequence LIMIT ?",
+                (owner_id, operation_id, max(1, min(limit, 1000))),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 
@@ -159,6 +190,32 @@ class SQLiteRuntimeStore:
                 (owner_id, approval_id),
             ).fetchone()
         return _approval_from_row(row) if row else None
+
+    def list_approvals(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Approval]:
+        clauses = ["a.owner_id=?"]
+        params: list[Any] = [owner_id]
+        if session_id:
+            clauses.append("o.session_id=?")
+            params.append(session_id)
+        if status:
+            clauses.append("a.status=?")
+            params.append(status)
+        params.append(max(1, min(limit, 200)))
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT a.* FROM runtime_approvals a "
+                "JOIN runtime_operations o ON o.operation_id=a.operation_id "
+                "WHERE " + " AND ".join(clauses)
+                + " ORDER BY a.updated_at DESC, a.created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [_approval_from_row(row) for row in rows]
 
     def resolve_approval(
         self,
@@ -272,6 +329,38 @@ class SQLiteRuntimeStore:
             )
             conn.commit()
         return entry_id
+
+    def list_session_entries(
+        self,
+        owner_id: str,
+        session_id: str,
+        entry_type: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read user-owned session entries without exposing owner_id."""
+        clauses = ["owner_id=?", "session_id=?"]
+        params: list[Any] = [owner_id, session_id]
+        if entry_type:
+            clauses.append("entry_type=?")
+            params.append(entry_type)
+        params.append(max(1, min(limit, 100)))
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT entry_id, entry_type, payload_json, created_at "
+                "FROM session_entries WHERE " + " AND ".join(clauses)
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                params,
+            ).fetchall()
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row[2] or "{}")
+            entries.append({
+                "entry_id": row[0],
+                "entry_type": row[1],
+                "payload": payload if isinstance(payload, dict) else {},
+                "created_at": float(row[3]),
+            })
+        return entries
 
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:
         with self._lock:
@@ -399,6 +488,7 @@ def _operation_from_row(row: sqlite3.Row) -> OperationState:
         version=int(row["version"]), state_schema_version=int(row["state_schema_version"]),
         last_event_sequence=int(row["last_event_sequence"]),
         state=json.loads(row["state_json"] or "{}"),
+        created_at=float(row["created_at"]), updated_at=float(row["updated_at"]),
     )
 
 
@@ -419,4 +509,5 @@ def _approval_from_row(row: sqlite3.Row) -> Approval:
         risk=row["risk"], status=ApprovalStatus(row["status"]),
         decision=ApprovalDecision(row["decision"]) if row["decision"] else None,
         expires_at=row["expires_at"], version=int(row["version"]),
+        created_at=float(row["created_at"]), updated_at=float(row["updated_at"]),
     )

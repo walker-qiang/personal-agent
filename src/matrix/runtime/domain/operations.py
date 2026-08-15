@@ -48,6 +48,11 @@ class OperationState:
     orchestration_run_id: str = ""
     operation_scope: str = "top_level"
     step_id: str = ""
+    # Persistence metadata is populated when a snapshot is loaded from the
+    # durable store. Runtime callers can leave these at zero when creating a
+    # new operation.
+    created_at: float = 0.0
+    updated_at: float = 0.0
 
     @property
     def is_terminal(self) -> bool:

@@ -27,6 +27,7 @@ from langgraph.types import RunnableConfig
 
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
+from ..events import make_event
 
 # ── Re-exports from split modules ────────────────────────────────────────────
 
@@ -756,14 +757,14 @@ def _run_budget_and_compact(
 def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> None:
     """Push a real-time event to the SSE queue if available.
 
-    Creates a structured AgentSessionEvent internally for type safety,
-    but puts (evt_type, payload) tuple on the queue for backward
-    compatibility with SSE consumers.
+    The orchestration boundary accepts the historical string/payload shape,
+    but the queue itself carries structured events.  This keeps event typing
+    consistent from the node layer through the SSE adapter.
     """
     q = cfg.get("event_queue")
     if q is not None:
         try:
-            q.put_nowait((evt_type, payload))
+            q.put_nowait(make_event(evt_type, payload))
         except queue.Full:
             logger.warning("event_queue full: dropping %s event", evt_type)
 

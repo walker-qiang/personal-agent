@@ -520,6 +520,49 @@ class SessionStore:
             conn.commit()
             return True
 
+    def get_abandoned_branch(
+        self,
+        session_id: str,
+        from_message_id: str,
+        leaf_id: str | None,
+        user_id: str = "",
+        max_messages: int = 24,
+    ) -> list[dict[str, str]]:
+        """Return messages between a previous leaf and a branch point.
+
+        The branch point itself is excluded. An empty result means the old
+        leaf was already at the branch point or the point is not an ancestor
+        of that leaf.
+        """
+        if not leaf_id or leaf_id == from_message_id:
+            return []
+        with self._lock:
+            conn = self._get_conn()
+            current = leaf_id
+            path: list[dict[str, str]] = []
+            while current and len(path) < max_messages:
+                sql = (
+                    "SELECT message_id, parent_id, role, content FROM messages "
+                    "WHERE message_id=? AND session_id=?"
+                )
+                params: tuple[Any, ...] = (current, session_id)
+                if user_id:
+                    sql += " AND user_id=?"
+                    params += (user_id,)
+                row = conn.execute(sql, params).fetchone()
+                if row is None:
+                    return []
+                if row[0] == from_message_id:
+                    path.reverse()
+                    return path
+                path.append({
+                    "message_id": row[0],
+                    "role": row[2],
+                    "content": row[3],
+                })
+                current = row[1]
+            return []
+
     def get_leaf_id(self, session_id: str, user_id: str = "") -> str | None:
         """Return the current leaf_id for a session."""
         with self._lock:

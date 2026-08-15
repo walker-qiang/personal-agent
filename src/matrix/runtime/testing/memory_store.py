@@ -62,6 +62,42 @@ class MemoryOperationStore:
     def list_incomplete(self) -> list[OperationState]:
         return [operation for operation in self.operations.values() if not operation.is_terminal]
 
+    def list_operations(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        phase: str | None = None,
+        limit: int = 50,
+    ) -> list[OperationState]:
+        values = [
+            operation for operation in self.operations.values()
+            if operation.owner_id == owner_id
+            and (session_id is None or operation.session_id == session_id)
+            and (phase is None or operation.phase.value == phase)
+        ]
+        values.sort(key=lambda operation: operation.updated_at, reverse=True)
+        return values[:limit]
+
+    def list_approvals(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Approval]:
+        values = [
+            approval for approval in self.approvals.values()
+            if approval.owner_id == owner_id
+            and (status is None or approval.status.value == status)
+            and (
+                session_id is None
+                or self.operations.get(approval.operation_id) is not None
+                and self.operations[approval.operation_id].session_id == session_id
+            )
+        ]
+        values.sort(key=lambda approval: approval.updated_at, reverse=True)
+        return values[:limit]
+
     def has_active(self, owner_id: str, session_id: str) -> bool:
         return any(
             operation.owner_id == owner_id
@@ -83,6 +119,12 @@ class MemoryOperationStore:
 
     def event_list(self, operation_id: str) -> list[object]:
         return list(self.events.get(operation_id, []))
+
+    def list_events(self, owner_id: str, operation_id: str, limit: int = 200) -> list[object]:
+        operation = self.operations.get(operation_id)
+        if operation is None or operation.owner_id != owner_id:
+            return []
+        return list(self.events.get(operation_id, []))[:limit]
 
     def create_approval(self, approval: Approval) -> None:
         if approval.approval_id in self.approvals:

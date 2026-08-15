@@ -119,6 +119,18 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
                     "reason": evt_data.get("reason", ""),
                     "attempt": evt_data.get("attempt", 0),
                 }
+            elif evt_type == "debug_trace":
+                yield {
+                    "type": "debug_trace",
+                    "operation_id": evt_data.get("operation_id", ""),
+                    "event": evt_data.get("event", {}),
+                }
+            elif evt_type == "confirm_required":
+                yield {
+                    "type": "confirm_required",
+                    "actions": evt_data.get("actions", []),
+                    "session_id": evt_data.get("session_id", ""),
+                }
         except queue.Empty:
             break
 

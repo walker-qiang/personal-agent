@@ -6,6 +6,7 @@ from typing import Protocol
 
 from ..domain.operations import OperationState, StateTransition
 from ..domain.approvals import Approval, ApprovalDecision
+from ..domain.events import RuntimeEvent
 from ..domain.tools import ToolRequest, ToolResult, RecoveryPolicy
 
 
@@ -20,6 +21,32 @@ class OperationStorePort(Protocol):
         ...
 
     def list_incomplete(self) -> list[OperationState]:
+        ...
+
+    def list_operations(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        phase: str | None = None,
+        limit: int = 50,
+    ) -> list[OperationState]:
+        ...
+
+    def list_approvals(
+        self,
+        owner_id: str,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[Approval]:
+        ...
+
+    def list_events(
+        self,
+        owner_id: str,
+        operation_id: str,
+        limit: int = 200,
+    ) -> list[RuntimeEvent]:
         ...
 
     def has_active(self, owner_id: str, session_id: str) -> bool:

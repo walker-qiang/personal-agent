@@ -452,6 +452,84 @@ class ChatService:
             return self.store.reset(session_id, user_id=user_id)
         return True
 
+    def schedule_branch_summary(
+        self,
+        session_id: str,
+        from_message_id: str,
+        abandoned_leaf_id: str | None,
+        user_id: str = "default",
+    ) -> None:
+        """Generate a best-effort summary after a branch switch.
+
+        Branch switching remains synchronous and append-only. Summary
+        generation is deliberately detached so an unavailable model cannot
+        block the user's next turn.
+        """
+        messages = self.store.get_abandoned_branch(
+            session_id,
+            from_message_id,
+            abandoned_leaf_id,
+            user_id=user_id,
+        )
+        if not messages:
+            return
+        threading.Thread(
+            target=self._generate_branch_summary,
+            args=(session_id, from_message_id, abandoned_leaf_id or "", user_id, messages),
+            daemon=True,
+            name="branch-summary",
+        ).start()
+
+    def _generate_branch_summary(
+        self,
+        session_id: str,
+        from_message_id: str,
+        abandoned_leaf_id: str,
+        user_id: str,
+        messages: list[dict[str, str]],
+    ) -> None:
+        payload: dict[str, Any] = {
+            "from_message_id": from_message_id,
+            "abandoned_leaf_id": abandoned_leaf_id,
+            "message_count": len(messages),
+            "status": "failed",
+            "summary": "",
+        }
+        try:
+            transcript = "\n".join(
+                f"{item['role']}: {item['content'][:3000]}" for item in messages
+            )[:24000]
+            result = self._pipeline_llm.complete_json(
+                """
+你负责生成会话分支摘要。请只输出 JSON，不要 Markdown：
+{"summary":"不超过 500 字的中文摘要","key_points":["不超过 5 条"],"unresolved":"未解决问题，没有则为空"}
+摘要只描述用户和助手已经讨论的事实，不要补充推测，不要输出隐式思维链。
+""".strip(),
+                [{"role": "user", "content": transcript}],
+                temperature=0.2,
+            )
+            if not isinstance(result, dict):
+                raise ValueError("branch summary response is not an object")
+            summary = str(result.get("summary", "")).strip()
+            if not summary:
+                raise ValueError("branch summary is empty")
+            payload.update({
+                "status": "completed",
+                "summary": summary[:2000],
+                "key_points": [str(item)[:300] for item in result.get("key_points", [])][:5]
+                if isinstance(result.get("key_points", []), list) else [],
+                "unresolved": str(result.get("unresolved", ""))[:500],
+            })
+        except Exception as exc:
+            logger.warning("branch_summary failed: %s", exc)
+            payload["error"] = str(exc)[:300]
+        try:
+            self._runtime_store.append_session_entry(
+                user_id, session_id, "branch_summary", payload,
+            )
+        except Exception as exc:
+            logger.warning("branch_summary persistence failed: %s", exc)
+
     def _load_file_content(self, file_id: str) -> str | dict[str, Any]:
         """Load uploaded file content for injection into chat messages.
 

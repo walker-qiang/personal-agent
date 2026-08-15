@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter()
 
@@ -122,13 +122,61 @@ async def branch_session(request: Request, session_id: str):
     from_message_id = str(payload.get("from_message_id", "")).strip()
     if not from_message_id:
         raise HTTPException(status_code=400, detail="from_message_id is required")
-    ok = store.branch(session_id, from_message_id, user_id=_get_user_id(request))
+    user_id = _get_user_id(request)
+    old_leaf_id = store.get_leaf_id(session_id, user_id=user_id)
+    abandoned_messages = store.get_abandoned_branch(
+        session_id, from_message_id, old_leaf_id, user_id=user_id,
+    )
+    ok = store.branch(session_id, from_message_id, user_id=user_id)
     if not ok:
         raise HTTPException(
             status_code=404,
             detail=f"Message {from_message_id} not found in session {session_id}",
         )
-    return {"session_id": session_id, "leaf_id": from_message_id, "branched": True}
+    if abandoned_messages:
+        request.app.state.chat.schedule_branch_summary(
+            session_id, from_message_id, old_leaf_id, user_id=user_id,
+        )
+    return {
+        "session_id": session_id,
+        "leaf_id": from_message_id,
+        "branched": True,
+        "summary_scheduled": bool(abandoned_messages),
+    }
+
+
+@router.get("/sessions/{session_id}/branch-summaries")
+async def get_branch_summaries(
+    request: Request,
+    session_id: str,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List generated summaries for abandoned branches."""
+    from ...runtime.adapters.sqlite_store import SQLiteRuntimeStore
+
+    store = request.app.state.chat.store
+    user_id = _get_user_id(request)
+    if store.get_session(session_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    runtime_store: SQLiteRuntimeStore = request.app.state.chat._runtime_store
+    summaries = []
+    for entry in runtime_store.list_session_entries(
+        user_id, session_id, entry_type="branch_summary", limit=limit,
+    ):
+        payload = entry["payload"]
+        summaries.append({
+            "entry_id": entry["entry_id"],
+            "created_at": entry["created_at"],
+            "from_message_id": payload.get("from_message_id", ""),
+            "abandoned_leaf_id": payload.get("abandoned_leaf_id", ""),
+            "message_count": payload.get("message_count", 0),
+            "status": payload.get("status", "failed"),
+            "summary": payload.get("summary", ""),
+            "key_points": payload.get("key_points", []),
+            "unresolved": payload.get("unresolved", ""),
+            "error": payload.get("error", ""),
+        })
+    return {"session_id": session_id, "summaries": summaries}
 
 
 @router.get("/sessions/{session_id}/branches")

@@ -26,7 +26,7 @@ from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
 from ..tools.personal_os import register_all as register_personal_os_tools
 from ..tools.rag import register_all as register_rag_tools
-from .routes import auth, chat, health, memory, provider, sessions, tools, trace, upload
+from .routes import auth, chat, health, memory, provider, runtime, sessions, tools, trace, upload
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config, tools_registry, trace,
         output_guard=guardrails.output,
     )
+    app.state.runtime_store = app.state.chat._runtime_store
     incomplete = app.state.chat._runtime_store.list_incomplete()
     if incomplete:
         logger.warning(
@@ -315,6 +316,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(provider.router)
     app.include_router(trace.router)
     app.include_router(memory.router)
+    app.include_router(runtime.router)
 
     # MCP server management routes
     from .routes import mcp as mcp_routes

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import ToolDefinition
+from ..base import ToolDefinition, tool_error
 from .executor import SandboxExecutor
 
 # Module-level executor instance (initialized by register_all in __init__.py)
@@ -19,7 +19,15 @@ def _run_python(code: str, timeout: int = 0) -> dict[str, Any]:
         timeout: Timeout in seconds (0 = use configured default).
     """
     if _executor is None:
-        return {"error": "Code sandbox not initialized", "exit_code": -1}
+        return {
+            **tool_error(
+                "code.run_python",
+                "执行 Python",
+                "代码沙箱尚未初始化",
+                "请稍后重试；如果持续失败，请检查 Agent 启动日志中的 code sandbox 初始化信息。",
+            ),
+            "exit_code": -1,
+        }
 
     result = _executor.execute_python(code, timeout=timeout or None)
 

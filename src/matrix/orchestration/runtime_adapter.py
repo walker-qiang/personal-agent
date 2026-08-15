@@ -11,6 +11,7 @@ from ..runtime.adapters.tools import tool_specs
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..runtime import AgentRuntime
+from .events import make_event
 
 
 def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> RunRequest:
@@ -71,10 +72,12 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
     result = handle.result()
     for event in events:
         if event.event_type.value == "tool_start":
-            cfg.get("event_queue").put(("tool_call", {
-                "name": event.payload.get("name", ""),
-                "args": {}, "operation_id": handle.operation_id,
-            })) if cfg.get("event_queue") else None
+            event_queue = cfg.get("event_queue")
+            if event_queue:
+                event_queue.put(make_event("tool_call", {
+                    "name": event.payload.get("name", ""),
+                    "args": {},
+                }))
     return {
         "agent_results": [{
             "step": step.get("step"),
