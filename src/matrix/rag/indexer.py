@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import chromadb
 
 from .context_guard import ContextGuard
-from .embedder import LocalEmbedder
+from .embedder import LocalEmbedder, get_embedding_namespace
 
 if TYPE_CHECKING:
     from .knowledge_graph import KnowledgeGraph, EntityExtractor
@@ -28,8 +28,8 @@ _SUPPORTED_EXTS = {".md", ".txt", ".yaml", ".yml"}
 _CHUNK_SIZE = 500  # 字符数
 _CHUNK_OVERLAP = 100  # 字符数
 
-# ChromaDB 集合名
-_COLLECTION_NAME = "documents"
+# ChromaDB 集合名前缀；实际名称包含 embedding 模型和维度指纹。
+_COLLECTION_BASE_NAME = "documents"
 
 # 元数据键名
 _META_INDEXED_AT = ".indexed_at"
@@ -127,6 +127,9 @@ class DocumentIndexer:
         self.embedder = embedder or LocalEmbedder()
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.collection_name, self.embedding_dimension = get_embedding_namespace(
+            self.embedder, _COLLECTION_BASE_NAME,
+        )
 
         # 初始化 ChromaDB 客户端
         if persist_dir is None:
@@ -138,7 +141,7 @@ class DocumentIndexer:
 
         self._client = chromadb.PersistentClient(path=self.persist_dir)
         self._collection = self._client.get_or_create_collection(
-            name=_COLLECTION_NAME,
+            name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -152,7 +155,7 @@ class DocumentIndexer:
         logger.info(
             "DocumentIndexer 已初始化, persist_dir=%s, collection=%s, kg=%s",
             persist_dir,
-            _COLLECTION_NAME,
+            self.collection_name,
             "enabled" if knowledge_graph else "disabled",
         )
 

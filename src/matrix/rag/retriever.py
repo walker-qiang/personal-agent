@@ -12,7 +12,7 @@ except ImportError:
     chromadb = None  # type: ignore
 
 from .bm25 import BM25Retriever
-from .embedder import LocalEmbedder
+from .embedder import LocalEmbedder, get_embedding_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 常量
 # ---------------------------------------------------------------------------
 
-_COLLECTION_NAME = "documents"
+_COLLECTION_BASE_NAME = "documents"
 _RRF_K = 60
 
 # 检索候选数
@@ -99,6 +99,9 @@ class HybridRetriever:
         """
         self.embedder = embedder or LocalEmbedder()
         self.bm25 = BM25Retriever()
+        self.collection_name, self.embedding_dimension = get_embedding_namespace(
+            self.embedder, _COLLECTION_BASE_NAME,
+        )
 
         if not _HAS_CHROMADB:
             raise ImportError("chromadb 未安装，无法使用 HybridRetriever。请运行: pip install chromadb")
@@ -112,7 +115,7 @@ class HybridRetriever:
 
         self._client = chromadb.PersistentClient(path=self.persist_dir)
         self._collection = self._client.get_or_create_collection(
-            name=_COLLECTION_NAME,
+            name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
 

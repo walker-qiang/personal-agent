@@ -1,5 +1,6 @@
 """LocalEmbedder: 使用 sentence-transformers 加载本地模型，支持降级到伪向量。"""
 
+import hashlib
 import logging
 import os
 from typing import List, Optional
@@ -24,6 +25,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 _PSEUDO_DIM = 256  # 伪向量维度
+_DIMENSION_PROBE_TEXT = "personal-agent embedding dimension probe"
 
 
 def _hash_embedding(text: str, dim: int = _PSEUDO_DIM) -> List[float]:
@@ -38,6 +40,28 @@ def _hash_embedding(text: str, dim: int = _PSEUDO_DIM) -> List[float]:
         # 归一化到 [-1, 1]
         vec.append((byte_val / 127.5) - 1.0)
     return vec
+
+
+def get_embedding_namespace(
+    embedder: object, base_name: str = "documents",
+) -> tuple[str, int]:
+    """Return a stable Chroma collection name for an embedder and its dimension.
+
+    Chroma collections cannot mix vectors with different dimensions.  The
+    dimension is probed from the actual embedder so model failures that fall
+    back to pseudo-vectors are isolated from real model vectors as well.
+    """
+    encode = getattr(embedder, "encode", None)
+    if not callable(encode):
+        raise TypeError("embedder must provide encode(texts)")
+    vectors = encode([_DIMENSION_PROBE_TEXT])
+    if not vectors or not vectors[0]:
+        raise ValueError("embedder returned no vector for dimension probe")
+    dimension = len(vectors[0])
+    model_name = str(getattr(embedder, "model_name", type(embedder).__name__))
+    identity = f"{model_name}:{dimension}"
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{base_name}_{suffix}", dimension
 
 
 # ---------------------------------------------------------------------------

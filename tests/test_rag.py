@@ -254,3 +254,43 @@ class TestIndexer:
 
         shutil.rmtree(str(empty_dir), ignore_errors=True)
         shutil.rmtree(str(persist_dir), ignore_errors=True)
+
+    def test_embedding_dimensions_use_separate_collections(self):
+        _require_deps()
+        import chromadb
+        from matrix.rag.indexer import DocumentIndexer
+
+        class FixedEmbedder:
+            def __init__(self, dimension):
+                self.dimension = dimension
+                self.model_name = "test-model"
+
+            def encode(self, texts):
+                return [[float(index) for index in range(self.dimension)] for _ in texts]
+
+        docs_dir = Path(self.tmpdir) / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "test.md").write_text("# Test\nStable embedding namespace.", encoding="utf-8")
+        persist_dir = Path(self.tmpdir) / "chromadb"
+        legacy_client = chromadb.PersistentClient(path=str(persist_dir))
+        legacy_collection = legacy_client.get_or_create_collection(name="documents")
+        legacy_collection.add(
+            ids=["legacy"],
+            embeddings=[[0.0] * 256],
+            metadatas=[{"source_file": "legacy.md"}],
+            documents=["Legacy 256-dimensional vector"],
+        )
+
+        indexer_256 = DocumentIndexer(
+            embedder=FixedEmbedder(256), persist_dir=str(persist_dir),
+        )
+        assert indexer_256.index_directory(str(docs_dir)) == 1
+
+        indexer_512 = DocumentIndexer(
+            embedder=FixedEmbedder(512), persist_dir=str(persist_dir),
+        )
+        assert indexer_512.collection_name != "documents"
+        assert indexer_512.collection_name != indexer_256.collection_name
+        assert indexer_512._collection.count() == 0
+        assert indexer_256._collection.count() == 1
+        assert legacy_collection.count() == 1
