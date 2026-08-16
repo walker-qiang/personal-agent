@@ -192,6 +192,7 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 - 进程重启恢复采用 fail-closed：`waiting_approval` 保留并允许用户继续审批；模型请求、工具执行、恢复中的其他中间态统一转为 `recovery_required`，记录 `recovery_required` 事件，不自动重放外部 effect。
 - Runtime effect journal 只用于审计未结算副作用，不作为自动重放授权；需要重试时由上层发起新的操作。
 - Agent-as-Tool 的递归深度控制仍属于应用层；每次嵌套委派创建独立的非 top-level Runtime operation，避免与父操作共享可变执行快照。
+- 当前建设阶段 Runtime SQLite 只承载可丢弃的运行态；schema 变化允许重建 Runtime 自有表，不为历史 operation 保留兼容复制逻辑。`personal-assets` 不受影响。
 
 HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默认行为。
 
