@@ -41,7 +41,7 @@ class AgentState(BaseModel):
     user_message: str = ""
     session_id: str = ""
     owner_id: str = "default"
-    runtime_mode: str = "legacy"
+    runtime_mode: str = "runtime"
     orchestration_run_id: str = ""
     runtime_operation_ids: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
     call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))

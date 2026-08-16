@@ -166,7 +166,7 @@ class AgentConfig:
     code_sandbox_max_memory_mb: int = 512  # Memory limit
     code_sandbox_max_output_chars: int = 10000  # Output truncation
     code_sandbox_network: bool = False  # Network access in sandbox
-    runtime_mode: str = "legacy"  # legacy | shadow | runtime
+    runtime_mode: str = "runtime"  # legacy | shadow | runtime
 
     @property
     def active_api_key(self) -> str:
@@ -198,7 +198,7 @@ def load_config() -> AgentConfig:
     """Load agent configuration from environment variables."""
     root = find_root(Path.cwd())
 
-    runtime_mode = os.environ.get(ENV_RUNTIME_MODE, "legacy").strip().lower() or "legacy"
+    runtime_mode = os.environ.get(ENV_RUNTIME_MODE, "runtime").strip().lower() or "runtime"
     if runtime_mode not in {"legacy", "shadow", "runtime"}:
         raise ValueError(
             f"invalid {ENV_RUNTIME_MODE}: {runtime_mode}; expected legacy, shadow, or runtime"

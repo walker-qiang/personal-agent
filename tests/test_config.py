@@ -140,10 +140,10 @@ class TestAgentConfig:
 
 
 class TestLoadConfig:
-    def test_runtime_mode_defaults_to_legacy(self, monkeypatch):
+    def test_runtime_mode_defaults_to_runtime(self, monkeypatch):
         monkeypatch.delenv("MATRIX_RUNTIME_MODE", raising=False)
         monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests")
-        assert load_config().runtime_mode == "legacy"
+        assert load_config().runtime_mode == "runtime"
 
     def test_runtime_mode_rejects_unknown_value(self, monkeypatch):
         monkeypatch.setenv("MATRIX_RUNTIME_MODE", "unexpected")

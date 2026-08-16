@@ -130,7 +130,13 @@ def _build_agent_registry() -> AgentRegistry:
 @pytest.fixture
 def base_state():
     def _make(**overrides) -> AgentState:
-        defaults = {"user_message": "当前持仓情况如何？", "session_id": "test"}
+        # These tests exercise the legacy LangGraph DAG unless a runtime mode
+        # is explicitly requested by the test case.
+        defaults = {
+            "user_message": "当前持仓情况如何？",
+            "session_id": "test",
+            "runtime_mode": "legacy",
+        }
         return AgentState(**(defaults | overrides))
     return _make
 
