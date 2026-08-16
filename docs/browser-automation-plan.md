@@ -1,5 +1,7 @@
 # 浏览器自动化工具集成设计方案
 
+> 状态：核心 MCP 服务、工具路由、安全控制和单元测试已完成；真实浏览器 E2E 仍需在已安装 Chromium 的环境中单独验证。
+
 ## 1. 背景与目标
 
 ### 问题
@@ -37,7 +39,7 @@
 
 | 维度 | 方案 A：Playwright MCP 服务器 | 方案 B：原生工具模块 |
 |------|------|------|
-| 框架改动 | 零改动，复用现有 MCP Client | 需新增 `tools/browser/` 模块 |
+| 框架改动 | 零改动，复用现有 MCP Client | 需新增 `src/matrix/tools/browser/` 模块 |
 | 进程隔离 | 浏览器崩溃不影响 agent | 浏览器崩溃可能影响 agent |
 | async 桥接 | FastMCP 原生支持 async，Playwright async API 天然契合 | 需自行处理 sync/async 桥接（与 MCP Client 类似的线程方案） |
 | 一致性 | 与 `utility_tools.py` 模式一致 | 与 `web/fetch.py` 模式一致 |
@@ -70,11 +72,11 @@ personal-agent (FastAPI)
   │     ├── code.run_python                       (原生工具, HITL)
   │     ├── finance.*                              (原生工具)
   │     ├── mcp_utility_*                          (MCP: utility_tools.py)
-  │     └── mcp_browser_*                          (MCP: browser_tools.py)  ← 新增
+  │     └── mcp_browser_*                          (MCP: tools/mcp/browser_tools.py)
   │
   └── MCPClientManager (后台 asyncio 线程)
         ├── stdio → utility_tools.py (utility 服务器)
-        └── stdio → browser_tools.py (browser 服务器)  ← 新增
+        └── stdio → tools/mcp/browser_tools.py (browser 服务器)
                        │
                        └── Playwright async API
                              └── Chromium (headless)
@@ -100,7 +102,7 @@ LLM 生成 tool_call: mcp_browser_navigate(url="...")
 ### 浏览器实例管理
 
 ```
-browser_tools.py (MCP 服务器进程)
+tools/mcp/browser_tools.py (MCP 服务器进程)
   │
   ├── 模块级全局状态
   │     _playwright: Playwright 实例 (懒启动)
@@ -326,7 +328,7 @@ def validate_url(url: str) -> tuple[bool, str]:
       "enabled": true,
       "timeout": 10.0,
       "command": "/path/to/python3.10",
-      "args": ["var/mcp/utility_tools.py"]
+      "args": ["tools/mcp/utility_tools.py"]
     },
     {
       "name": "browser",
@@ -334,7 +336,7 @@ def validate_url(url: str) -> tuple[bool, str]:
       "enabled": true,
       "timeout": 120.0,
       "command": "/path/to/python3.10",
-      "args": ["var/mcp/browser_tools.py"],
+      "args": ["tools/mcp/browser_tools.py"],
       "env": {
         "BROWSER_HEADLESS": "true",
         "BROWSER_DEFAULT_TIMEOUT": "30000",
@@ -425,18 +427,18 @@ browser_navigate:
 
 ---
 
-## 8. 实现计划
+## 8. 实施状态与后续计划
 
-### Phase 1：MVP（预计 3 小时）
+### Phase 1：MVP（已完成，真实浏览器 E2E 除外）
 
 **目标**：6 个核心工具可用，能完成基本的动态页面抓取。
 
 | 步骤 | 文件 | 工作量 |
 |------|------|--------|
-| 1. 创建 MCP 服务器脚本 | `var/mcp/browser_tools.py` | 1.5h |
-| 2. 添加 MCP 配置 | `config/mcp_servers.json` | 10min |
-| 3. 安装 Playwright 依赖 | `pyproject.toml` + `playwright install` | 10min |
-| 4. 端到端测试 | 手动验证 + 测试用例 | 1h |
+| 1. 创建 MCP 服务器脚本 | `tools/mcp/browser_tools.py` | 已完成 |
+| 2. 添加 MCP 配置模板 | `config/mcp_servers.example.json` | 已完成 |
+| 3. 声明 Playwright 依赖 | `pyproject.toml` | 已完成 |
+| 4. 端到端测试 | 手动验证 + 测试用例 | 待真实浏览器环境验证 |
 
 **验收标准**：
 - `browser_navigate` 能打开动态页面并返回元素列表
@@ -445,7 +447,7 @@ browser_navigate:
 - `browser_screenshot` 能返回截图
 - 崩溃恢复：浏览器崩溃后下次调用自动重启
 
-### Phase 2：安全增强（预计 2 小时）
+### Phase 2：安全增强（已完成）
 
 | 步骤 | 说明 |
 |------|------|
@@ -454,7 +456,7 @@ browser_navigate:
 | 3. 超时回收 | 空闲浏览器实例自动关闭 |
 | 4. 扩展工具 | `browser_wait_for`, `browser_scroll`, `browser_press_key` |
 
-### Phase 3：Agent 优化（预计 1.5 小时）
+### Phase 3：Agent 优化（核心部分已完成）
 
 | 步骤 | 说明 |
 |------|------|
@@ -535,12 +537,12 @@ class TestBrowserE2E:
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
-| `var/mcp/browser_tools.py` | 新增 | Playwright MCP 服务器脚本 |
-| `config/mcp_servers.json` | 修改 | 添加 browser 服务器配置 |
+| `tools/mcp/browser_tools.py` | 已完成 | Playwright MCP 服务器脚本；源码纳入 Git，浏览器状态仍保留在 `var/` |
+| `config/mcp_servers.json` | 修改 | 添加 browser 服务器配置（本地配置文件仍不入 Git） |
 | `pyproject.toml` | 修改 | 添加 playwright 可选依赖 |
 | `src/matrix/agent/domain_agents/investment_analyst.py` | 修改 | tools 列表添加浏览器工具 |
 | `tests/test_browser_tools.py` | 新增 | 单元测试 |
-| `tests/test_browser_e2e.py` | 新增 | 端到端测试 |
+| `tests/test_browser_e2e.py` | 待补充 | 端到端测试，需真实浏览器环境 |
 | `.gitignore` | 确认 | `var/` 已忽略（浏览器缓存不会提交） |
 
 ---

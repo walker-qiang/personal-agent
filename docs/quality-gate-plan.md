@@ -87,8 +87,8 @@
 ### 执行内容
 
 ```
-1. pytest tests/ -x -q                            # 单元测试, fail-fast
-2. python -m matrix.evaluation.cli check-skills   # skill 格式校验
+1. ./.venv/bin/python -m pytest tests/ -x -q       # 单元测试, fail-fast
+2. ./.venv/bin/python -m matrix.evaluation.cli check-skills   # skill 格式校验
 ```
 
 ### 文件结构
@@ -112,7 +112,7 @@ set -e
 
 # 1. 单元测试 (fail-fast, 30s 超时)
 echo "▶ Running unit tests..."
-python -m pytest tests/ -x -q --timeout=30 2>&1 | tail -5
+./.venv/bin/python -m pytest tests/ -x -q --timeout=30 2>&1 | tail -5
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "✗ Unit tests failed. Push blocked."
     exit 1
@@ -120,7 +120,7 @@ fi
 
 # 2. Skill 格式校验
 echo "▶ Validating skills..."
-python -m matrix.evaluation.cli check-skills 2>&1
+./.venv/bin/python -m matrix.evaluation.cli check-skills 2>&1
 if [ $? -ne 0 ]; then
     echo "✗ Skill validation failed. Push blocked."
     exit 1
@@ -149,7 +149,7 @@ done
 
 ### Skill 校验逻辑
 
-`python -m matrix.evaluation.cli check-skills` 执行：
+`./.venv/bin/python -m matrix.evaluation.cli check-skills` 执行：
 
 1. 从 `AgentConfig` 读取 `skills_base_dir`（默认指向 `personal-assets/技能/`，可通过 `MATRIX_SKILLS_BASE_DIR` 环境变量覆盖）
 2. 对每个含 `SKILL.md` 的目录，调用 `SkillDefinition.from_dir()` 解析
@@ -174,7 +174,7 @@ done
 ## Layer 2: Regression Evaluation（手动 CLI）
 
 ### 触发方式
-手动执行 `python -m matrix.evaluation.cli regression`，发布前必跑。
+手动执行 `./.venv/bin/python -m matrix.evaluation.cli regression`，发布前必跑。
 
 ### 执行内容
 
@@ -225,7 +225,7 @@ done
 当确认当前行为正确（修了 bug 或改善了回答）后：
 
 ```bash
-python -m matrix.evaluation.cli update-baseline regression
+./.venv/bin/python -m matrix.evaluation.cli update-baseline regression
 ```
 
 将当前结果写入基线文件，git commit 后成为新基线。
@@ -260,7 +260,7 @@ python -m matrix.evaluation.cli update-baseline regression
 ## Layer 3: Quality Assessment（手动 CLI）
 
 ### 触发方式
-手动执行 `python -m matrix.evaluation.cli quality`，重大变更后跑。
+手动执行 `./.venv/bin/python -m matrix.evaluation.cli quality`，重大变更后跑。
 
 ### 适用场景
 
@@ -321,7 +321,7 @@ python -m matrix.evaluation.cli update-baseline regression
 ### 基线更新
 
 ```bash
-python -m matrix.evaluation.cli update-baseline quality
+./.venv/bin/python -m matrix.evaluation.cli update-baseline quality
 ```
 
 ---
@@ -330,7 +330,7 @@ python -m matrix.evaluation.cli update-baseline quality
 
 ### 入口
 
-`python -m matrix.evaluation.cli <command> [options]`
+`./.venv/bin/python -m matrix.evaluation.cli <command> [options]`
 
 ### 命令列表
 
@@ -493,24 +493,24 @@ cat .eval-last-run.log | tail -30
 git push
 
 # 2. 运行回归评估 (Layer 2)
-python -m matrix.evaluation.cli regression
+./.venv/bin/python -m matrix.evaluation.cli regression
 # → 20 条 case 逐条运行
 # → 对比基线, 检查有无回归
 # → 无回归 → 可以发布
 
 # 3. (可选) 如果改了 prompt 或模型, 跑质量评估
-python -m matrix.evaluation.cli quality
+./.venv/bin/python -m matrix.evaluation.cli quality
 ```
 
 ### 场景 3：确认改善后更新基线
 
 ```bash
 # 修复了一个 case, 确认回答正确
-python -m matrix.evaluation.cli regression --no-baseline
+./.venv/bin/python -m matrix.evaluation.cli regression --no-baseline
 # → 看到该 case 现在 pass
 
 # 更新基线
-python -m matrix.evaluation.cli update-baseline regression
+./.venv/bin/python -m matrix.evaluation.cli update-baseline regression
 git add tests/baselines/regression_baseline.json
 git commit -m "chore: update regression baseline after fix"
 ```
@@ -544,7 +544,7 @@ git push --no-verify
 | 实现 regression 命令 | `src/matrix/evaluation/cli.py` | ✅ |
 | 实现基线对比逻辑 | `src/matrix/evaluation/baseline.py` | ✅ |
 | 添加基线对比单元测试 | `tests/test_baseline.py`（27 个测试） | ✅ |
-| 首次运行, 生成初始基线 | `tests/baselines/regression_baseline.json` | 待手动执行 |
+| 首次运行, 生成初始基线 | `tests/baselines/regression_baseline.json` | ✅ 已生成 |
 
 ### 阶段 3：Layer 3 质量评估 ✅ 已完成
 
@@ -553,7 +553,7 @@ git push --no-verify
 | 实现 quality 命令 | `src/matrix/evaluation/cli.py` | ✅ |
 | 实现质量基线对比 | `src/matrix/evaluation/baseline.py` | ✅ |
 | 添加质量基线单元测试 | `tests/test_baseline.py` | ✅ |
-| 首次运行, 生成质量基线 | `tests/baselines/quality_baseline.json` | 待手动执行 |
+| 首次运行, 生成质量基线 | `tests/baselines/quality_baseline.json` | ✅ 已生成 |
 
 ### 阶段 4：自动触发机制 ✅ 已完成
 

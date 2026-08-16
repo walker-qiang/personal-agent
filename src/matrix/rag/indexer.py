@@ -33,15 +33,18 @@ _COLLECTION_BASE_NAME = "documents"
 
 # 元数据键名
 _META_INDEXED_AT = ".indexed_at"
+# 持久化源文件纳秒级 mtime，避免旧 ISO 时间戳的微秒精度损失导致重复索引。
+_META_SOURCE_MTIME_NS = ".source_mtime_ns"
+_LEGACY_MTIME_TOLERANCE_SEC = 1e-6
 
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
 
 
-def _file_mtime(path: str) -> float:
-    """获取文件最后修改时间（Unix 时间戳）。"""
-    return os.path.getmtime(path)
+def _file_mtime_ns(path: str) -> int:
+    """获取文件最后修改时间（Unix 纳秒时间戳）。"""
+    return os.stat(path).st_mtime_ns
 
 
 def _file_hash(path: str) -> str:
@@ -151,6 +154,7 @@ class DocumentIndexer:
         # Knowledge Graph: 可选的实体图谱抽取
         self._knowledge_graph = knowledge_graph
         self._entity_extractor = entity_extractor
+        self.last_index_changed = False
 
         logger.info(
             "DocumentIndexer 已初始化, persist_dir=%s, collection=%s, kg=%s",
@@ -166,7 +170,7 @@ class DocumentIndexer:
     def index_directory(self, docs_path: str) -> int:
         """扫描目录并索引所有支持的文件。
 
-        增量索引：对比文件 mtime 与 ChromaDB 中记录的时间戳，只处理变更文件。
+        增量索引：对比文件 mtime_ns 与 ChromaDB 中记录的时间戳，只处理变更文件。
 
         Args:
             docs_path: 文档目录路径。
@@ -180,6 +184,7 @@ class DocumentIndexer:
         # 收集所有需要索引的文件
         files_to_index = self._find_files(docs_path)
         changed_files = self._filter_changed(files_to_index)
+        self.last_index_changed = bool(changed_files)
 
         if not changed_files:
             logger.info("没有文件需要更新索引。")
@@ -187,8 +192,8 @@ class DocumentIndexer:
 
         total_chunks = 0
         for file_path in changed_files:
-            mtime = _file_mtime(file_path)
-            chunk_count = self._index_file(file_path, mtime)
+            mtime_ns = _file_mtime_ns(file_path)
+            chunk_count = self._index_file(file_path, mtime_ns)
             total_chunks += chunk_count
 
         logger.info(
@@ -214,14 +219,14 @@ class DocumentIndexer:
         return files
 
     def _filter_changed(self, file_paths: List[str]) -> List[str]:
-        """对比文件 mtime 与 ChromaDB 中存储的索引时间，返回需要重新索引的文件列表。
+        """对比文件 mtime_ns 与 ChromaDB 中存储的索引时间，返回需要重新索引的文件列表。
 
         判断逻辑：如果文件在 ChromaDB 中不存在任何 chunk，或文件 mtime
-        晚于最早一条 chunk 的 indexed_at，则认为需要重新索引。
+        晚于最早一条 chunk 的 source_mtime_ns（兼容旧 indexed_at），则认为需要重新索引。
         """
         changed: List[str] = []
         for fp in file_paths:
-            mtime = _file_mtime(fp)
+            mtime_ns = _file_mtime_ns(fp)
 
             # 查询 ChromaDB 中是否有该文件的 chunk
             existing = self._collection.get(
@@ -231,15 +236,39 @@ class DocumentIndexer:
 
             if not existing["ids"]:
                 # 该文件从未被索引
+                try:
+                    with open(fp, "r", encoding="utf-8") as source_file:
+                        if not source_file.read().strip():
+                            # 空文件没有 chunk；跳过但保留“未索引”状态，
+                            # 文件未来写入内容后仍会被重新发现。
+                            continue
+                except OSError:
+                    # 交给 _index_file 记录读取错误。
+                    pass
                 changed.append(fp)
                 continue
 
-            # 检查 indexed_at 时间戳
-            indexed_at_str = existing["metadatas"][0].get(_META_INDEXED_AT, "")
+            metadata = existing["metadatas"][0]
+
+            # 优先使用当前版本写入的精确纳秒级 mtime。
+            source_mtime_ns = metadata.get(_META_SOURCE_MTIME_NS)
+            if source_mtime_ns is not None:
+                try:
+                    if mtime_ns > int(source_mtime_ns):
+                        self._delete_file_chunks(fp)
+                        changed.append(fp)
+                    continue
+                except (TypeError, ValueError):
+                    # 旧元数据无法解析时，回退到 legacy 时间戳。
+                    pass
+
+            # legacy 索引只有 ISO 时间戳，最多精确到微秒；文件系统 mtime
+            # 可能保留纳秒，因此增加极小容差，避免每次重启都误判为变更。
+            indexed_at_str = metadata.get(_META_INDEXED_AT, "")
             if indexed_at_str:
                 try:
                     indexed_at = datetime.fromisoformat(indexed_at_str).timestamp()
-                    if mtime > indexed_at:
+                    if mtime_ns / 1_000_000_000 > indexed_at + _LEGACY_MTIME_TOLERANCE_SEC:
                         # 文件有更新
                         self._delete_file_chunks(fp)
                         changed.append(fp)
@@ -260,7 +289,7 @@ class DocumentIndexer:
             self._collection.delete(ids=existing["ids"])
             logger.debug("已删除文件 %s 的 %d 个旧 chunk。", file_path, len(existing["ids"]))
 
-    def _index_file(self, file_path: str, mtime: float) -> int:
+    def _index_file(self, file_path: str, mtime_ns: int) -> int:
         """索引单个文件，返回生成的 chunk 数量。"""
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -288,7 +317,9 @@ class DocumentIndexer:
         # 构建 ChromaDB 记录
         ids: List[str] = []
         metadatas: List[Dict] = []
-        indexed_at_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        indexed_at_iso = datetime.fromtimestamp(
+            mtime_ns / 1_000_000_000, tz=timezone.utc,
+        ).isoformat()
 
         for i, chunk_text in enumerate(chunks):
             chunk_id = f"{file_path}::{i}"
@@ -296,6 +327,7 @@ class DocumentIndexer:
             metadatas.append(
                 {
                     _META_INDEXED_AT: indexed_at_iso,
+                    _META_SOURCE_MTIME_NS: str(mtime_ns),
                     "source_file": file_path,
                     "chunk_index": i,
                     "content": chunk_text,

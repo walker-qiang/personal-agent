@@ -31,6 +31,10 @@ else
     echo "✗ Python not found. Create .venv or install Python 3.10+." >&2
     exit 1
 fi
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "✗ Python 3.10+ is required; selected interpreter: $PYTHON_BIN" >&2
+    exit 1
+fi
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 echo "  Python: $PYTHON_BIN"
 

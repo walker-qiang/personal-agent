@@ -78,10 +78,9 @@ React 已覆盖登录、会话、归档、分支、技能、技能文件、模�
 
 ```bash
 cd personal-agent
-python3 -m matrix
+./.venv/bin/python -m matrix
 # 或
 ./scripts/dev.sh
 ```
 
 服务默认监听 `127.0.0.1:7101`。
-

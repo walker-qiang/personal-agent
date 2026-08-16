@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -35,6 +36,110 @@ _REACT_INDEX_HTML = ""
 _react_index_path = Path(__file__).parent / "static" / "react-app" / "index.html"
 if _react_index_path.exists():
     _REACT_INDEX_HTML = _react_index_path.read_text(encoding="utf-8")
+
+
+def _build_rag(config: AgentConfig, tools_registry: ToolRegistry) -> tuple[object, object | None]:
+    """在工作线程中构建 RAG，避免阻塞 Agent HTTP 服务启动。"""
+    from ..rag.embedder import LocalEmbedder
+    from ..rag.retriever import HybridRetriever
+    from ..rag.indexer import DocumentIndexer
+    from ..rag.knowledge_graph import KnowledgeGraph, EntityExtractor, GraphRetriever
+
+    embedder = LocalEmbedder(model_name=config.rag_embed_model)
+    kg_persist_path = os.path.join(config.rag_persist_dir, "knowledge_graph.json")
+    knowledge_graph = KnowledgeGraph(persist_path=kg_persist_path)
+    graph_retriever = GraphRetriever(knowledge_graph)
+
+    indexer = DocumentIndexer(
+        embedder=embedder,
+        persist_dir=config.rag_persist_dir,
+        knowledge_graph=knowledge_graph,
+    )
+    chunk_count = indexer.index_directory(config.rag_docs_path)
+    logger.info(
+        "rag: indexed %d chunks from %s (persist=%s)",
+        chunk_count, config.rag_docs_path, config.rag_persist_dir,
+    )
+
+    if not knowledge_graph.is_empty:
+        if knowledge_graph.dirty:
+            knowledge_graph.save()
+        else:
+            logger.info("rag: knowledge graph unchanged, skip save")
+        logger.info("rag: knowledge graph — %s", knowledge_graph.stats)
+
+    retriever = HybridRetriever(
+        embedder=embedder,
+        persist_dir=config.rag_persist_dir,
+        rebuild_bm25=indexer.last_index_changed,
+    )
+
+    agentic_search = None
+    if config.llm_available:
+        try:
+            from ..rag.agentic_search import AgenticSearch
+            from ..llm import build_llm_client
+
+            pipeline_llm = build_llm_client(
+                provider=config.pipeline_provider,
+                deepseek_api_key=config.deepseek_api_key,
+                anthropic_api_key=config.anthropic_api_key,
+                agnes_api_key=config.agnes_api_key,
+                model=config.pipeline_model,
+                deepseek_base_url=(
+                    config.agnes_base_url
+                    if config.pipeline_provider == "agnes"
+                    else config.deepseek_base_url
+                ),
+                codex_bin=config.codex_bin,
+                codex_workdir=config.codex_workdir,
+                codex_sandbox=config.codex_sandbox,
+                codex_reasoning_effort=config.codex_reasoning_effort,
+                max_tokens=config.agent_max_tokens,
+                timeout_sec=config.agent_model_timeout_sec,
+            )
+
+            def _web_fallback(query: str) -> dict:
+                web_tool = tools_registry.get("web_search")
+                if web_tool and web_tool.handler:
+                    return web_tool.handler(query=query)
+                return {"results": []}
+
+            agentic_search = AgenticSearch(
+                retriever=retriever,
+                llm=pipeline_llm,
+                web_search_fn=_web_fallback,
+                graph_retriever=graph_retriever,
+            )
+            logger.info("rag: agentic search enabled (query rewriting + grading + knowledge graph)")
+        except Exception as agentic_exc:
+            logger.warning("rag: agentic search init failed (using simple retrieval): %s", agentic_exc)
+
+    return retriever, agentic_search
+
+
+async def _initialize_rag(
+    app: FastAPI,
+    config: AgentConfig,
+    tools_registry: ToolRegistry,
+) -> None:
+    """异步初始化 RAG；同步模型/索引工作放入线程池。"""
+    try:
+        retriever, agentic_search = await asyncio.to_thread(
+            _build_rag, config, tools_registry,
+        )
+        app.state.retriever = retriever
+        register_rag_tools(
+            tools_registry,
+            retriever=retriever,
+            agentic_search=agentic_search,
+        )
+        app.state.rag_status = "ready"
+        logger.info("rag: retriever ready")
+    except Exception as exc:
+        app.state.rag_error = str(exc)
+        app.state.rag_status = "failed"
+        logger.warning("rag: initialization failed (will run without RAG): %s", exc)
 
 
 @asynccontextmanager
@@ -117,105 +222,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if synced:
             logger.info("memory_sync: %d user(s) synced from %s", synced, sync_path)
 
-    # Initialize RAG retriever if docs path is configured
+    # Initialize RAG retriever in the background if docs path is configured.
     app.state.retriever = None
     app.state.rag_error = ""
+    app.state.rag_status = "disabled"
+    app.state.rag_task = None
     if config.rag_docs_path and Path(config.rag_docs_path).is_dir():
-        try:
-            from ..rag.embedder import LocalEmbedder
-            from ..rag.retriever import HybridRetriever
-            from ..rag.indexer import DocumentIndexer
-            from ..rag.knowledge_graph import KnowledgeGraph, EntityExtractor, GraphRetriever
-
-            embedder = LocalEmbedder(model_name=config.rag_embed_model)
-
-            # Initialize Knowledge Graph
-            kg_persist_path = os.path.join(config.rag_persist_dir, "knowledge_graph.json")
-            knowledge_graph = KnowledgeGraph(persist_path=kg_persist_path)
-            entity_extractor = None
-            graph_retriever = GraphRetriever(knowledge_graph)
-
-            indexer = DocumentIndexer(
-                embedder=embedder,
-                persist_dir=config.rag_persist_dir,
-                knowledge_graph=knowledge_graph,
-                entity_extractor=entity_extractor,
-            )
-            chunk_count = indexer.index_directory(config.rag_docs_path)
-            logger.info(
-                "rag: indexed %d chunks from %s (persist=%s)",
-                chunk_count, config.rag_docs_path, config.rag_persist_dir,
-            )
-
-            # Save knowledge graph after indexing
-            if not knowledge_graph.is_empty:
-                knowledge_graph.save()
-                logger.info(
-                    "rag: knowledge graph — %s",
-                    knowledge_graph.stats,
-                )
-
-            app.state.retriever = HybridRetriever(
-                embedder=embedder,
-                persist_dir=config.rag_persist_dir,
-            )
-
-            # Build AgenticSearch for Agentic RAG (query rewriting + grading + multi-step)
-            agentic_search = None
-            if config.llm_available:
-                try:
-                    from ..rag.agentic_search import AgenticSearch
-                    from ..llm import build_llm_client
-
-                    pipeline_llm = build_llm_client(
-                        provider=config.pipeline_provider,
-                        deepseek_api_key=config.deepseek_api_key,
-                        anthropic_api_key=config.anthropic_api_key,
-                        agnes_api_key=config.agnes_api_key,
-                        model=config.pipeline_model,
-                        deepseek_base_url=(
-                            config.agnes_base_url
-                            if config.pipeline_provider == "agnes"
-                            else config.deepseek_base_url
-                        ),
-                        codex_bin=config.codex_bin,
-                        codex_workdir=config.codex_workdir,
-                        codex_sandbox=config.codex_sandbox,
-                        codex_reasoning_effort=config.codex_reasoning_effort,
-                        max_tokens=config.agent_max_tokens,
-                        timeout_sec=config.agent_model_timeout_sec,
-                    )
-
-                    # Wire entity extractor with LLM
-                    entity_extractor = EntityExtractor(llm=pipeline_llm)
-                    indexer._entity_extractor = entity_extractor
-
-                    # CRAG fallback: use web_search tool if available
-                    def _web_fallback(query: str) -> dict:
-                        web_tool = tools_registry.get("web_search")
-                        if web_tool and web_tool.handler:
-                            return web_tool.handler(query=query)
-                        return {"results": []}
-
-                    agentic_search = AgenticSearch(
-                        retriever=app.state.retriever,
-                        llm=pipeline_llm,
-                        web_search_fn=_web_fallback,
-                        graph_retriever=graph_retriever,
-                    )
-                    logger.info("rag: agentic search enabled (query rewriting + grading + knowledge graph)")
-                except Exception as agentic_exc:
-                    logger.warning("rag: agentic search init failed (using simple retrieval): %s", agentic_exc)
-
-            register_rag_tools(
-                tools_registry,
-                retriever=app.state.retriever,
-                agentic_search=agentic_search,
-            )
-            logger.info("rag: retriever ready")
-        except Exception as exc:
-            app.state.rag_error = str(exc)
-            logger.warning("rag: initialization failed (will run without RAG): %s", exc)
+        app.state.rag_status = "initializing"
+        app.state.rag_task = asyncio.create_task(
+            _initialize_rag(app, config, tools_registry),
+        )
 
     # ---- CODE SANDBOX ----
     if config.code_sandbox_enabled:
@@ -257,6 +273,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # ---- Cleanup ----
+        rag_task = getattr(app.state, "rag_task", None)
+        if rag_task is not None and not rag_task.done():
+            try:
+                await rag_task
+            except Exception as exc:
+                logger.warning("rag: shutdown while initialization was pending: %s", exc)
         # Disconnect MCP servers on shutdown.
         if app.state.mcp_client is not None:
             try:

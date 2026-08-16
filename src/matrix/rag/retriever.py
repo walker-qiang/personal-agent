@@ -91,6 +91,8 @@ class HybridRetriever:
         self,
         embedder: Optional[LocalEmbedder] = None,
         persist_dir: Optional[str] = None,
+        bm25_cache_path: Optional[str] = None,
+        rebuild_bm25: bool = False,
     ) -> None:
         """
         Args:
@@ -119,8 +121,17 @@ class HybridRetriever:
             metadata={"hnsw:space": "cosine"},
         )
 
-        # 将 ChromaDB 中已有的文档加载到 BM25 索引
-        self._load_bm25_from_chromadb()
+        self.bm25_cache_path = bm25_cache_path or os.path.join(
+            self.persist_dir, f"bm25_{self.collection_name}.pkl",
+        )
+
+        # 索引发生变化时重建；否则优先加载持久化 BM25，避免启动时重新分词。
+        loaded_from_cache = False
+        if not rebuild_bm25:
+            loaded_from_cache = self.bm25.load_cache(self.bm25_cache_path)
+        if not loaded_from_cache:
+            self._load_bm25_from_chromadb()
+            self.bm25.save_cache(self.bm25_cache_path)
 
         logger.info(
             "HybridRetriever 已初始化, persist_dir=%s", persist_dir

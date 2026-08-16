@@ -39,6 +39,7 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── code-sandbox-plan.md        # 代码沙箱安全模型
 │   └── browser-automation-plan.md  # 浏览器自动化
 ├── scripts/                        # 运维脚本
+├── tools/mcp/                      # 独立 MCP server 源码（browser/utility）
 ├── tests/                          # 测试用例
 └── var/                            # 运行时数据（不提交）
 ```
@@ -47,14 +48,14 @@ personal-agent/                     # 独立 Git 仓库
 
 ```bash
 # 安装依赖
-pip install -e .
+uv sync
 
 # 配置环境变量
 cp .env.example .env
 # 编辑 .env，填入 DEEPSEEK_API_KEY
 
 # 启动
-python -m matrix
+./.venv/bin/python -m matrix
 ```
 
 ## Agent 列表
@@ -133,7 +134,7 @@ python -m matrix
 
 ```bash
 # 运行测试
-python -m pytest
+./.venv/bin/python -m pytest
 
 # 开发启动
 bash scripts/dev.sh

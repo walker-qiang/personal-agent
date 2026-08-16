@@ -23,8 +23,8 @@
     {
       "name": "browser",
       "transport": "stdio",
-      "command": "python3",
-      "args": ["var/mcp/browser_tools.py"],
+      "command": ".venv/bin/python",
+      "args": ["tools/mcp/browser_tools.py"],
       "enabled": false,
       "timeout": 120.0,
       "env": {

@@ -21,6 +21,20 @@
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+else
+    echo "✗ Python 3.10+ not found. Create .venv with 'uv sync'." >&2
+    exit 1
+fi
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "✗ Python 3.10+ is required; selected interpreter: $PYTHON_BIN" >&2
+    exit 1
+fi
+export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
 TRACKER_FILE=".eval-tracker"
 FORCED_MODE=""
 RUN_REGRESSION=false
@@ -120,7 +134,7 @@ if [ "$RUN_REGRESSION" = true ]; then
     echo "════════════════════════════════════════════════════"
     echo "  Layer 2: 回归评估"
     echo "════════════════════════════════════════════════════"
-    PYTHONUNBUFFERED=1 python -u -m matrix.evaluation.cli regression 2>&1
+    PYTHONUNBUFFERED=1 "$PYTHON_BIN" -u -m matrix.evaluation.cli regression 2>&1
     REGRESSION_EXIT=$?
 else
     REGRESSION_EXIT=0
@@ -131,7 +145,7 @@ if [ "$RUN_QUALITY" = true ]; then
     echo "════════════════════════════════════════════════════"
     echo "  Layer 3: 质量评估 (LLM-as-Judge)"
     echo "════════════════════════════════════════════════════"
-    PYTHONUNBUFFERED=1 python -u -m matrix.evaluation.cli quality 2>&1
+    PYTHONUNBUFFERED=1 "$PYTHON_BIN" -u -m matrix.evaluation.cli quality 2>&1
     QUALITY_EXIT=$?
 else
     QUALITY_EXIT=0
@@ -203,8 +217,8 @@ fi
 
 echo ""
 echo "  如需更新基线:"
-echo "    python -m matrix.evaluation.cli update-baseline regression"
-echo "    python -m matrix.evaluation.cli update-baseline quality"
+echo "    $PYTHON_BIN -m matrix.evaluation.cli update-baseline regression"
+echo "    $PYTHON_BIN -m matrix.evaluation.cli update-baseline quality"
 echo "════════════════════════════════════════════════════"
 
 # ---- macOS notification ----

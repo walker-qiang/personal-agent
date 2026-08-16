@@ -1,5 +1,7 @@
 # 代码执行沙箱改动计划
 
+> 状态：`code.run_python`、CodeGuard、配置接线和测试已完成；本文的实施步骤保留为历史记录，后续演进项仍未实施。
+
 > 目标：为 personal-agent 新增 `code.run_python` 工具，让 Agent 具备在隔离环境中执行 Python 代码的能力，从而支持数据计算、格式转换、回测验证等任务。
 
 ## 1. 设计目标与约束
@@ -588,36 +590,36 @@ When you need to perform calculations, data processing, or format conversion:
 | `test_hitl_triggered` | 工具名含 "run"，`_is_high_risk()` 返回 True |
 | `test_trace_logged` | 执行后 JSONL trace 中有记录 |
 
-## 6. 实施步骤
+## 6. 已实施步骤（历史记录）
 
 ### Step 1: 配置扩展（~30 min）
-- [ ] `config.py`：新增 6 个字段 + env var + `load_config()` 读取
-- [ ] `.env.example`：新增配置项说明
+- [x] `config.py`：新增 6 个字段 + env var + `load_config()` 读取
+- [x] `.env.example`：新增配置项说明
 
 ### Step 2: SandboxExecutor 核心（~2h）
-- [ ] `tools/code/executor.py`：`SandboxExecutor` 类
-- [ ] `tools/code/guard.py`：`CodeGuard` 类
-- [ ] 手动验证：`python -c "from matrix.tools.code.executor import SandboxExecutor; ..."`
+- [x] `tools/code/executor.py`：`SandboxExecutor` 类
+- [x] `tools/code/guard.py`：`CodeGuard` 类
+- [x] 手动验证：`python -c "from matrix.tools.code.executor import SandboxExecutor; ..."`
 
 ### Step 3: 工具定义与注册（~1h）
-- [ ] `tools/code/python_tool.py`：工具定义 + handler
-- [ ] `tools/code/__init__.py`：`register_all()` 入口
-- [ ] `server/app.py`：`lifespan()` 中条件注册
-- [ ] `tools/registry.py`：新增 `set_code_guard()` + `call()` 中增加 CodeGuard 检查
+- [x] `tools/code/python_tool.py`：工具定义 + handler
+- [x] `tools/code/__init__.py`：`register_all()` 入口
+- [x] `server/app.py`：`lifespan()` 中条件注册
+- [x] `tools/registry.py`：新增 `set_code_guard()` + `call()` 中增加 CodeGuard 检查
 
 ### Step 4: Agent 集成（~30 min）
-- [ ] `agent/domain_agents/investment_analyst.py`：tools 增加 `code.run_python`
-- [ ] `orchestration/nodes/_helpers.py`：`DOMAIN_AGENT_REACT_SYSTEM` prompt 增加代码执行指引
-- [ ] 验证 `_is_high_risk("code.run_python")` 返回 True
+- [x] `agent/domain_agents/investment_analyst.py`：tools 增加 `code.run_python`
+- [x] `orchestration/nodes/_helpers.py`：`DOMAIN_AGENT_REACT_SYSTEM` prompt 增加代码执行指引
+- [x] 验证 `_is_high_risk("code.run_python")` 返回 True
 
 ### Step 5: 测试（~2h）
-- [ ] `tests/test_code_sandbox.py`：编写全部单元测试
-- [ ] 运行测试：`pytest tests/test_code_sandbox.py -v`
-- [ ] E2E 验证：启动服务，发送"帮我计算 [1,2,3,4,5] 的平均值"请求
+- [x] `tests/test_code_sandbox.py`：编写全部单元测试
+- [x] 运行测试：`pytest tests/test_code_sandbox.py -v`
+- [x] E2E 验证：启动服务，发送"帮我计算 [1,2,3,4,5] 的平均值"请求
 
 ### Step 6: .env 配置与文档（~15 min）
-- [ ] `.env` 中添加 `MATRIX_CODE_SANDBOX_ENABLED=true`
-- [ ] 重启服务验证
+- [x] `.env` 中添加 `MATRIX_CODE_SANDBOX_ENABLED=true`
+- [x] 重启服务验证
 
 **总预估：~6h**
 

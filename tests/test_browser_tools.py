@@ -34,7 +34,7 @@ class TestURLValidation:
     def _load_browser_tools(self):
         """Load browser_tools.py as a standalone module."""
         import importlib.util
-        bt_path = PROJECT_ROOT / "var" / "mcp" / "browser_tools.py"
+        bt_path = PROJECT_ROOT / "tools" / "mcp" / "browser_tools.py"
         spec = importlib.util.spec_from_file_location("browser_tools_test", bt_path)
         self.bt = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.bt)
@@ -99,7 +99,7 @@ class TestTextTruncation:
     @pytest.fixture(autouse=True)
     def _load_browser_tools(self):
         import importlib.util
-        bt_path = PROJECT_ROOT / "var" / "mcp" / "browser_tools.py"
+        bt_path = PROJECT_ROOT / "tools" / "mcp" / "browser_tools.py"
         spec = importlib.util.spec_from_file_location("browser_tools_test", bt_path)
         self.bt = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.bt)
@@ -289,7 +289,7 @@ class TestPerformanceConfig:
     @pytest.fixture(autouse=True)
     def _load_browser_tools(self):
         import importlib.util
-        bt_path = PROJECT_ROOT / "var" / "mcp" / "browser_tools.py"
+        bt_path = PROJECT_ROOT / "tools" / "mcp" / "browser_tools.py"
         spec = importlib.util.spec_from_file_location("browser_tools_test", bt_path)
         self.bt = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.bt)

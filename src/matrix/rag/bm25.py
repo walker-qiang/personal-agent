@@ -1,6 +1,8 @@
 """BM25Retriever: 基于 rank_bm25 的关键词检索引擎。"""
 
 import logging
+import os
+import pickle
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,63 @@ class BM25Retriever:
             logger.debug(
                 "BM25 索引已更新，文档数: %d", len(self._docs)
             )
+
+    def save_cache(self, path: str) -> bool:
+        """持久化 BM25 状态，避免每次启动重新分词全部文档。"""
+        if not self._initialized or self._bm25 is None:
+            return False
+
+        temp_path = f"{path}.tmp-{os.getpid()}"
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            payload = {
+                "version": 1,
+                "docs": self._docs,
+                "tokenized_corpus": self._tokenized_corpus,
+                "doc_id_to_index": self._doc_id_to_index,
+                "bm25": self._bm25,
+            }
+            with open(temp_path, "wb") as cache_file:
+                pickle.dump(payload, cache_file, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temp_path, path)
+            return True
+        except (OSError, pickle.PickleError, TypeError) as exc:
+            logger.warning("BM25 缓存写入失败: %s", exc)
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            return False
+
+    def load_cache(self, path: str) -> bool:
+        """加载本地 BM25 缓存；缓存损坏时回退到 ChromaDB 重建。"""
+        if not self._initialized or not os.path.isfile(path):
+            return False
+
+        try:
+            with open(path, "rb") as cache_file:
+                payload = pickle.load(cache_file)
+            if payload.get("version") != 1:
+                return False
+
+            docs = payload.get("docs")
+            corpus = payload.get("tokenized_corpus")
+            bm25 = payload.get("bm25")
+            if not isinstance(docs, list) or not isinstance(corpus, list) or bm25 is None:
+                return False
+
+            self._docs = docs
+            self._tokenized_corpus = corpus
+            self._doc_id_to_index = payload.get(
+                "doc_id_to_index",
+                {doc["id"]: index for index, doc in enumerate(docs)},
+            )
+            self._bm25 = bm25
+            logger.info("BM25 已从缓存加载，文档数: %d", len(self._docs))
+            return True
+        except (OSError, EOFError, pickle.PickleError, AttributeError, KeyError, TypeError) as exc:
+            logger.warning("BM25 缓存加载失败，将从 ChromaDB 重建: %s", exc)
+            return False
 
     def search(self, query: str, top_k: int = 20) -> List[Dict]:
         """使用 BM25 检索与查询最相关的文档。

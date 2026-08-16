@@ -283,6 +283,7 @@ class KnowledgeGraph:
         self._graph = nx.Graph()
         self._persist_path = persist_path
         self._lock = threading.Lock()
+        self._dirty = False
 
         # 启动时加载已有图谱
         if persist_path and os.path.exists(persist_path):
@@ -308,6 +309,7 @@ class KnowledgeGraph:
             return 0
 
         changed = 0
+        modified = False
         with self._lock:
             # 添加实体节点
             for entity in result.entities:
@@ -324,6 +326,7 @@ class KnowledgeGraph:
                     sources = node.get("source_files", "")
                     if entity.source_file and entity.source_file not in sources:
                         node["source_files"] = (sources + ", " + entity.source_file).strip(", ")
+                    modified = True
                 else:
                     self._graph.add_node(eid, **{
                         "name": entity.name,
@@ -333,6 +336,7 @@ class KnowledgeGraph:
                         "mentions": entity.mentions,
                     })
                     changed += 1
+                    modified = True
 
             # 添加关系边
             for rel in result.relations:
@@ -347,12 +351,17 @@ class KnowledgeGraph:
                     existing_rel = edge.get("relation", "")
                     if rel.relation not in existing_rel:
                         edge["relation"] = f"{existing_rel}, {rel.relation}".strip(", ")
+                    modified = True
                 else:
                     self._graph.add_edge(src_id, tgt_id, **{
                         "relation": rel.relation,
                         "weight": rel.weight,
                         "source_file": rel.source_file,
                     })
+                    modified = True
+
+        if modified:
+            self._dirty = True
 
         return changed
 
@@ -508,6 +517,8 @@ class KnowledgeGraph:
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
+            self._dirty = False
+
             logger.info(
                 "KnowledgeGraph saved: %d nodes, %d edges to %s",
                 self._graph.number_of_nodes(),
@@ -526,6 +537,7 @@ class KnowledgeGraph:
                 data = json.load(f)
             with self._lock:
                 self._graph = self._nx.node_link_graph(data, edges="links")
+                self._dirty = False
             return True
         except Exception as exc:
             logger.warning("KnowledgeGraph load failed: %s", exc)
@@ -550,6 +562,11 @@ class KnowledgeGraph:
     @property
     def is_empty(self) -> bool:
         return self._graph.number_of_nodes() == 0
+
+    @property
+    def dirty(self) -> bool:
+        """图谱自上次成功持久化后是否发生变化。"""
+        return self._dirty
 
 
 # ── GraphRetriever: 图谱检索增强 ─────────────────────────────────────────
