@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 
 import pytest
@@ -9,6 +10,7 @@ from matrix.runtime.adapters.sqlite_store import SQLiteRuntimeStore
 from matrix.runtime.core.reducer import with_next_phase
 from matrix.runtime.domain.approvals import ApprovalStatus
 from matrix.runtime.domain.errors import OperationConflictError
+from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
 from matrix.runtime.domain.operations import OperationPhase, OperationState, StateTransition
 from matrix.runtime.domain.results import RunOutcome
@@ -65,6 +67,44 @@ def test_memory_store_lists_only_incomplete_operations() -> None:
     store.create(failed)
 
     assert [item.operation_id for item in store.list_incomplete()] == ["op-1"]
+
+
+def test_memory_store_recovers_interrupted_operation_but_preserves_approval_wait() -> None:
+    store = MemoryOperationStore()
+    interrupted = _operation("op-interrupted")
+    waiting = _operation("op-waiting", owner_id="user-a")
+    waiting = replace(waiting, session_id="session-waiting", phase=OperationPhase.WAITING_APPROVAL)
+    store.create(interrupted)
+    store.create(waiting)
+
+    recovered = store.recover_incomplete()
+
+    assert [item.operation_id for item in recovered] == ["op-interrupted"]
+    assert store.load("user-a", "op-interrupted").phase is OperationPhase.RECOVERY_REQUIRED
+    assert store.load("user-a", "op-waiting").phase is OperationPhase.WAITING_APPROVAL
+    assert store.event_list("op-interrupted")[-1].event_type is RuntimeEventType.RECOVERY_REQUIRED
+
+
+def test_sqlite_store_recovers_interrupted_operation_durably(tmp_path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime-recovery.db")
+    operation = _operation()
+    store.create(operation)
+    store.commit(StateTransition(
+        previous_version=operation.version,
+        new_state=with_next_phase(operation, OperationPhase.PREPARING),
+    ))
+
+    recovered = store.recover_incomplete(reason="test_restart")
+
+    assert [item.operation_id for item in recovered] == ["op-1"]
+    current = store.load("user-a", "op-1")
+    assert current.phase is OperationPhase.RECOVERY_REQUIRED
+    assert current.state["runtime_recovery"]["reason"] == "test_restart"
+    events = store.list_events("user-a", "op-1")
+    assert events[-1].event_type is RuntimeEventType.RECOVERY_REQUIRED
+    assert events[-1].payload["previous_phase"] == "preparing"
+    assert store.recover_incomplete() == []
+    store.close()
 
 
 def _suspend_sqlite(store: SQLiteRuntimeStore) -> tuple[str, str]:

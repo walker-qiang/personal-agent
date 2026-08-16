@@ -75,11 +75,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_guard=guardrails.output,
     )
     app.state.runtime_store = app.state.chat._runtime_store
-    incomplete = app.state.chat._runtime_store.list_incomplete()
-    if incomplete:
+    runtime_store = app.state.chat._runtime_store
+    recovered = runtime_store.recover_incomplete()
+    if recovered:
         logger.warning(
-            "runtime: found %d incomplete operation(s); no side effects were replayed",
-            len(incomplete),
+            "runtime: marked %d interrupted operation(s) as recovery_required; "
+            "no side effects were replayed",
+            len(recovered),
+        )
+    incomplete = runtime_store.list_incomplete()
+    waiting = [item for item in incomplete if item.phase.value == "waiting_approval"]
+    if waiting:
+        logger.info(
+            "runtime: retained %d approval-waiting operation(s) for user resume",
+            len(waiting),
         )
     # Bootstrap admin user on first run (no users in DB yet)
     if config.admin_password_hash:

@@ -121,6 +121,30 @@ def test_runtime_retries_transient_model_failure() -> None:
     assert result.final_message == "ok"
 
 
+def test_runtime_settles_unexpected_tool_exception_as_tool_error() -> None:
+    class RaisingTools:
+        def execute(self, request):
+            raise RuntimeError("downstream unavailable")
+
+    model = FakeModel([
+        ModelResponse(
+            tool_calls=(tool_call("call-error", "lookup"),),
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(content="已识别工具异常"),
+    ])
+    store = MemoryOperationStore()
+    result = AgentRuntime(store, model=model, tools=RaisingTools()).start(
+        _request()
+    ).result()
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert result.final_message == "已识别工具异常"
+    assert result.tool_results[0].is_error is True
+    assert "downstream unavailable" in result.tool_results[0].error
+    assert store.effects[(result.operation_id, "call-error")]["status"] == "failed"
+
+
 def _suspend_for_approval(store: MemoryOperationStore):
     runtime = AgentRuntime(
         store,

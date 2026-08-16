@@ -453,7 +453,18 @@ def _execute_tool_effect(
     """Execute one external tool call through the persistent effect journal."""
 
     store.begin_tool_effect(request, recovery_policy)
-    result = tools.execute(request)
+    try:
+        result = tools.execute(request)
+    except Exception as exc:
+        # Tool adapters should normally normalize failures, but Runtime is
+        # the last durable boundary. Never leave an effect in ``executing``
+        # merely because an adapter violated that contract.
+        result = ToolResult(
+            call_id=request.call_id,
+            name=request.name,
+            error=f"tool execution failed: {type(exc).__name__}: {exc}",
+            is_error=True,
+        )
     store.settle_tool_effect(request, result)
     return result
 

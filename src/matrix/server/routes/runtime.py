@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ...runtime.domain.approvals import Approval
-from ...runtime.domain.operations import OperationState
+from ...runtime.domain.operations import OperationPhase, OperationState
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -65,6 +65,58 @@ async def operation_events(
             {key: value for key, value in event.to_dict().items() if key != "owner_id"}
             for event in store.list_events(_user_id(request), operation_id, limit=limit)
         ],
+    }
+
+
+@router.get("/operations/{operation_id}/retry-context")
+async def retry_context(request: Request, operation_id: str):
+    """Return a safe user prompt for an explicit retry of a recovered run.
+
+    Retrying never resumes or replays the old operation. The client submits
+    this context as a new chat request after the user explicitly confirms.
+    """
+    store = _store(request)
+    operation = store.load(_user_id(request), operation_id)
+    if operation is None:
+        raise HTTPException(status_code=404, detail="runtime operation not found")
+    if operation.phase is not OperationPhase.RECOVERY_REQUIRED:
+        raise HTTPException(
+            status_code=409,
+            detail="only recovery_required operations can be retried",
+        )
+    if operation.operation_scope != "top_level":
+        raise HTTPException(
+            status_code=409,
+            detail="DAG step operations must be retried by their parent workflow",
+        )
+    session_entries = store.list_session_entries(
+        _user_id(request), operation.session_id, entry_type="user", limit=1,
+    )
+    user_message = ""
+    if session_entries:
+        payload = session_entries[0].get("payload", {})
+        if isinstance(payload, dict):
+            user_message = str(payload.get("content", "")).strip()
+    messages = operation.state.get("runtime_messages", [])
+    user_message = user_message or next(
+        (
+            str(message.get("content", "")).strip()
+            for message in messages
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and str(message.get("content", "")).strip()
+        ),
+        "",
+    )
+    if not user_message:
+        raise HTTPException(status_code=409, detail="operation has no retryable user message")
+    policy = operation.state.get("execution_policy", {})
+    return {
+        "operation_id": operation.operation_id,
+        "session_id": operation.session_id,
+        "message": user_message,
+        "mode": str(policy.get("mode", "read_only")),
+        "preset": str(policy.get("preset", "default")),
     }
 
 

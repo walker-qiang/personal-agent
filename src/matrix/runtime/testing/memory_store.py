@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import time
+import uuid
+
 from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
+from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 
 from ..domain.errors import OperationConflictError
@@ -61,6 +65,38 @@ class MemoryOperationStore:
 
     def list_incomplete(self) -> list[OperationState]:
         return [operation for operation in self.operations.values() if not operation.is_terminal]
+
+    def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
+        recovered: list[OperationState] = []
+        for operation in list(self.operations.values()):
+            if operation.is_terminal or operation.phase is OperationPhase.WAITING_APPROVAL:
+                continue
+            state = dict(operation.state)
+            state["runtime_recovery"] = {
+                "reason": reason,
+                "previous_phase": operation.phase.value,
+            }
+            event = RuntimeEvent(
+                event_id=uuid.uuid4().hex,
+                owner_id=operation.owner_id,
+                operation_id=operation.operation_id,
+                session_id=operation.session_id,
+                sequence=operation.last_event_sequence + 1,
+                event_type=RuntimeEventType.RECOVERY_REQUIRED,
+                timestamp=time.time(),
+                payload={"reason": reason, "previous_phase": operation.phase.value},
+            )
+            recovered_operation = replace(
+                operation,
+                phase=OperationPhase.RECOVERY_REQUIRED,
+                version=operation.version + 1,
+                last_event_sequence=event.sequence,
+                state=state,
+            )
+            self.operations[operation.operation_id] = recovered_operation
+            self.events[operation.operation_id].append(event)
+            recovered.append(recovered_operation)
+        return recovered
 
     def list_operations(
         self,

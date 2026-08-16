@@ -189,6 +189,8 @@ investment-analyst 可用能力示例（capability → 工具列表）：
   但仍会创建 Runtime approval 和 effect journal。
 - preset（当前 default、investment_research）只是命名配置，负责输出风格和策略参数，不是另一套 Agent。
 - DebugTrace 默认关闭。开启后只挂在当前 RunHandle 和 SSE 调试事件上，保存模型请求/响应、工具轨迹和策略诊断的脱敏内存副本，不写 Runtime SQLite durable events，也不写 Vault。
+- 进程重启恢复采用 fail-closed：`waiting_approval` 保留并允许用户继续审批；模型请求、工具执行、恢复中的其他中间态统一转为 `recovery_required`，记录 `recovery_required` 事件，不自动重放外部 effect。
+- Runtime effect journal 只用于审计未结算副作用，不作为自动重放授权；需要重试时由上层发起新的操作。
 
 HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默认行为。
 

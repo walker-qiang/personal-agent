@@ -23,6 +23,15 @@ class OperationStorePort(Protocol):
     def list_incomplete(self) -> list[OperationState]:
         ...
 
+    def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
+        """Fail closed operations left mid-flight by a process restart.
+
+        WAITING_APPROVAL is intentionally preserved because it has a durable,
+        user-mediated resume path. Other non-terminal phases cannot be safely
+        replayed without knowing whether an external effect already ran.
+        """
+        ...
+
     def list_operations(
         self,
         owner_id: str,

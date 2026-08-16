@@ -9,14 +9,15 @@ from ..domain.operations import OperationPhase, OperationState
 
 
 _ALLOWED_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
-    OperationPhase.CREATED: frozenset({OperationPhase.PREPARING, OperationPhase.ABORTED}),
-    OperationPhase.PREPARING: frozenset({OperationPhase.REQUESTING_MODEL, OperationPhase.ABORTED}),
+    OperationPhase.CREATED: frozenset({OperationPhase.PREPARING, OperationPhase.ABORTED, OperationPhase.RECOVERY_REQUIRED}),
+    OperationPhase.PREPARING: frozenset({OperationPhase.REQUESTING_MODEL, OperationPhase.ABORTED, OperationPhase.RECOVERY_REQUIRED}),
     OperationPhase.REQUESTING_MODEL: frozenset({
         OperationPhase.EXECUTING_TOOLS,
         OperationPhase.PREPARING_NEXT_TURN,
         OperationPhase.COMPLETED,
         OperationPhase.FAILED,
         OperationPhase.ABORTED,
+        OperationPhase.RECOVERY_REQUIRED,
     }),
     OperationPhase.EXECUTING_TOOLS: frozenset({
         OperationPhase.PREPARING_NEXT_TURN,
@@ -29,12 +30,14 @@ _ALLOWED_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
         OperationPhase.REQUESTING_MODEL,
         OperationPhase.COMPLETED,
         OperationPhase.ABORTED,
+        OperationPhase.RECOVERY_REQUIRED,
     }),
     OperationPhase.WAITING_APPROVAL: frozenset({OperationPhase.RESUMING, OperationPhase.ABORTED}),
     OperationPhase.RESUMING: frozenset({
         OperationPhase.EXECUTING_TOOLS,
         OperationPhase.PREPARING_NEXT_TURN,
         OperationPhase.FAILED,
+        OperationPhase.RECOVERY_REQUIRED,
     }),
     OperationPhase.COMPLETED: frozenset(),
     OperationPhase.FAILED: frozenset(),

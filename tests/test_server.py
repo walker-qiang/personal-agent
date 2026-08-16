@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from matrix.config import AgentConfig
+from matrix.runtime.domain.operations import OperationPhase, OperationState
 from matrix.server.app import create_app
 from matrix.auth import hash_password
 
@@ -288,6 +289,38 @@ class TestReset:
             headers={"content-type": "application/json", **_auth_headers(auth_token)},
         )
         assert resp.status_code == 400
+
+
+class TestRuntimeRetryContext:
+    def test_returns_safe_context_for_recovery_required_operation(self, client, auth_token):
+        operation = OperationState(
+            operation_id="recovery-op",
+            owner_id="admin",
+            session_id="recovery-session",
+            agent_id="assistant",
+            phase=OperationPhase.RECOVERY_REQUIRED,
+            state={
+                "runtime_messages": [
+                    {"role": "user", "content": "请重新检查这项任务"},
+                ],
+                "execution_policy": {"mode": "read_only", "preset": "default"},
+            },
+        )
+        client.app.state.runtime_store.create(operation)
+
+        response = client.get(
+            "/api/runtime/operations/recovery-op/retry-context",
+            headers=_auth_headers(auth_token),
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "operation_id": "recovery-op",
+            "session_id": "recovery-session",
+            "message": "请重新检查这项任务",
+            "mode": "read_only",
+            "preset": "default",
+        }
 
 
 class TestNotFound:

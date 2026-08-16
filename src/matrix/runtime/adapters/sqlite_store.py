@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,68 @@ class SQLiteRuntimeStore:
                 "('completed','failed','aborted','recovery_required') ORDER BY created_at"
             ).fetchall()
         return [_operation_from_row(row) for row in rows]
+
+    def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
+        """Mark non-approval operations left mid-flight as recovery-required.
+
+        The update and its audit event are committed together. Approval waits
+        remain resumable; replaying any other phase could duplicate a tool
+        effect after a crash between the effect and its settlement.
+        """
+        recovered_ids: list[tuple[str, str]] = []
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    "SELECT * FROM runtime_operations "
+                    "WHERE phase NOT IN ('completed','failed','aborted','recovery_required','waiting_approval') "
+                    "ORDER BY created_at"
+                ).fetchall()
+                for row in rows:
+                    previous_phase = str(row["phase"])
+                    state = json.loads(row["state_json"] or "{}")
+                    if not isinstance(state, dict):
+                        state = {}
+                    state["runtime_recovery"] = {
+                        "reason": reason,
+                        "previous_phase": previous_phase,
+                        "recovered_at": now,
+                    }
+                    sequence = int(row["last_event_sequence"]) + 1
+                    event_id = uuid.uuid4().hex
+                    updated = conn.execute(
+                        "UPDATE runtime_operations SET phase='recovery_required', version=version+1, "
+                        "last_event_sequence=?, state_json=?, updated_at=? "
+                        "WHERE operation_id=? AND version=? AND phase=?",
+                        (
+                            sequence, json.dumps(state, ensure_ascii=False, default=str), now,
+                            row["operation_id"], row["version"], previous_phase,
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise OperationConflictError("runtime recovery compare-and-swap failed")
+                    conn.execute(
+                        "INSERT INTO runtime_events "
+                        "(event_id, owner_id, operation_id, session_id, sequence, event_type, timestamp, payload_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            event_id, row["owner_id"], row["operation_id"], row["session_id"],
+                            sequence, RuntimeEventType.RECOVERY_REQUIRED.value, now,
+                            json.dumps({"reason": reason, "previous_phase": previous_phase}, ensure_ascii=False),
+                        ),
+                    )
+                    recovered_ids.append((row["owner_id"], row["operation_id"]))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return [
+            operation
+            for owner_id, operation_id in recovered_ids
+            if (operation := self.load(owner_id, operation_id)) is not None
+        ]
 
     def list_operations(
         self,

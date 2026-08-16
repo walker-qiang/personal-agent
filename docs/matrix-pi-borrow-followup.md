@@ -436,3 +436,17 @@ GET /sessions/{session_id}/branch-summaries
 - 分支切换仍是 append-only，不删除或覆盖旧消息。
 - 摘要生成失败不回滚 leaf，也不阻塞下一轮对话。
 - 摘要功能位于 Session/Chat 应用层，不进入独立 Runtime 核心，不引入对 LangGraph 的反向依赖。
+
+## 阶段 11：Runtime 进程重启恢复与异常闭环
+
+> **实现状态（2026-08-16）：已完成 ✅**
+
+服务启动时，Runtime Store 会扫描上次进程留下的非终态操作，并按“可安全恢复”与“不可安全重放”分类：
+
+- `waiting_approval` 保留原状态，用户仍可通过现有审批入口恢复；
+- `preparing`、`requesting_model`、`executing_tools`、`preparing_next_turn`、`resuming` 等中间态统一转为 `recovery_required`；
+- 状态更新与 `recovery_required` durable event 在同一 SQLite 事务中提交，写入前一阶段、原因和恢复时间；
+- 不自动重放工具调用，避免进程崩溃发生在外部 effect 已执行但 journal 尚未结算时造成重复副作用；
+- 恢复操作具备幂等性，重复启动不会重复追加恢复事件或改变已终止状态。
+
+该策略保持 Runtime 的单向依赖：恢复分类由 Runtime Store/Domain 完成，ChatService 只负责启动时触发扫描和记录日志；不引入对 LangGraph、FastAPI 或 Agent Registry 的反向依赖。
