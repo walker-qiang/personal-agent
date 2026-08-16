@@ -229,7 +229,7 @@ class TestWorkingMemory:
             ],
         )
         wm = state.working_memory
-        assert wm["pinned"] == ""  # initialized by react_prepare_node
+        assert wm["pinned"] == ""  # initialized by the Runtime-backed path
         assert wm["insights"] == []
 
     def test_working_memory_handler(self):

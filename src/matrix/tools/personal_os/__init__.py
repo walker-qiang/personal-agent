@@ -14,6 +14,15 @@ from ..principal import current_principal
 from ..registry import ToolRegistry
 
 
+def _normalize_market_code(code: str) -> str:
+    """Normalize common user-facing codes to personal-os market codes."""
+    normalized = str(code).strip()
+    if len(normalized) == 6 and normalized.isdigit():
+        prefix = "sh" if normalized.startswith(("60", "68", "90")) else "sz"
+        return prefix + normalized
+    return normalized
+
+
 def _get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     base_url = os.environ.get("PERSONAL_OS_API_URL", "http://127.0.0.1:7001").rstrip("/")
     query = urllib.parse.urlencode({key: value for key, value in params.items() if value not in (None, "")})
@@ -101,43 +110,52 @@ def writeback_execute(plan: dict[str, Any], plan_hash: str) -> dict[str, Any]:
 def market_quote(code: str) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.market_quote", "查询行情", "code is required")
-    return _get("/api/tools/market/quote", {"code": code})
+    return _get("/api/tools/market/quote", {"code": _normalize_market_code(code)})
 
 
 def financials(code: str, periods: int = 4) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.financials", "查询财报", "code is required")
-    return _get("/api/tools/market/financials", {"code": code, "num": periods})
+    return _get(
+        "/api/tools/market/financials",
+        {"code": _normalize_market_code(code), "num": periods},
+    )
 
 
 def profile(code: str) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.profile", "查询公司简况", "code is required")
-    return _get("/api/tools/market/profile", {"code": code})
+    return _get("/api/tools/market/profile", {"code": _normalize_market_code(code)})
 
 
 def dividend(code: str, years: int = 5) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.dividend", "查询分红", "code is required")
-    return _get("/api/tools/market/dividend", {"code": code, "years": years})
+    return _get(
+        "/api/tools/market/dividend",
+        {"code": _normalize_market_code(code), "years": years},
+    )
 
 
 def valuation(code: str) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.valuation", "计算估值", "code is required")
-    return _get("/api/tools/market/valuation", {"code": code})
+    return _get("/api/tools/market/valuation", {"code": _normalize_market_code(code)})
 
 
 def peers(code: str) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.peers", "查询同业估值", "code is required")
-    return _get("/api/tools/market/peers", {"code": code})
+    return _get("/api/tools/market/peers", {"code": _normalize_market_code(code)})
 
 
 def research_context(code: str = "", name: str = "") -> dict[str, Any]:
     if not str(code).strip() and not str(name).strip():
         return tool_error("personal_os.research_context", "读取研究上下文", "code or name is required")
-    return _get("/api/tools/research/context", {"code": code, "name": name})
+    return _get(
+        "/api/tools/research/context",
+        {"code": _normalize_market_code(code), "name": name},
+    )
 
 
 def information_search(query: str = "", limit: int = 10) -> dict[str, Any]:

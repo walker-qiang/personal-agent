@@ -1,5 +1,9 @@
 # Project Matrix 改进设计 — 借鉴 Pi-Agent 的 7 个方向
 
+> 当前状态说明：本文保留 Pi 借鉴过程中的历史实现分析。当前顶层执行已统一到
+> Agent Runtime；文中 `react_*` 节点描述不再代表顶层路由，仅适用于尚未迁移的
+> Agent-as-Tool 嵌套 helper。
+
 > 基于 Pi-Agent Book 全 10 章源码级分析，对照 Matrix 现有代码，按"改动小、收益快、风险低"优先排序。
 >
 > **文档状态**：已实现并提交。本文档与代码同步更新，记录实现过程中的务实调整。
@@ -374,3 +378,6 @@ GET  /sessions/{id}/leaf                                      → 返回当前 l
 - Phase 6 扩展：新事件类型直接使用结构化事件，旧扩展的 tuple 写入逐步淘汰
 - Phase 3 扩展：新工具使用 `tool_error()` 函数，现有工具逐步迁移
 - Phase 7 扩展：分支摘要（BranchSummaryEntry）— 切换分支时给被放弃的分支生成 LLM 摘要
+# 说明：本文保留 Pi 借鉴过程中的历史实现分析。当前顶层执行已统一到
+# Agent Runtime；文中 `react_*` 节点描述不再代表顶层路由，仅适用于尚未迁移的
+# Agent-as-Tool 嵌套 helper。

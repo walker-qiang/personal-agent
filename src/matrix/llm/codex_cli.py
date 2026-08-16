@@ -8,11 +8,16 @@ tool-call requests into the shared LLM protocol.
 
 from __future__ import annotations
 
+import base64
+import binascii
+from contextlib import contextmanager
 import json
+import mimetypes
 import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Iterator
@@ -53,8 +58,8 @@ class CodexCLIClient:
         messages: list[dict[str, Any]],
         temperature: float | None = None,
     ) -> str:
-        prompt = self._build_prompt(system, messages)
-        return self._run(prompt)
+        with self._prompt_request(system, messages) as (prompt, image_paths):
+            return self._run(prompt, image_paths)
 
     def complete_json(
         self,
@@ -94,13 +99,16 @@ class CodexCLIClient:
         messages: list[dict[str, Any]],
     ) -> Iterator[dict[str, Any]]:
         """Stream high-level Codex CLI activity and the final answer."""
-        yield from self.stream_events(self._build_prompt(system, messages))
+        with self._prompt_request(system, messages) as (prompt, image_paths):
+            yield from self.stream_events(prompt, image_paths)
 
-    def stream_events(self, prompt: str) -> Iterator[dict[str, Any]]:
+    def stream_events(
+        self, prompt: str, image_paths: list[str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         if not self.available:
             raise LLMError(f"Codex CLI not found: {self.binary}")
         process = subprocess.Popen(
-            self._build_command(prompt),
+            self._build_command(prompt, image_paths),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -191,6 +199,61 @@ class CodexCLIClient:
             finish_reason="tool_calls" if calls else "stop",
         )
 
+    @contextmanager
+    def _prompt_request(
+        self, system: str, messages: list[dict[str, Any]],
+    ) -> Iterator[tuple[str, list[str]]]:
+        """Prepare prompt text and materialize data-URI images for Codex CLI."""
+        with tempfile.TemporaryDirectory(prefix="personal-agent-codex-") as temp_dir:
+            image_paths: list[str] = []
+            prepared_messages = self._materialize_images(
+                messages, temp_dir, image_paths,
+            )
+            yield self._build_prompt(system, prepared_messages), image_paths
+
+    @staticmethod
+    def _materialize_images(
+        messages: list[dict[str, Any]],
+        temp_dir: str,
+        image_paths: list[str],
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content", "")
+            if not isinstance(content, list):
+                prepared.append(dict(message))
+                continue
+            blocks: list[Any] = []
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "image_url":
+                    blocks.append(block)
+                    continue
+                image_url = block.get("image_url") or {}
+                url = image_url.get("url", "") if isinstance(image_url, dict) else ""
+                if not isinstance(url, str) or not url.startswith("data:") or "," not in url:
+                    blocks.append({"type": "text", "text": "[图片附件]"})
+                    continue
+                header, encoded = url.split(",", 1)
+                mime_type = header[5:].split(";", 1)[0] or "image/png"
+                extension = mimetypes.guess_extension(mime_type) or ".png"
+                path = os.path.join(temp_dir, f"attachment-{len(image_paths)}{extension}")
+                try:
+                    content_bytes = base64.b64decode(encoded, validate=True)
+                except (ValueError, binascii.Error):
+                    blocks.append({"type": "text", "text": "[图片附件无法读取]"})
+                    continue
+                with open(path, "wb") as image_file:
+                    image_file.write(content_bytes)
+                image_paths.append(path)
+                blocks.append({
+                    "type": "text",
+                    "text": f"[图片附件 {len(image_paths)} 已通过 Codex 图像输入提供]",
+                })
+            prepared_message = dict(message)
+            prepared_message["content"] = blocks
+            prepared.append(prepared_message)
+        return prepared
+
     def _build_prompt(self, system: str, messages: list[dict[str, Any]]) -> str:
         if self.max_message_chars > 0:
             messages = truncate_messages(
@@ -213,7 +276,9 @@ class CodexCLIClient:
         )
         return "\n\n".join(parts)
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(
+        self, prompt: str, image_paths: list[str] | None = None,
+    ) -> list[str]:
         command = [
             self.binary,
             "exec",
@@ -234,12 +299,14 @@ class CodexCLIClient:
         if self.model != "codex-cli":
             command.extend(["-m", self.model])
         command.append(prompt)
+        for image_path in image_paths or []:
+            command.extend(["--image", image_path])
         return command
 
-    def _run(self, prompt: str) -> str:
+    def _run(self, prompt: str, image_paths: list[str] | None = None) -> str:
         if not self.available:
             raise LLMError(f"Codex CLI not found: {self.binary}")
-        command = self._build_command(prompt)
+        command = self._build_command(prompt, image_paths)
         try:
             completed = subprocess.run(
                 command,

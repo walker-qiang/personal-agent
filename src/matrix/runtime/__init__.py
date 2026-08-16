@@ -1,8 +1,4 @@
-"""Independent single-Agent runtime contracts.
-
-The runtime package is intentionally not wired into the production chat path
-yet.  WP1 freezes the lower-level contracts; execution is added in WP2.
-"""
+"""Independent single-Agent runtime contracts and application adapters."""
 
 from .core.runtime import AgentRuntime, RunHandle
 from .domain.events import RuntimeEvent, RuntimeEventType

@@ -4,13 +4,13 @@ from matrix.orchestration.graph import _route_dag_first
 from matrix.orchestration.state import AgentState
 
 
-def test_legacy_single_step_routes_to_existing_react_path() -> None:
+def test_single_step_always_routes_to_runtime() -> None:
     state = AgentState(
         user_message="hello",
         delegation_plan=[{"step": 1, "agent_id": "commander", "task": "hello"}],
-        runtime_mode="legacy",
+        runtime_mode="legacy",  # compatibility field must not change routing
     )
-    assert _route_dag_first(state) == "react_prepare"
+    assert _route_dag_first(state) == "runtime_agent"
 
 
 def test_runtime_single_step_routes_to_runtime_node() -> None:
@@ -22,7 +22,7 @@ def test_runtime_single_step_routes_to_runtime_node() -> None:
     assert _route_dag_first(state) == "runtime_agent"
 
 
-def test_runtime_mode_does_not_change_multi_step_dag_route() -> None:
+def test_multi_step_always_routes_to_runtime_delegate() -> None:
     state = AgentState(
         user_message="hello",
         delegation_plan=[

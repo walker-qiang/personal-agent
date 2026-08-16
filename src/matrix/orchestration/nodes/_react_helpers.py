@@ -66,7 +66,7 @@ def _build_react_final_answer(
     question = react.get("question", "")
 
     # Extract the last assistant content as answer; fall back to react["answer"]
-    # (which may be set directly by error paths in react_llm_node)
+    # (which may be set directly by nested ReAct error paths)
     answer = react.get("answer", "")
     if not answer:
         # Pass 1: prefer text-only assistant messages (no tool_calls at all)

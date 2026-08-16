@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from matrix.llm import (
+    CodexCLIClient,
     DeepSeekClient,
     LLMAuthError,
     LLMError,
@@ -24,6 +25,27 @@ def _mock_response(text: str) -> dict:
 
 
 class TestDeepSeekClient:
+    def test_converts_multimodal_content_to_responses_input(self):
+        client = DeepSeekClient(api_key="test-key")
+        items = client._convert_messages_to_input([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "描述图片"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+                },
+            ],
+        }])
+
+        assert items == [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "描述图片"},
+                {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+            ],
+        }]
+
     def test_retries_transient_error_once(self):
         """DeepSeek client should retry once on LLMTransientError."""
         calls = 0
@@ -97,6 +119,30 @@ class TestBuildLLMClient:
         )
         assert isinstance(client, DeepSeekClient)
         assert client.model == "deepseek-reasoner"
+
+
+class TestCodexCLIClient:
+    def test_materializes_data_uri_images_and_adds_cli_image_arguments(self, tmp_path):
+        client = CodexCLIClient(binary="codex", workdir=str(tmp_path))
+        image_paths = []
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "描述图片"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+                },
+            ],
+        }]
+
+        prepared = client._materialize_images(messages, str(tmp_path), image_paths)
+
+        assert len(image_paths) == 1
+        assert (tmp_path / "attachment-0.png").read_bytes() == b"image"
+        assert prepared[0]["content"][1]["type"] == "text"
+        command = client._build_command("prompt", image_paths)
+        assert command[-3:] == ["prompt", "--image", image_paths[0]]
 
 
 class TestLLMErrorHierarchy:

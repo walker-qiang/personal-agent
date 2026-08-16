@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+MessageContent = str | list[dict[str, Any]]
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """A model-requested tool call."""
@@ -20,7 +23,7 @@ class Message:
     """A normalized conversation message."""
 
     role: str
-    content: str = ""
+    content: MessageContent = ""
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str = ""
 

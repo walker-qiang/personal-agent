@@ -14,6 +14,30 @@ from ..runtime import AgentRuntime
 from .events import make_event
 
 
+def build_multimodal_content(
+    text: str, attachments: list[dict[str, Any]] | None = None,
+) -> str | list[dict[str, Any]]:
+    """Convert application attachments into provider-neutral message blocks."""
+    image_attachments = [
+        item for item in (attachments or [])
+        if item.get("type") == "image" and item.get("base64")
+    ]
+    if not image_attachments:
+        return text
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for attachment in image_attachments:
+        blocks.append({
+            "type": "image_url",
+            "image_url": {
+                "url": (
+                    f"data:{attachment.get('mime_type', 'image/png')};"
+                    f"base64,{attachment['base64']}"
+                ),
+            },
+        })
+    return blocks
+
+
 def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> RunRequest:
     """Resolve one DAG step at the application boundary, never in Runtime Core."""
     agent_id = step.get("agent_id", "commander")
@@ -36,7 +60,10 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
         owner_id=state.get("owner_id", cfg.get("user_id", "default")),
         session_id=state.get("session_id", ""),
         agent_id=agent_id,
-        messages=[Message(role="user", content=message)],
+        messages=[Message(
+            role="user",
+            content=build_multimodal_content(message, cfg.get("attachments", [])),
+        )],
         system_prompt=(
             f"你是{agent_def.name}。{agent_def.persona}\n"
             f"请完成任务：{task}"

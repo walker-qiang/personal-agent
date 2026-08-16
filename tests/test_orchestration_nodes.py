@@ -118,7 +118,7 @@ class TestForceToolCall:
             tools=[{"name": "agnes.generate_image", "description": "Generate image"}],
         )
         # _force_tool_call passes through LLM response; hallucination check
-        # is done by the caller (delegate_node) which checks for content
+        # is done by the Runtime-backed caller which checks for content
         assert result.content == "已为您生成了图片"
         assert len(result.tool_calls) == 0
 

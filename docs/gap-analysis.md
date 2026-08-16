@@ -593,3 +593,6 @@ class CircuitBreaker:
 3. **失败日志的噪音**：不是所有失败都值得记录。需要过滤：只记录 "非预期失败"（如 API 参数错误），不记录 "预期失败"（如搜索无结果）。
 4. **多 Agent 的成本**：Anthropic 数据显示多 Agent 消耗约 15 倍 token。必须确保任务真正可分离才使用扇出模式。
 5. **向后兼容**：所有改动通过 `AgentState` 字段扩展实现，旧字段（如 `delegation_plan`）保留但标记为 deprecated，确保平滑迁移。
+# 说明：本文是历史能力差距分析。当前顶层执行已统一到 Agent Runtime；文中的
+# `react_*`/`delegate_node` 描述不代表当前顶层路由，仅保留作历史背景和嵌套
+# Agent-as-Tool 迁移参考。

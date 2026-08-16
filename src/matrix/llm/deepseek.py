@@ -129,10 +129,35 @@ class DeepSeekClient:
             else:
                 # Regular message (user/assistant/system)
                 content_type = "input_text" if role == "user" else "output_text"
-                items.append({
-                    "role": role,
-                    "content": [{"type": content_type, "text": str(content)}] if content else [],
-                })
+                if isinstance(content, list):
+                    blocks: list[dict[str, Any]] = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "text":
+                            blocks.append({
+                                "type": content_type,
+                                "text": str(block.get("text", "")),
+                            })
+                        elif block.get("type") == "image_url":
+                            image_url = block.get("image_url", {})
+                            url = (
+                                image_url.get("url", "")
+                                if isinstance(image_url, dict) else ""
+                            )
+                            blocks.append({
+                                "type": "input_image",
+                                "image_url": url,
+                            })
+                        else:
+                            blocks.append(block)
+                    items.append({"role": role, "content": blocks})
+                else:
+                    items.append({
+                        "role": role,
+                        "content": [{"type": content_type, "text": str(content)}]
+                        if content else [],
+                    })
         return items
 
     def _headers(self) -> dict[str, str]:

@@ -23,7 +23,7 @@
 
 数据流:
     1. reflection_node 检测到回答不足 → 提取教训 → record_lesson()
-    2. react_prepare_node / _run_domain_agent_react → get_relevant_lessons()
+    2. Runtime agent / _run_domain_agent_react → get_relevant_lessons()
        → _inject_lessons() 注入 system prompt
 
 设计权衡 (个人使用场景):

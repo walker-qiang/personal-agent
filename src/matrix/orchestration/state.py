@@ -67,9 +67,9 @@ class AgentState(BaseModel):
     # ReAct (for domain agent execution)
     react_iteration: int = 0
 
-    # ReAct context dict — used by the split ReAct nodes (react_prepare → react_llm → react_tool → react_evaluate)
+    # Nested Agent-as-Tool ReAct context. Top-level execution uses Runtime.
     # Contains: messages, system, tools_json, question, iteration, consecutive_failures,
-    #           consecutive_no_progress, prev_result_count, agent_id, agent_name, answer
+    #           consecutive_no_progress, prev_result_count, agent_id, agent_name, answer.
     react: dict[str, Any] = Field(default_factory=dict)
 
     # Output

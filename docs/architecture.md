@@ -29,7 +29,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 │                   核心层                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
 │  │ Agent    │ │ LLM      │ │ 编排              │   │
-│  │ 岗位制   │ │ 多模型    │ │ LangGraph ReAct   │   │
+│  │ 岗位制   │ │ 多模型    │ │ Runtime + LangGraph│  │
 │  │ 注册表   │ │ 客户端    │ │ Commander→Agent   │   │
 │  └──────────┘ └──────────┘ └──────────────────┘   │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
@@ -201,7 +201,7 @@ HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默�
 多步任务通过 Commander + DAG 拓扑排序协调执行：
 
 ```
-commander_plan → _route_dag_first → [Send("delegate") × N 并行]
+commander_plan → _route_dag_first → [Send("runtime_delegate") × N 并行]
     → replan_node → _route_after_replan（循环）
     → aggregate
 ```
@@ -220,9 +220,9 @@ commander_plan → _route_dag_first → [Send("delegate") × N 并行]
 | 事件 | 触发节点 | 数据结构 |
 |------|----------|----------|
 | `plan_created` | `commander_plan_node` | `{type, plan_type, total_steps, steps, message}` |
-| `step_start` | `delegate_node` | `{type, step, total, agent, task, message}` |
-| `step_done` | `delegate_node` | `{type, step, total, result_preview, message}` |
-| `step_error` | `delegate_node` | `{type, step, error, message}` |
+| `step_start` | `runtime_delegate_node` / Runtime | `{type, step, total, agent, task, message}` |
+| `step_done` | `runtime_delegate_node` / Runtime | `{type, step, total, result_preview, message}` |
+| `step_error` | `runtime_delegate_node` / Runtime | `{type, step, error, message}` |
 | `replan` | `replan_node` | `{type, reason, attempt, message}` |
 
 **传输机制**：通过 `configurable.event_queue`（`queue.Queue`）传递，无 event_queue 时静默丢弃，不崩溃。仅在多步计划（`len(delegation_plan) > 1`）时发出事件。
@@ -247,7 +247,7 @@ CLOSED ──(3 次连续失败)──> OPEN ──(30s 冷却)──> HALF_OPEN
 - `cooldown_seconds`: 30 秒冷却
 - 隔离：按 `session_id` 隔离，不同会话互不影响
 
-**集成点**：`react_tool_node` 中每次工具调用前检查熔断状态，被熔断的工具从 LLM 可见工具列表中移除（`_prune_tools()`），避免 LLM 反复调用已失败的工具。
+**集成点**：Runtime Tool Adapter/工具注册表在每次工具调用前检查熔断状态，被熔断的工具从模型可见工具列表中移除（`_prune_tools()`），避免模型反复调用已失败的工具。
 
 #### 优雅降级（P0）
 

@@ -26,12 +26,15 @@ from ..llm import LLMClient, LLMError, build_llm_client
 from ..llm.http import set_rate_limiter
 from ..orchestration.anti_hallucination import _strip_all_verification_tags
 from ..orchestration import build_graph
+from ..orchestration.runtime_adapter import build_multimodal_content
 from ..orchestration.state import AgentState
 from ..orchestration.nodes._helpers import CircuitBreaker, _today_cn
 from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..runtime.adapters.sqlite_store import SQLiteRuntimeStore
+from ..runtime.adapters.external_agent import ExternalAgentAdapter
+from ..runtime.adapters.deep_research import DeepResearchWorkflow
 from ..runtime import AgentRuntime, ExecutionPolicy, ResumeInput
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
@@ -453,8 +456,12 @@ class ChatService:
             # Reset remains idempotent for a session that does not exist,
             # while refusing to mutate an existing session owned by another user.
             if self.store.get_session(session_id) is None:
-                return True
-            return self.store.reset(session_id, user_id=user_id)
+                reset = True
+            else:
+                reset = self.store.reset(session_id, user_id=user_id)
+            if reset:
+                self._runtime_store.delete_session_entries(user_id, session_id)
+            return reset
         return True
 
     def schedule_branch_summary(
@@ -742,15 +749,9 @@ class ChatService:
         self._cleanup_stale_checkpoint(sid, call_id)
 
         session_llm = self._get_llm(sid, user_id=user_id)
-        runtime_mode = self.config.runtime_mode
-        # Codex owns its own Agent/tool loop; Deep Research is an application
-        # workflow. Keep both paths on legacy even when Runtime is enabled.
-        if getattr(session_llm, "provider", "") == "codex" or mode == "deep_research" or attachments:
-            runtime_mode = "legacy"
-        if execution_policy.mode == "writeback":
-            # Durable writeback must go through Runtime approval/effect journal;
-            # the legacy graph executes tools before its confirmation node.
-            runtime_mode = "runtime"
+        # Top-level execution is Runtime-managed.  The legacy ReAct loop is
+        # retained only for nested Agent-as-Tool compatibility in commander.py.
+        runtime_mode = "runtime"
 
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
@@ -761,12 +762,13 @@ class ChatService:
             orchestration_run_id=call_id,
         )
 
-        runtime_user_entry_written = False
-        if runtime_mode == "runtime":
-            self._runtime_store.append_session_entry(
-                user_id, sid, "user", {"content": text},
-            )
-            runtime_user_entry_written = True
+        self._backfill_runtime_history(user_id, sid, history)
+        self._runtime_store.append_session_entry(
+            user_id, sid, "user", {
+                "content": build_multimodal_content(text, attachments),
+            },
+        )
+        runtime_user_entry_written = True
 
         interrupted = False
         try:
@@ -778,12 +780,12 @@ class ChatService:
             )
 
             if getattr(session_llm, "provider", "") == "codex" and mode == "deep_research":
-                yield from self._stream_deep_research(
-                    session_llm, sid, text, history, user_id,
+                yield from self._stream_deep_research_runtime(
+                    session_llm, sid, text, history, user_id, attachments,
                 )
             elif getattr(session_llm, "provider", "") == "codex":
-                yield from self._stream_codex_direct(
-                    session_llm, sid, text, history, user_id,
+                yield from self._stream_codex_direct_runtime(
+                    session_llm, sid, text, history, user_id, attachments,
                 )
             else:
                 graph_config = self._build_graph_config(
@@ -796,7 +798,6 @@ class ChatService:
                     )
                     yield from self._finalize_stream(
                         final_state, sid, text, session_llm, history, user_id,
-                        runtime_mode=runtime_mode,
                         runtime_user_entry_written=runtime_user_entry_written,
                     )
                 except GraphInterrupt as gi:
@@ -824,192 +825,108 @@ class ChatService:
             "duration_ms": round((time.perf_counter() - started) * 1000),
         }
 
-    def _stream_codex_direct(
+    def _stream_codex_direct_runtime(
         self,
         llm: LLMClient,
         session_id: str,
         question: str,
         history: list[dict[str, str]],
         user_id: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Use one local Codex turn for the default backend.
-
-        The full LangGraph ReAct path is retained for DeepSeek. Codex already
-        owns its local agent tools, so wrapping it in another multi-step
-        planner would start several CLI processes for one user question.
-        """
+        """Durably map Codex's own agent loop into Runtime events."""
         system = (
             "你是筋斗云的本地 Codex 助理。请直接回答用户问题。"
             "可以读取个人系统工作区中的文件来获取上下文，但当前是只读沙箱，"
             "不要修改文件或执行破坏性操作。回答使用中文，事实不确定时明确说明。"
         )
-        messages = history[-8:] + [{"role": "user", "content": question}]
-        yield {"type": "classify", "intent": "codex-direct"}
-        yield {"type": "progress", "message": "本地 Codex 正在处理…"}
-        answer_parts: list[str] = []
-        try:
-            stream_agent = getattr(llm, "stream_agent", None)
-            if callable(stream_agent):
-                for event in stream_agent(system, messages):
-                    event_type = event.get("type")
-                    if event_type == "message":
-                        content = str(event.get("content") or "")
-                        if content:
-                            answer_parts.append(content)
-                            yield {"type": "token", "content": content}
-                    elif event_type not in {"done"}:
-                        yield event
-            else:
-                for token in llm.stream_complete(system, messages):
-                    answer_parts.append(token)
-                    yield {"type": "token", "content": token}
-            answer = "".join(answer_parts).strip()
-            if answer:
-                self._remember(session_id, question, answer, user_id=user_id)
-        except Exception as exc:
-            logger.error("codex direct chat failed: %s", exc, exc_info=True)
+        messages = history[-8:] + [{
+            "role": "user",
+            "content": build_multimodal_content(question, attachments),
+        }]
+        adapter = ExternalAgentAdapter(self._runtime_store, llm)
+        handle = adapter.start(
+            owner_id=user_id,
+            session_id=session_id,
+            agent_id="codex-direct",
+            system=system,
+            messages=messages,
+            metadata={"provider": "codex", "mode": "direct"},
+        )
+        first = True
+        emitted_error = False
+        for event in handle.events():
+            ui_event = dict(event.ui_event)
+            if first:
+                first = False
+                yield ui_event
+                yield {"type": "progress", "message": "本地 Codex 正在处理…"}
+                continue
+            if ui_event.get("type") not in {"done"}:
+                if ui_event.get("type") == "message":
+                    ui_event = {"type": "token", "content": ui_event.get("content", "")}
+                emitted_error = emitted_error or ui_event.get("type") == "error"
+                yield ui_event
+        result = handle.result()
+        if result.outcome.value == "completed" and result.final_message:
+            self._remember(
+                session_id, question, result.final_message,
+                user_id=user_id, runtime_user_entry_written=True,
+            )
+        elif result.outcome.value != "completed" and not emitted_error:
             yield {"type": "error", "message": "本地 Codex 响应失败，请稍后重试"}
 
-    def _stream_deep_research(
+    def _stream_deep_research_runtime(
         self,
         llm: LLMClient,
         session_id: str,
         question: str,
         history: list[dict[str, str]],
         user_id: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Prefetch personal-os evidence, then let Codex synthesize one JSON card."""
+        """Run the fixed evidence workflow with durable Runtime events."""
+        del history
         import re
 
-        code_match = re.search(r"标的代码[:：]\s*([A-Za-z0-9_.-]+)", question)
         name_match = re.search(r"研究对象[:：]\s*(.+)", question)
-        code = code_match.group(1).strip() if code_match else ""
-        name = name_match.group(1).strip() if name_match else ""
         research_date = (
             question.split("研究日期：", 1)[1].splitlines()[0].strip()
-            if "研究日期：" in question
-            else ""
+            if "研究日期：" in question else ""
         )
-        research_year = research_date[:4] or time.strftime("%Y")
-        if not code:
-            yield {"type": "error", "message": "深度研究缺少标的代码"}
-            return
-
         agent_tools = self.agent_registry.build_tool_registry(
             "investment-analyst", self.tools,
         )
-        calls: list[tuple[str, dict[str, Any]]] = [
-            ("personal_os.market_quote", {"code": code}),
-            ("personal_os.financials", {"code": code, "periods": 8}),
-            ("personal_os.profile", {"code": code}),
-            ("personal_os.dividend", {"code": code, "years": 5}),
-            ("personal_os.valuation", {"code": code}),
-            ("personal_os.peers", {"code": code}),
-            ("personal_os.research_context", {"code": code, "name": name}),
-            (
-                "personal_os.information_search",
-                {
-                    "query": f"{name} {code} {research_year} 最新季报 二季度 业绩公告 年报 经营风险",
-                    "limit": 12,
-                },
-            ),
-        ]
-        evidence: list[dict[str, Any]] = []
-        yield {"type": "classify", "intent": "deep-research-prefetch"}
-        for tool_name, arguments in calls:
-            if tool_name not in agent_tools.tool_names():
-                evidence.append({"tool": tool_name, "error": "tool unavailable"})
-                yield {"type": "tool_result", "name": tool_name, "error": "tool unavailable"}
-                continue
-            yield {"type": "thinking", "content": f"正在调用 {tool_name} 获取数据…"}
-            yield {"type": "tool_call", "name": tool_name, "args": arguments}
-            result = agent_tools.call(tool_name, arguments, session_id=session_id)
-            evidence.append({"tool": tool_name, "result": result})
-            yield {
-                "type": "tool_result",
-                "name": tool_name,
-                "result": result,
-                "preview": preview_json(result),
-            }
-
-        info = next(
-            (item["result"] for item in evidence
-             if item["tool"] == "personal_os.information_search"
-             and isinstance(item.get("result"), dict)),
-            {},
+        workflow = DeepResearchWorkflow(
+            self._runtime_store,
+            llm,
+            agent_tools,
+            normalize_result=_normalize_research_result,
+            preview_json=preview_json,
+            select_latest_official_url=_select_latest_official_url,
+            extract_official_report_period=_extract_official_report_period,
         )
-        sources = info.get("items", []) if isinstance(info, dict) else []
-        official_url = _select_latest_official_url(sources, research_year)
-        if official_url and "personal_os.web_fetch" in agent_tools.tool_names():
-            tool_name = "personal_os.web_fetch"
-            arguments = {"url": official_url}
-            yield {"type": "thinking", "content": f"正在调用 {tool_name} 核验官方正文…"}
-            yield {"type": "tool_call", "name": tool_name, "args": arguments}
-            result = agent_tools.call(tool_name, arguments, session_id=session_id)
-            evidence.append({"tool": tool_name, "result": result})
-            yield {
-                "type": "tool_result",
-                "name": tool_name,
-                "result": result,
-                "preview": preview_json(result),
-            }
-
-        evidence_text = json.dumps(evidence, ensure_ascii=False, default=str)
-        evidence_text = evidence_text[:60000]
-        system = """你是筋斗云的深度投资研究员。
-你只能使用下方 personal-os 工具证据，不得使用记忆补数字，不得编造来源。
-请输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码围栏。
-必须包含 schema_version=2、type=investment-research、status、object_type、
-subject、research_date、data_date、latest_report_period、
-information_completeness、decision、summary、highlights、thesis、antithesis、
-risks、metrics、triggers、sources、tags。
-如果证据不足，status 必须是 incomplete，information_completeness 必须是 low，
-并在 risks 中说明缺口；不要伪装成 deep。
-如果 personal_os.financials.metadata.stale 为 true，必须明确标记财报过期，
-不得把该期间称为当前最新经营数据，并优先使用最新季报/业绩公告补充。
-如果官方公告正文包含比 personal_os.financials 更新的报告期，必须使用官方公告
-报告期作为 latest_report_period，并在指标或风险中区分“聚合财报最新期”和“官方公告最新期”。
-metrics 必须是对象数组，每项至少包含 name 和 value；禁止把 Python map[...]、
-整段工具返回或未拆解的对象放进 value。
-sources 必须是对象数组，每项包含 title、url、date、source_type；url 和 date
-只能填写证据中真实出现的内容，找不到就留空。优先保留 information_search
-返回的文章标题、URL、发布日期和来源等级；personal_os 工具只能作为工具溯源。
-
-PERSONAL-OS EVIDENCE:
-""" + evidence_text
-        try:
-            result = llm.complete_json(
-                system,
-                [{"role": "user", "content": question}],
+        handle = workflow.start(
+            owner_id=user_id,
+            session_id=session_id,
+            question=question,
+            name=name_match.group(1).strip() if name_match else "",
+            research_date=research_date,
+            attachments=attachments,
+        )
+        emitted_error = False
+        for event in handle.events():
+            if event.ui_event.get("type") != "done":
+                emitted_error = emitted_error or event.ui_event.get("type") == "error"
+                yield event.ui_event
+        result = handle.result()
+        if result.outcome.value == "completed" and result.final_message:
+            self._remember(
+                session_id, question, result.final_message,
+                user_id=user_id, runtime_user_entry_written=True,
             )
-            if isinstance(result, dict):
-                result = _normalize_research_result(
-                    result,
-                    evidence,
-                    code=code,
-                    name=name,
-                    object_type="fund" if "对象类型：fund" in question else "stock",
-                    research_date=research_date,
-                )
-                official_period = _extract_official_report_period(evidence)
-                if official_period and official_period > str(result.get("latest_report_period") or ""):
-                    result["latest_report_period"] = official_period
-                    metrics = result.get("metrics")
-                    if not isinstance(metrics, list):
-                        metrics = []
-                        result["metrics"] = metrics
-                    metrics.append({
-                        "name": "官方公告最新报告期",
-                        "value": official_period,
-                        "period": research_date,
-                        "source": "personal_os.web_fetch",
-                    })
-            answer = json.dumps(result, ensure_ascii=False)
-            self._remember(session_id, question, answer, user_id=user_id)
-            yield {"type": "token", "content": answer}
-        except Exception as exc:
-            logger.error("deep research synthesis failed: %s", exc, exc_info=True)
-            yield {"type": "error", "message": "深度研究汇总失败，请稍后重试"}
+        elif result.outcome.value != "completed" and not emitted_error:
+            yield {"type": "error", "message": result.error or "深度研究汇总失败，请稍后重试"}
 
     def resume_chat(
         self, session_id: str, decision: str = "approve", user_id: str = "default",
@@ -1145,7 +1062,7 @@ PERSONAL-OS EVIDENCE:
                     yield {"type": "tool_result", "name": event.payload.get("name", ""), "error": event.payload.get("error", ""), "operation_id": operation_id}
             if result.final_message:
                 yield {"type": "token", "content": result.final_message}
-                self._remember(session_id, "", result.final_message, user_id=user_id, runtime_mode="runtime")
+                self._remember(session_id, "", result.final_message, user_id=user_id)
             if result.outcome.value == "suspended":
                 yield {"type": "confirm_required", "actions": [result.suspension.payload if result.suspension else {}], "session_id": session_id}
             elif result.error:
@@ -1464,7 +1381,7 @@ PERSONAL-OS EVIDENCE:
     def _finalize_stream(
         self, final_state: dict[str, Any], sid: str, text: str,
         session_llm: LLMClient, history: list[dict], user_id: str,
-        runtime_mode: str = "legacy", runtime_user_entry_written: bool = False,
+        runtime_user_entry_written: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Handle output after graph streaming completes: summarize or direct answer."""
         if final_state.get("needs_summary"):
@@ -1494,7 +1411,7 @@ PERSONAL-OS EVIDENCE:
                 yield {"type": "token", "content": answer}
             if answer:
                 self._remember(
-                    sid, text, answer, user_id=user_id, runtime_mode=runtime_mode,
+                    sid, text, answer, user_id=user_id,
                     runtime_user_entry_written=runtime_user_entry_written,
                 )
         else:
@@ -1519,7 +1436,7 @@ PERSONAL-OS EVIDENCE:
                 final_answer = "抱歉，暂时无法生成回复。请稍后重试或换一种方式提问。"
             yield {"type": "token", "content": final_answer}
             self._remember(
-                sid, text, final_answer, user_id=user_id, runtime_mode=runtime_mode,
+                sid, text, final_answer, user_id=user_id,
                 runtime_user_entry_written=runtime_user_entry_written,
             )
 
@@ -1550,32 +1467,74 @@ PERSONAL-OS EVIDENCE:
         """Reload skills from disk (after CRUD)."""
         self.agent_registry.reload_skills()
 
-    def _get_history(self, session_id: str, user_id: str = "default") -> list[dict[str, str]]:
+    def _get_history(self, session_id: str, user_id: str = "default") -> list[dict[str, Any]]:
         """Return conversation history with layered user profile injected as context."""
-        history = self.store.get_history(
+        legacy_history = self.store.get_history(
             session_id, self.config.memory_max_turns, user_id=user_id,
         )
+        runtime_history = self._get_runtime_history(session_id, user_id)
+        has_branches = bool(self.store.get_branches(session_id, user_id=user_id))
+        if runtime_history and not has_branches:
+            history = _merge_runtime_history(
+                legacy_history, runtime_history, self.config.memory_max_turns,
+            )
+        else:
+            history = legacy_history
         formatted = self.store.get_profile_formatted(user_id)
         if formatted:
             history.insert(0, {"role": "system", "content": formatted})
         return history
 
+    def _get_runtime_history(
+        self, session_id: str, user_id: str,
+    ) -> list[dict[str, Any]]:
+        """Read Runtime user/assistant entries in chronological order."""
+        if not hasattr(self._runtime_store, "list_session_entries"):
+            return []
+        entries: list[dict[str, Any]] = []
+        per_role_limit = max(1, self.config.memory_max_turns)
+        for entry_type in ("user", "assistant"):
+            entries.extend(self._runtime_store.list_session_entries(
+                user_id, session_id, entry_type=entry_type, limit=per_role_limit,
+            ))
+        entries.sort(key=lambda item: (item.get("created_at", 0), item.get("entry_id", "")))
+        history: list[dict[str, Any]] = []
+        for entry in entries:
+            payload = entry.get("payload", {})
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if isinstance(content, (str, list)):
+                history.append({"role": entry["entry_type"], "content": content})
+        return history[-self.config.memory_max_turns * 2:]
+
+    def _backfill_runtime_history(
+        self, user_id: str, session_id: str, history: list[dict[str, Any]],
+    ) -> None:
+        """Seed Runtime history once for sessions created before migration."""
+        if self._get_runtime_history(session_id, user_id):
+            return
+        if self.store.get_branches(session_id, user_id=user_id):
+            return
+        for item in history:
+            if item.get("role") in {"user", "assistant"}:
+                self._runtime_store.append_session_entry(
+                    user_id, session_id, item["role"], {"content": item.get("content", "")},
+                )
+
     def _remember(
         self, session_id: str, question: str, answer: str,
-        user_id: str = "default", runtime_mode: str = "legacy",
+        user_id: str = "default",
         runtime_user_entry_written: bool = False,
     ) -> None:
         if question:
             self.store.save_message(session_id, "user", question, user_id=user_id)
         self.store.save_message(session_id, "assistant", answer, user_id=user_id)
-        if runtime_mode == "runtime":
-            if not runtime_user_entry_written and question:
-                self._runtime_store.append_session_entry(
-                    user_id, session_id, "user", {"content": question},
-                )
+        if not runtime_user_entry_written and question:
             self._runtime_store.append_session_entry(
-                user_id, session_id, "assistant", {"content": answer},
+                user_id, session_id, "user", {"content": question},
             )
+        self._runtime_store.append_session_entry(
+            user_id, session_id, "assistant", {"content": answer},
+        )
         self.store.update_title(session_id, question[:30].strip(), user_id=user_id)
         # Extract memories in background thread (non-blocking)
         threading.Thread(
@@ -1755,6 +1714,62 @@ Please answer the user's question using only the provided data."""
 
 
 # ---- Module-level helpers ----
+
+
+def _history_content_key(content: Any) -> str:
+    """Compare text and multimodal history without including image bytes."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif block.get("type") == "image_url":
+                parts.append("[image]")
+        return "".join(parts)
+    return str(content)
+
+
+def _merge_runtime_history(
+    legacy: list[dict[str, Any]],
+    runtime: list[dict[str, Any]],
+    max_turns: int,
+) -> list[dict[str, Any]]:
+    """Overlay the Runtime suffix while retaining pre-migration messages."""
+    if not runtime:
+        return legacy[-max_turns * 2:]
+    if not legacy:
+        return runtime[-max_turns * 2:]
+
+    overlap = 0
+    max_overlap = min(len(legacy), len(runtime))
+    for size in range(max_overlap, 0, -1):
+        left = legacy[-size:]
+        right = runtime[:size]
+        if all(
+            left[index].get("role") == right[index].get("role")
+            and _history_content_key(left[index].get("content"))
+            == _history_content_key(right[index].get("content"))
+            for index in range(size)
+        ):
+            overlap = size
+            break
+
+    if overlap:
+        merged = legacy[:-overlap] + runtime
+    else:
+        # A mixed session can have a Runtime suffix before its legacy mirror
+        # is written (for example after a process interruption). If the roles
+        # continue naturally, retain the legacy prefix; otherwise Runtime is
+        # the only coherent transcript available.
+        if legacy[-1].get("role") != runtime[0].get("role"):
+            merged = legacy + runtime
+        else:
+            merged = runtime
+    return merged[-max_turns * 2:]
 
 def _build_default_registry(config: AgentConfig) -> AgentRegistry:
     """Build the default AgentRegistry with commander and domain agents."""

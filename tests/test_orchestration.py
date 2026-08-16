@@ -21,7 +21,6 @@ from matrix.orchestration.nodes import (
     _get_ready_steps,
     aggregate_node,
     commander_plan_node,
-    delegate_node,
     reflection_node,
     replan_node,
     _run_domain_agent_react,
@@ -34,6 +33,7 @@ from matrix.orchestration.nodes._helpers import (
 )
 from matrix.orchestration.state import AgentState
 from matrix.orchestration.runtime_adapter import build_dag_run_request
+from matrix.runtime.testing.memory_store import MemoryOperationStore
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
 from matrix.agent import AgentRegistry
@@ -130,12 +130,10 @@ def _build_agent_registry() -> AgentRegistry:
 @pytest.fixture
 def base_state():
     def _make(**overrides) -> AgentState:
-        # These tests exercise the legacy LangGraph DAG unless a runtime mode
-        # is explicitly requested by the test case.
         defaults = {
             "user_message": "当前持仓情况如何？",
             "session_id": "test",
-            "runtime_mode": "legacy",
+            "runtime_mode": "runtime",
         }
         return AgentState(**(defaults | overrides))
     return _make
@@ -160,6 +158,8 @@ def make_config(llm, full_tools, agent_registry, trace=None, circuit_breaker=Non
             "agent_registry": agent_registry,
             "trace": trace,
             "circuit_breaker": circuit_breaker,
+            "runtime_store": MemoryOperationStore(),
+            "user_id": "default",
         },
     }
 
@@ -281,79 +281,6 @@ class TestCommanderPlanNode:
         result = commander_plan_node(base_state(), config=make_config(llm, full_tools, agent_registry))
         assert len(result["delegation_plan"]) == 1
         assert result["delegation_plan"][0]["agent_id"] == "commander"
-
-
-# ---- Delegate ----
-
-class TestDelegateNode:
-    def test_delegate_executes_agent(self, base_state, full_tools, agent_registry):
-        """Domain agent runs ReAct with function calling."""
-        from matrix.llm import FunctionCallResult, ToolCall
-
-        class ToolLLM(FakeLLM):
-            def __init__(self, responses):
-                super().__init__(responses)
-                self._fc_count = 0
-
-            def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
-                self.calls.append(("function_call", messages))
-                self._fc_count += 1
-                if self._fc_count == 1:
-                    return FunctionCallResult(
-                        content="",
-                        tool_calls=[ToolCall(id="call_1", name="finance.holdings_summary", arguments={})],
-                    )
-                return FunctionCallResult(content="当前持仓健康，共2个持仓。", tool_calls=[])
-
-        llm = ToolLLM([])
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "investment-analyst", "task": "分析当前持仓", "skill_name": "", "purpose": "获取持仓"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert len(result["agent_results"]) == 1
-        assert "持仓" in result["agent_results"][0]["result"]
-
-    def test_delegate_agent_not_found(self, base_state, full_tools, agent_registry):
-        llm = FakeLLM([])
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "nonexistent-agent", "task": "测试", "skill_name": "", "purpose": "测试"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert "error" in result["agent_results"][0]
-
-    def test_delegate_with_tool_call(self, base_state, full_tools, agent_registry):
-        """Domain agent calls a tool via function calling."""
-        from matrix.llm import FunctionCallResult, ToolCall
-
-        class ToolCallLLM(FakeLLM):
-            def function_call(self, system, messages, tools, tool_choice="auto", **kwargs):
-                self.calls.append(("function_call", messages))
-                if not self.responses:
-                    return FunctionCallResult(content="", tool_calls=[])
-                text = self.responses.pop(0)
-                if text.startswith("TOOL:"):
-                    return FunctionCallResult(
-                        content="",
-                        tool_calls=[ToolCall(name="finance.holdings_summary", arguments={})],
-                        finish_reason="tool_calls",
-                    )
-                return FunctionCallResult(content=text, tool_calls=[])
-
-        llm = ToolCallLLM(["TOOL:", "当前持仓健康。"])
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓", "skill_name": "", "purpose": "获取"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=make_config(llm, full_tools, agent_registry))
-        assert len(result["agent_results"]) == 1
 
 
 # ---- Aggregate ----
@@ -839,95 +766,6 @@ class TestProgressEvents:
         plan_created = [e for e in progress if e.get("type") == "plan_created"]
         assert len(plan_created) == 0
 
-    def test_delegate_emits_step_start_and_done(self, base_state, full_tools, agent_registry):
-        """Multi-step plan delegate should emit step_start and step_done."""
-        llm = FakeLLM(["分析完成：持仓健康。"])
-        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
-
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
-                 "depends_on": [], "skill_name": "", "purpose": "获取"},
-                {"step": 2, "agent_id": "investment-analyst", "task": "分析数据",
-                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=config)
-        assert len(result["agent_results"]) == 1
-
-        progress = _drain_progress_events(eq)
-        step_start = [e for e in progress if e.get("type") == "step_start"]
-        step_done = [e for e in progress if e.get("type") == "step_done"]
-
-        assert len(step_start) >= 1
-        assert step_start[0]["step"] == 1
-        assert step_start[0]["total"] == 2
-        assert len(step_done) >= 1
-        assert step_done[0]["step"] == 1
-
-    def test_delegate_no_progress_for_single_step(self, base_state, full_tools, agent_registry):
-        """Single-step plan should NOT emit step_start/step_done events."""
-        llm = FakeLLM(["分析完成。"])
-        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
-
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "investment-analyst", "task": "分析",
-                 "skill_name": "", "purpose": "分析"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=config)
-        assert len(result["agent_results"]) == 1
-
-        progress = _drain_progress_events(eq)
-        step_events = [e for e in progress if e.get("type") in ("step_start", "step_done", "step_error")]
-        assert len(step_events) == 0
-
-    def test_delegate_emits_step_error_for_failed_agent(self, base_state, full_tools, agent_registry):
-        """Failed agent (not found) should emit step_error event."""
-        llm = FakeLLM([])
-        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
-
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "nonexistent-agent", "task": "测试",
-                 "depends_on": [], "skill_name": "", "purpose": "测试"},
-                {"step": 2, "agent_id": "investment-analyst", "task": "分析",
-                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
-            ],
-            current_step=0,
-        )
-        result = delegate_node(state, config=config)
-        assert "error" in result["agent_results"][0]
-
-        progress = _drain_progress_events(eq)
-        step_error = [e for e in progress if e.get("type") == "step_error"]
-        assert len(step_error) >= 1
-        assert "error" in step_error[0]
-
-    def test_delegate_step_done_includes_result_preview(self, base_state, full_tools, agent_registry):
-        """step_done event should include result_preview."""
-        llm = FakeLLM(["分析完成：持仓配置合理，建议继续持有。"])
-        config, eq = _make_config_with_events(llm, full_tools, agent_registry)
-
-        state = base_state(
-            delegation_plan=[
-                {"step": 1, "agent_id": "investment-analyst", "task": "获取数据",
-                 "depends_on": [], "skill_name": "", "purpose": "获取"},
-                {"step": 2, "agent_id": "investment-analyst", "task": "分析",
-                 "depends_on": [1], "skill_name": "", "purpose": "分析"},
-            ],
-            current_step=0,
-        )
-        delegate_node(state, config=config)
-
-        progress = _drain_progress_events(eq)
-        step_done = [e for e in progress if e.get("type") == "step_done"]
-        assert len(step_done) >= 1
-        assert "result_preview" in step_done[0]
-
     def test_replan_emits_progress_event(self, base_state, full_tools, agent_registry):
         """Replan should emit progress event when revision is needed."""
         revised_plan = [
@@ -1195,15 +1033,15 @@ class TestDAGRouting:
     """Tests for DAG routing functions."""
 
     def test_route_dag_first_single_step(self, base_state):
-        """Single-step plan → react_prepare (backward compatible)."""
+        """Single-step plan → Runtime agent."""
         plan = [{"step": 1, "depends_on": [], "task": "task1"}]
         result = _route_dag_first(base_state(delegation_plan=plan))
-        assert result == "react_prepare"
+        assert result == "runtime_agent"
 
     def test_route_dag_first_empty_plan(self, base_state):
-        """Empty plan → react_prepare."""
+        """Empty plan → Runtime agent (Commander self-plan happens upstream)."""
         result = _route_dag_first(base_state(delegation_plan=[]))
-        assert result == "react_prepare"
+        assert result == "runtime_agent"
 
     def test_route_dag_first_parallel_no_deps(self, base_state):
         """Multi-step plan with no dependencies → all fan out in parallel."""
@@ -1216,7 +1054,7 @@ class TestDAGRouting:
         assert isinstance(result, list)
         assert len(result) == 2
         assert all(isinstance(s, Send) for s in result)
-        assert all(s.node == "delegate" for s in result)
+        assert all(s.node == "runtime_delegate" for s in result)
 
     def test_route_dag_first_chain_only_first_ready(self, base_state):
         """Chain dependency → only first step fans out."""
@@ -1258,7 +1096,7 @@ class TestDAGRouting:
         )
         assert isinstance(result, list)
         assert len(result) == 1
-        assert result[0].node == "delegate"
+        assert result[0].node == "runtime_delegate"
 
     def test_route_after_replan_all_done(self, base_state):
         """All steps completed → aggregate."""
@@ -1278,11 +1116,10 @@ class TestPlanAndExecuteGraph:
     """Integration tests for the full Plan-and-Execute graph flow."""
 
     def test_graph_has_all_nodes(self):
-        """Verify all 11 nodes are present in the compiled graph."""
+        """Verify the graph exposes only Runtime-backed top-level execution."""
         graph = build_graph()
         expected = {
-            "commander_plan", "react_prepare", "react_llm", "react_tool",
-            "react_evaluate", "delegate", "runtime_agent", "runtime_confirm", "runtime_delegate", "confirm", "aggregate",
+            "commander_plan", "runtime_agent", "runtime_confirm", "runtime_delegate", "aggregate",
             "reflection", "replan_node",
         }
         actual = set(graph.nodes.keys())
@@ -1427,16 +1264,16 @@ class TestPlanAndExecuteGraph:
         final = events[-1]
         assert "市场" in final.get("final_answer", "")
 
-    def test_single_step_backward_compatible(self, base_state, full_tools, agent_registry):
-        """Single-step plan still goes through react_prepare (backward compatible)."""
+    def test_single_step_runtime_path(self, base_state, full_tools, agent_registry):
+        """Single-step plan executes through the independent Runtime."""
         llm = FakeLLM([
             json.dumps([  # commander_plan: single step
                 {"step": 1, "agent_id": "investment-analyst", "task": "分析持仓",
                  "depends_on": [], "output_key": "step_1", "skill_name": "", "purpose": "获取"},
             ]),
-            # delegate → react_prepare path
+            # Runtime agent result, then aggregate
             "当前持仓健康。",
-            "汇总：当前持仓健康。",  # aggregate
+            "汇总：当前持仓健康。",
             '{"ok": true}',  # reflection
         ])
         graph = build_graph()

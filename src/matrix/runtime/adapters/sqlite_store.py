@@ -554,6 +554,17 @@ class SQLiteRuntimeStore:
             })
         return entries
 
+    def delete_session_entries(self, owner_id: str, session_id: str) -> int:
+        """Delete all Runtime session entries for an application reset."""
+        with self._lock:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "DELETE FROM session_entries WHERE owner_id=? AND session_id=?",
+                (owner_id, session_id),
+            )
+            conn.commit()
+        return cur.rowcount
+
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:
         with self._lock:
             conn = self._get_conn()

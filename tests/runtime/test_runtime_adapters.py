@@ -13,10 +13,15 @@ from matrix.tools import ToolDefinition, ToolRegistry
 
 
 class StubLLM:
+    def __init__(self):
+        self.last_messages = []
+
     def function_call(self, system, messages, tools, tool_choice="auto", temperature=None):
         assert system == "system"
+        self.last_messages = messages
         assert messages[0]["role"] == "user"
-        assert tools[0]["name"] == "lookup"
+        if tools:
+            assert tools[0]["name"] == "lookup"
         return FunctionCallResult(
             content="",
             tool_calls=[ToolCall(id="call-1", name="lookup", arguments={"q": "x"})],
@@ -28,7 +33,8 @@ class StubLLM:
 
 
 def test_matrix_model_adapter_translates_function_calls() -> None:
-    adapter = MatrixModelAdapter(StubLLM())
+    client = StubLLM()
+    adapter = MatrixModelAdapter(client)
     response = adapter.complete(ModelRequest(
         system_prompt="system",
         messages=[Message(role="user", content="question")],
@@ -37,6 +43,22 @@ def test_matrix_model_adapter_translates_function_calls() -> None:
 
     assert response.tool_calls[0].call_id == "call-1"
     assert response.tool_calls[0].arguments == {"q": "x"}
+
+
+def test_matrix_model_adapter_preserves_multimodal_content() -> None:
+    client = StubLLM()
+    MatrixModelAdapter(client).complete(ModelRequest(
+        system_prompt="system",
+        messages=[Message(role="user", content=[
+            {"type": "text", "text": "描述图片"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ])],
+        tools=[],
+    ))
+
+    assert client.last_messages[0]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
 
 
 def test_matrix_tool_adapter_preserves_registry_errors_and_results() -> None:

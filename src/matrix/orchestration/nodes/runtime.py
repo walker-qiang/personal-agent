@@ -25,7 +25,7 @@ from ._helpers import (
     _get_configurable,
 )
 from ..state import AgentState
-from ..runtime_adapter import run_dag_step
+from ..runtime_adapter import build_multimodal_content, run_dag_step
 
 
 def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
@@ -65,7 +65,13 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         owner_id=state.get("owner_id", cfg.get("user_id", "default")),
         session_id=state.get("session_id", ""),
         agent_id=agent_id,
-        messages=[Message(role="user", content=history_context + f"请完成以下任务：{task}")],
+        messages=[Message(
+            role="user",
+            content=build_multimodal_content(
+                history_context + f"请完成以下任务：{task}",
+                cfg.get("attachments", []),
+            ),
+        )],
         system_prompt=system_prompt,
         model=getattr(cfg["llm"], "model", ""),
         tools=tool_specs(agent_tools),

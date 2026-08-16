@@ -161,6 +161,67 @@ class TestChatService:
         assert next(stream)["type"] == "classify"
         stream.close()
 
+    def test_codex_direct_runtime_persists_completed_operation(self, chat_service):
+        llm = FakeLLM(["Codex 运行时适配完成。"])
+        llm.provider = "codex"
+        chat_service._default_llm = llm
+
+        events = list(chat_service.stream_chat(
+            "验证 Codex Runtime", session_id="codex-runtime-test", user_id="codex-user",
+        ))
+
+        assert any(event["type"] == "token" for event in events)
+        operations = chat_service._runtime_store.list_operations(
+            "codex-user", session_id="codex-runtime-test",
+        )
+        assert len(operations) == 1
+        assert operations[0].phase.value == "completed"
+
+    def test_image_attachment_uses_runtime_multimodal_message(self, chat_service):
+        upload_dir = chat_service.config.root_path.parent / "var" / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / "runtime-image.png").write_bytes(b"fake-png")
+        chat_service._default_llm = FakeLLM(["图片已收到。"])
+        chat_service._pipeline_llm = FakeLLM(["[]"])
+
+        events = list(chat_service.stream_chat(
+            "请描述图片", session_id="runtime-image", user_id="image-user",
+            file_id="runtime-image",
+        ))
+
+        assert any(event["type"] == "token" for event in events)
+        user_entries = chat_service._runtime_store.list_session_entries(
+            "image-user", "runtime-image", entry_type="user", limit=1,
+        )
+        assert isinstance(user_entries[0]["payload"]["content"], list)
+        assert any(
+            call[0] == "function_call"
+            and isinstance(call[1][-1]["content"], list)
+            for call in chat_service._default_llm.calls
+        )
+        assert chat_service._runtime_store.list_operations(
+            "image-user", session_id="runtime-image",
+        )[0].phase.value == "completed"
+
+    def test_runtime_history_keeps_legacy_prefix_and_runtime_suffix(self, chat_service):
+        sid = "mixed-history"
+        user_id = "history-user"
+        chat_service.store.save_message(sid, "user", "旧问题", user_id=user_id)
+        chat_service.store.save_message(sid, "assistant", "旧回答", user_id=user_id)
+        chat_service._runtime_store.append_session_entry(
+            user_id, sid, "user", {"content": "新问题"},
+        )
+        chat_service._runtime_store.append_session_entry(
+            user_id, sid, "assistant", {"content": "新回答"},
+        )
+
+        history = chat_service._get_history(sid, user_id)
+
+        assert [(item["role"], item["content"]) for item in history] == [
+            ("user", "旧问题"), ("assistant", "旧回答"),
+            ("user", "新问题"), ("assistant", "新回答"),
+        ]
+
     def test_session_memory_persists(self, chat_service):
         chat_service._default_llm = FakeLLM([
             "持仓健康。",
@@ -182,6 +243,9 @@ class TestChatService:
         list(chat_service.stream_chat("test", sid))
         chat_service.reset(sid)
         assert len(chat_service._get_history(sid)) == 0
+        assert chat_service._runtime_store.list_session_entries(
+            "default", sid, limit=20,
+        ) == []
 
     def test_skill_flow_in_graph(self, chat_service):
         chat_service._default_llm = FakeLLM([

@@ -20,6 +20,36 @@ class MemoryOperationStore:
         self.events: dict[str, list[object]] = {}
         self.approvals: dict[str, Approval] = {}
         self.effects: dict[tuple[str, str], dict] = {}
+        self.session_entries: list[dict] = []
+
+    def append_session_entry(self, owner_id, session_id, entry_type, payload):
+        entry = {
+            "entry_id": uuid.uuid4().hex,
+            "owner_id": owner_id,
+            "session_id": session_id,
+            "entry_type": entry_type,
+            "payload": dict(payload),
+            "created_at": time.time(),
+        }
+        self.session_entries.append(entry)
+        return entry["entry_id"]
+
+    def list_session_entries(self, owner_id, session_id, entry_type="", limit=20):
+        values = [
+            item for item in self.session_entries
+            if item["owner_id"] == owner_id and item["session_id"] == session_id
+            and (not entry_type or item["entry_type"] == entry_type)
+        ]
+        values.sort(key=lambda item: item["created_at"], reverse=True)
+        return values[:limit]
+
+    def delete_session_entries(self, owner_id, session_id):
+        before = len(self.session_entries)
+        self.session_entries = [
+            item for item in self.session_entries
+            if not (item["owner_id"] == owner_id and item["session_id"] == session_id)
+        ]
+        return before - len(self.session_entries)
 
     def create(self, operation: OperationState) -> None:
         if operation.operation_id in self.operations:
