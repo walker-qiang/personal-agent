@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 
-RUNTIME_SCHEMA_VERSION = 1
+RUNTIME_SCHEMA_VERSION = 2
 
 
 def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
@@ -53,7 +53,7 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
             agent_id TEXT NOT NULL,
             orchestration_run_id TEXT NOT NULL DEFAULT '',
             operation_scope TEXT NOT NULL DEFAULT 'top_level'
-                CHECK(operation_scope IN ('top_level', 'dag_step')),
+                CHECK(operation_scope IN ('top_level', 'dag_step', 'nested_agent_tool')),
             step_id TEXT,
             phase TEXT NOT NULL,
             turn_index INTEGER NOT NULL,
@@ -127,8 +127,92 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT version FROM runtime_schema_meta ORDER BY version DESC LIMIT 1"
     ).fetchone()
-    if row is None or int(row[0]) < RUNTIME_SCHEMA_VERSION:
+    current_version = int(row[0]) if row is not None else 0
+    if not _supports_nested_agent_scope(conn):
+        _migrate_runtime_operations_for_nested_agents(conn)
+    if current_version < RUNTIME_SCHEMA_VERSION:
         conn.execute(
             "INSERT OR REPLACE INTO runtime_schema_meta(version, applied_at) VALUES (?, ?)",
             (RUNTIME_SCHEMA_VERSION, time.time()),
         )
+
+
+def _supports_nested_agent_scope(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_operations'"
+    ).fetchone()
+    return bool(row and row[0] and "nested_agent_tool" in str(row[0]))
+
+
+def _migrate_runtime_operations_for_nested_agents(conn: sqlite3.Connection) -> None:
+    """Rebuild the table to extend its CHECK constraint without losing data.
+
+    SQLite cannot alter a CHECK constraint in place.  Existing installations
+    may already have the v1 table, so keep the migration explicit and
+    copy every persisted operation before replacing the table.
+    """
+    conn.execute("DROP INDEX IF EXISTS idx_runtime_operations_owner_session")
+    conn.execute("DROP INDEX IF EXISTS uq_runtime_active_top_level")
+    conn.execute("DROP INDEX IF EXISTS uq_runtime_dag_step")
+    conn.execute("ALTER TABLE runtime_operations RENAME TO runtime_operations_v1")
+    conn.execute(
+        """
+        CREATE TABLE runtime_operations (
+            operation_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            orchestration_run_id TEXT NOT NULL DEFAULT '',
+            operation_scope TEXT NOT NULL DEFAULT 'top_level'
+                CHECK(operation_scope IN ('top_level', 'dag_step', 'nested_agent_tool')),
+            step_id TEXT,
+            phase TEXT NOT NULL,
+            turn_index INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            state_schema_version INTEGER NOT NULL,
+            last_event_sequence INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO runtime_operations (
+            operation_id, owner_id, session_id, agent_id,
+            orchestration_run_id, operation_scope, step_id, phase,
+            turn_index, version, state_schema_version,
+            last_event_sequence, state_json, created_at, updated_at
+        )
+        SELECT
+            operation_id, owner_id, session_id, agent_id,
+            orchestration_run_id, operation_scope, step_id, phase,
+            turn_index, version, state_schema_version,
+            last_event_sequence, state_json, created_at, updated_at
+        FROM runtime_operations_v1
+        """
+    )
+    conn.execute("DROP TABLE runtime_operations_v1")
+    conn.execute(
+        """
+        CREATE INDEX idx_runtime_operations_owner_session
+            ON runtime_operations(owner_id, session_id, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX uq_runtime_active_top_level
+            ON runtime_operations(owner_id, session_id)
+            WHERE operation_scope = 'top_level'
+              AND phase NOT IN ('completed', 'failed', 'aborted', 'recovery_required')
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX uq_runtime_dag_step
+            ON runtime_operations(orchestration_run_id, step_id)
+            WHERE operation_scope = 'dag_step'
+              AND orchestration_run_id <> '' AND step_id IS NOT NULL
+        """
+    )

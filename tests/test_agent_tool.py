@@ -159,7 +159,7 @@ class TestAgentToolHandler:
         _call_depth.set(0)
 
         with patch(
-            "matrix.orchestration.nodes.commander._run_domain_agent_react",
+            "matrix.orchestration.runtime_adapter.run_nested_agent_runtime",
             return_value={"answer": "任务完成结果", "tool_results": [{"data": "test"}]},
         ):
             result = wrapper(task="分析持仓")
@@ -176,7 +176,7 @@ class TestAgentToolHandler:
         _call_depth.set(0)
 
         with patch(
-            "matrix.orchestration.nodes.commander._run_domain_agent_react",
+            "matrix.orchestration.runtime_adapter.run_nested_agent_runtime",
             return_value={"answer": "", "tool_results": []},
         ):
             result = wrapper(task="some task")
@@ -192,7 +192,7 @@ class TestAgentToolHandler:
 
         long_answer = "A" * 5000
         with patch(
-            "matrix.orchestration.nodes.commander._run_domain_agent_react",
+            "matrix.orchestration.runtime_adapter.run_nested_agent_runtime",
             return_value={"answer": long_answer, "tool_results": []},
         ):
             result = wrapper(task="some task")
@@ -209,7 +209,7 @@ class TestAgentToolHandler:
         _call_depth.set(0)
 
         with patch(
-            "matrix.orchestration.nodes.commander._run_domain_agent_react",
+            "matrix.orchestration.runtime_adapter.run_nested_agent_runtime",
             side_effect=RuntimeError("LLM service unavailable"),
         ):
             result = wrapper(task="some task")

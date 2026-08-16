@@ -1154,6 +1154,9 @@ class ChatService:
                 "working_memory": {"pinned": "", "insights": []},
                 "circuit_breaker": CircuitBreaker(),
                 "question": "",
+                "runtime_store": self._runtime_store,
+                "execution_policy": ExecutionPolicy(),
+                "user_id": "default",
             }
         return factory
 

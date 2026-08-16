@@ -53,7 +53,6 @@ from .react import (
 from .runtime import runtime_agent_node, runtime_confirm_node, runtime_delegate_node
 
 from .commander import (
-    _domain_react_fallback,
     _get_ready_steps,
     _run_domain_agent_react,
     aggregate_node,
@@ -91,7 +90,6 @@ __all__ = [
     "runtime_confirm_node",
     "runtime_delegate_node",
     # Commander
-    "_domain_react_fallback",
     "_run_domain_agent_react",
     "aggregate_node",
     "commander_plan_node",

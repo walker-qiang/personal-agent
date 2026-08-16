@@ -46,6 +46,7 @@ def execute_operation(
     tool_results: list[ToolResult] = []
     total_tool_calls = 0
     usage: dict[str, Any] = {}
+    started_at = time.monotonic()
 
     if resume_approval_id:
         if current.phase is not OperationPhase.RESUMING:
@@ -81,6 +82,7 @@ def execute_operation(
                 tool_request,
                 tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
             )
+            _check_timeout(started_at, request.execution_options.timeout_seconds)
             _debug(debug_trace, "tool_result", {
                 "name": pending_call.name, "call_id": pending_call.call_id,
                 "result": result.result, "error": result.error,
@@ -109,6 +111,7 @@ def execute_operation(
 
     try:
         for turn_index in range(request.execution_options.max_turns):
+            _check_timeout(started_at, request.execution_options.timeout_seconds)
             if handle._cancel_requested:
                 return _finish(
                     store, current, events, RunOutcome.ABORTED,
@@ -132,7 +135,10 @@ def execute_operation(
                 operation=current,
                 events=events,
                 debug_trace=debug_trace,
+                started_at=started_at,
+                timeout_seconds=request.execution_options.timeout_seconds,
             )
+            _check_timeout(started_at, request.execution_options.timeout_seconds)
             if response is None:
                 return _finish(
                     store, current, events, RunOutcome.ABORTED,
@@ -345,6 +351,7 @@ def execute_operation(
                     tool_request,
                     tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
                 )
+                _check_timeout(started_at, request.execution_options.timeout_seconds)
                 _debug(debug_trace, "tool_result", {
                     "name": tool_call.name, "call_id": tool_call.call_id,
                     "result": result.result, "error": result.error,
@@ -373,7 +380,23 @@ def execute_operation(
             "maximum turns exceeded", tool_results,
             RuntimeEventType.RUN_FAILED, usage,
         )
+    except TimeoutError as exc:
+        latest = store.load(operation.owner_id, operation.operation_id)
+        if latest is not None:
+            current = latest
+        return _finish(
+            store, current, events, RunOutcome.FAILED,
+            str(exc), tool_results, RuntimeEventType.RUN_FAILED, usage,
+        )
     except Exception as exc:
+        # Model retries commit RETRY_SCHEDULED transitions inside
+        # _complete_with_retry().  If the final attempt fails, that helper
+        # raises before returning its newer snapshot, so `current` can lag
+        # behind the durable SQLite version.  Reload before the terminal
+        # failure transition to avoid committing from a stale version.
+        latest = store.load(operation.owner_id, operation.operation_id)
+        if latest is not None:
+            current = latest
         return _finish(
             store, current, events, RunOutcome.FAILED,
             f"runtime execution failed: {type(exc).__name__}: {exc}",
@@ -391,9 +414,13 @@ def _complete_with_retry(
     operation: OperationState,
     events: list[RuntimeEvent],
     debug_trace: EphemeralDebugTrace | None = None,
+    started_at: float | None = None,
+    timeout_seconds: float = 300.0,
 ) -> tuple[ModelResponse | None, OperationState]:
     attempts = request.execution_options.max_model_retries + 1
     for attempt in range(attempts):
+        if started_at is not None:
+            _check_timeout(started_at, timeout_seconds)
         if handle._cancel_requested:
             return None, operation
         try:
@@ -418,6 +445,8 @@ def _complete_with_retry(
                 "attempt": attempt,
             })
             response = model.complete(model_request)
+            if started_at is not None:
+                _check_timeout(started_at, timeout_seconds)
             _debug(debug_trace, "model_response", {
                 "content": response.content,
                 "tool_calls": [
@@ -476,6 +505,15 @@ def _approval_operation(tool_name: str, arguments: dict[str, Any]) -> str:
         if isinstance(plan, dict):
             return str(plan.get("operation", ""))
     return tool_name
+
+
+def _check_timeout(started_at: float, timeout_seconds: float) -> None:
+    """Enforce the operation wall-clock budget between blocking calls."""
+    elapsed = time.monotonic() - started_at
+    if elapsed >= timeout_seconds:
+        raise TimeoutError(
+            f"operation timed out after {timeout_seconds:g} seconds"
+        )
 
 
 def _can_auto_approve(tool_name: str, arguments: dict[str, Any], policy: Any) -> bool:

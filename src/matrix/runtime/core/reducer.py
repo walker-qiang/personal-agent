@@ -10,7 +10,12 @@ from ..domain.operations import OperationPhase, OperationState
 
 _ALLOWED_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
     OperationPhase.CREATED: frozenset({OperationPhase.PREPARING, OperationPhase.ABORTED, OperationPhase.RECOVERY_REQUIRED}),
-    OperationPhase.PREPARING: frozenset({OperationPhase.REQUESTING_MODEL, OperationPhase.ABORTED, OperationPhase.RECOVERY_REQUIRED}),
+    OperationPhase.PREPARING: frozenset({
+        OperationPhase.REQUESTING_MODEL,
+        OperationPhase.FAILED,
+        OperationPhase.ABORTED,
+        OperationPhase.RECOVERY_REQUIRED,
+    }),
     OperationPhase.REQUESTING_MODEL: frozenset({
         OperationPhase.EXECUTING_TOOLS,
         OperationPhase.PREPARING_NEXT_TURN,

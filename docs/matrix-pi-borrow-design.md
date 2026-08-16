@@ -1,8 +1,9 @@
 # Project Matrix 改进设计 — 借鉴 Pi-Agent 的 7 个方向
 
 > 当前状态说明：本文保留 Pi 借鉴过程中的历史实现分析。当前顶层执行已统一到
-> Agent Runtime；文中 `react_*` 节点描述不再代表顶层路由，仅适用于尚未迁移的
-> Agent-as-Tool 嵌套 helper。
+> Agent Runtime；文中 `react_*` 节点描述不再代表顶层路由。Agent-as-Tool 的实际
+> 嵌套调用已通过 Runtime Adapter 执行，旧 helper 仅作为兼容表面保留，后续可在
+> 验收完成后删除。
 
 > 基于 Pi-Agent Book 全 10 章源码级分析，对照 Matrix 现有代码，按"改动小、收益快、风险低"优先排序。
 >

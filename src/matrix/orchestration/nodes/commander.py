@@ -21,12 +21,9 @@ from ...skills.router import SemanticRouter, SkillMatch
 from ._helpers import (
     _build_history_context,
     _build_react_final_answer,
-    _build_tools_for_llm,
-    _check_early_stop,
     _classify_query_factuality,
     _evaluate_sufficiency,
     _extract_media_urls,
-    _focus_tools_for_task,
     _fix_media_answer,
     _get_configurable,
     _heuristic_number_check,
@@ -36,10 +33,8 @@ from ._helpers import (
     _inject_working_memory,
     _is_high_risk,
     _is_refusal,
-    _prune_tools,
     _push_event,
     _requires_browser,
-    _run_budget_and_compact,
     _today_cn,
     COMMANDER_AGGREGATE_PROMPT,
     COMMANDER_PLAN_PROMPT,
@@ -48,20 +43,15 @@ from ._helpers import (
     LESSON_EXTRACTION_PROMPT,
     MAX_PLAN_STEPS,
     MAX_REACT_ITERATIONS,
-    MAX_SUBTASK_ITERATIONS,
     MAX_SUBTASKS,
     PREFLECT_PROMPT,
     REFLECTION_PROMPT,
     REFLEXION_PROMPT,
     REPLAN_PROMPT,
     REVISE_PROMPT,
-    EVALUATOR_INTERVAL,
 )
-from .react import _react_execute_tool_calls
 from ..anti_hallucination import verify_all_claims, build_verified_output, _strip_all_verification_tags
 from ..state import AgentState
-from ..context_loader import enrich_system_prompt
-from ...context.compaction import compact_messages
 
 logger = logging.getLogger("matrix.orchestration")
 
@@ -397,7 +387,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     }
 
 
-# ── Domain Agent ReAct loop ──────────────────────────────────────────────────
+# ── Nested Agent-as-Tool compatibility boundary ─────────────────────────────
 
 def _run_domain_agent_react(
     agent_def: Any,
@@ -409,470 +399,44 @@ def _run_domain_agent_react(
     agent_id: str = "",
     max_iterations: int = MAX_REACT_ITERATIONS,
 ) -> dict[str, Any]:
-    """Run a ReAct loop for a domain agent using standard multi-turn tool calling.
-
-    The loop body delegates to _react_call_llm, _react_handle_tool_calls,
-    and _react_handle_content for clarity.
-    """
-    llm = cfg["llm"]
-
+    """Compatibility entry point; nested execution is Runtime-managed."""
+    del skill_results, agent_id
     if _requires_browser(task):
         browser_tools = [
             name for name in tools.tool_names()
             if name.startswith("mcp_browser_")
         ]
         if not browser_tools:
-            message = (
-                "当前运行环境未配置浏览器 MCP，无法执行浏览器打开、动态页面提取或页面交互。"
-                "请启用 browser MCP 后重试。"
-            )
-            logger.warning("browser task blocked: no browser MCP tools available")
             return {
-                "answer": message,
+                "answer": (
+                    "当前运行环境未配置浏览器 MCP，无法执行浏览器打开、动态页面提取或页面交互。"
+                    "请启用 browser MCP 后重试。"
+                ),
                 "tool_results": [],
                 "findings": [],
                 "environment_blocked": True,
             }
 
-    tool_results: list[dict[str, Any]] = list(skill_results)
-    iteration = 0
-    prev_result_count = len(tool_results)
-    consecutive_failures = 0
-    consecutive_no_progress = 0
-    original_question = cfg.get("question", task)
-    history_context = _build_history_context(cfg.get("history", []))
+    from ..runtime_adapter import run_nested_agent_runtime
 
-    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
-        agent_name=agent_def.name,
-        persona=agent_def.persona,
+    nested_cfg = dict(cfg)
+    if session_id:
+        nested_cfg["session_id"] = session_id
+    result = run_nested_agent_runtime(
+        agent_def=agent_def,
         task=task,
-        today=_today_cn(),
+        agent_tools=tools,
+        cfg=nested_cfg,
+        max_iterations=max_iterations,
     )
-
-    # Pinned working memory + DataBus index
-    wm = cfg.get("working_memory", {})
-    system_prompt = _inject_working_memory(system_prompt, wm, cfg.get("history", []))
-    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
-
-    # Phase 5: Enrich with project context (AGENTS.md) + skills清单
-    system_prompt = enrich_system_prompt(
-        system_prompt, agent_def=agent_def, agent_registry=cfg.get("agent_registry"),
-    )
-
-    # P3: Inject cross-session failure lessons
-    system_prompt = _inject_lessons(system_prompt, task, agent_id, cfg)
-
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": history_context + f"请完成以下任务：{task}"},
-    ]
-    # Inject image attachments as multi-modal content blocks
-    attachments = cfg.get("attachments", [])
-    if attachments:
-        content_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": history_context + f"请完成以下任务：{task}"},
-        ]
-        for att in attachments:
-            if att.get("type") == "image":
-                content_blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{att['mime_type']};base64,{att['base64']}"},
-                })
-        messages = [{"role": "user", "content": content_blocks}]
-    system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), messages)
-
-    _push_event(cfg, "progress", {"message": "Agent 开始分析任务，调用工具获取数据..."})
-
-    while iteration < max_iterations:
-        iteration += 1
-
-        early_reason = _check_early_stop(
-            tool_results, iteration, consecutive_failures, consecutive_no_progress,
-        )
-        if early_reason:
-            logger.info("ReAct early stop at iteration %d: %s", iteration, early_reason)
-            break
-
-        llm_tools = _build_tools_for_llm(tools)
-        # P2-2: Action Space pruning
-        llm_tools = _prune_tools(llm_tools, messages, iteration=iteration,
-                                 circuit_breaker=cfg.get("circuit_breaker"))
-        llm_tools = _focus_tools_for_task(task, llm_tools)
-        pipeline_llm = cfg.get("pipeline_llm")
-        wm = cfg.get("working_memory", {})
-        user_goal = wm.get("pinned", original_question)
-
-        # P2-3: Budget pre-check + compaction (98% threshold, free model)
-        messages, rejected = _run_budget_and_compact(
-            messages, system_prompt, pipeline_llm, user_goal,
-        )
-        if rejected:
-            return {
-                "answer": "[PROMPT_BUDGET_EXCEEDED] 上下文过长，请精简问题后重试。",
-                "tool_results": tool_results,
-                "findings": [],
-            }
-
-        result = _react_call_llm(llm, system_prompt, messages, llm_tools, original_question,
-                                 agent_def, task, tool_results, tools)
-
-        if isinstance(result, dict) and "answer" in result:
-            # LLM call failed → fallback returned a final answer
-            result["answer"] = _fix_media_answer(result["answer"], tool_results)
-            return result
-
-        if result.tool_calls:
-            reaction = _react_handle_tool_calls(
-                result, messages, tool_results, iteration, tools, llm, system_prompt,
-                llm_tools, cfg, agent_id, session_id, original_question,
-                consecutive_failures, consecutive_no_progress, prev_result_count,
-            )
-            if reaction["done"]:
-                return reaction["result"]
-            messages = reaction["messages"]
-            tool_results = reaction["tool_results"]
-            consecutive_failures = reaction["consecutive_failures"]
-            consecutive_no_progress = reaction["consecutive_no_progress"]
-            prev_result_count = reaction["prev_result_count"]
-            continue
-
-        # content / no-tools branch
-        content_result = _react_handle_content(
-            result, messages, tool_results, iteration, max_iterations,
-            consecutive_no_progress, agent_def, task, tools, llm,
-        )
-        if content_result["done"]:
-            return content_result["result"]
-        messages = content_result["messages"]
-        tool_results = content_result["tool_results"]
-        consecutive_no_progress = content_result["consecutive_no_progress"]
-
-    return _react_generate_partial_answer(tool_results, llm)
-
-
-# ── ReAct helpers ────────────────────────────────────────────────────────────
-
-def _react_call_llm(
-    llm, system_prompt: str, messages: list, llm_tools: list,
-    original_question: str, agent_def: Any, task: str,
-    tool_results: list, tools: ToolRegistry,
-) -> FunctionCallResult | dict[str, Any]:
-    """Call the LLM with error handling. Returns FunctionCallResult on success,
-    or a final answer dict on failure."""
-    try:
-        temp = _classify_query_factuality(original_question)
-        return llm.function_call(system_prompt, messages, llm_tools, temperature=temp)
-    except (LLMError, ConnectionError, TimeoutError, ValueError, OSError, RuntimeError, TypeError, KeyError) as e:
-        msg_len = sum(len(str(m.get("content", ""))) for m in messages)
-        logger.error("ReAct: LLM call failed in domain_agent_react: %s (msg_count=%d, total_chars=%d)",
-                     type(e).__name__, len(messages), msg_len)
-        # If we have no tool results at all, skip the fallback (it will also fail
-        # with the same broken LLM) and return a clear error immediately.
-        # This avoids adding 45s+ of wasted fallback retries per step.
-        if not tool_results:
-            return {
-                "answer": f"LLM 服务异常（{type(e).__name__}），无法完成任务。请确认 LLM 服务可用后重试。",
-                "tool_results": tool_results, "findings": [],
-            }
-        # With existing tool results, try fallback but accept partial answers.
-        # If the fallback LLM also fails, don't iterate — just use what we have.
-        react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm,
-                                               max_iterations=1)
-        if react_result.get("answer") or react_result.get("tool_results"):
-            return react_result
-        return {"answer": f"LLM 服务异常（{type(e).__name__}），请稍后重试。",
-                "tool_results": tool_results, "findings": []}
-
-
-def _react_handle_tool_calls(
-    result: FunctionCallResult,
-    messages: list,
-    tool_results: list,
-    iteration: int,
-    tools: ToolRegistry,
-    llm,
-    system_prompt: str,
-    llm_tools: list,
-    cfg: dict,
-    agent_id: str,
-    session_id: str,
-    original_question: str,
-    consecutive_failures: int,
-    consecutive_no_progress: int,
-    prev_result_count: int,
-) -> dict:
-    """Handle the tool-calls branch of the ReAct loop.
-
-    Returns:
-        done: bool — True if the loop should stop
-        result: dict — final answer if done
-        messages, tool_results, consecutive_failures, consecutive_no_progress,
-        prev_result_count — updated state if not done
-    """
-    # Push thinking
-    _push_thinking_for_calls(result, tools, tool_results, cfg)
-
-    # Append assistant message
-    assistant_msg: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
-    api_tool_calls = []
-    for tc in result.tool_calls:
-        api_tool_calls.append({
-            "id": tc.id, "type": "function",
-            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)},
-        })
-    assistant_msg["tool_calls"] = api_tool_calls
-    messages.append(assistant_msg)
-
-    # Execute tools with shared guard logic
-    exec_result = _react_execute_tool_calls(
-        tool_calls_raw=api_tool_calls, agent_tools=tools, messages=messages,
-        accumulated=tool_results, agent_id=agent_id, session_id=session_id,
-        cfg=cfg, node_name="delegate",
-        consecutive_failures=consecutive_failures,
-        consecutive_no_progress=consecutive_no_progress,
-        prev_result_count=prev_result_count,
-        push_events=True,
-        ref_store=cfg.get("ref_store"),
-    )
-
-    messages = exec_result["messages"]
-    tool_results.extend(exec_result["new_tool_results"])
-    consecutive_failures = exec_result["consecutive_failures"]
-    consecutive_no_progress = exec_result["consecutive_no_progress"]
-    prev_result_count = exec_result["prev_result_count"]
-
-    if exec_result["force_summarize"]:
-        messages.append({
-            "role": "user",
-            "content": "所有工具调用均为重复。请基于已有结果为用户总结。",
-        })
-        try:
-            final = llm.function_call(system_prompt, messages, llm_tools)
-            if final.content:
-                return {"done": True, "result": {
-                    "answer": _fix_media_answer(final.content.strip(), tool_results),
-                    "tool_results": tool_results, "findings": [],
-                }}
-        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
-            logger.error("ReAct: LLM final call failed: %s", type(e).__name__)
-        return {"done": True, "result": {
-            "answer": _fix_media_answer("工具调用已完成，但无法生成总结。", tool_results),
-            "tool_results": tool_results, "findings": [],
-        }}
-
-    # Periodic evaluator
-    if iteration > 0 and iteration % EVALUATOR_INTERVAL == 0 and tool_results:
-        sufficient, reason = _evaluate_sufficiency(original_question, tool_results, "", llm)
-        if sufficient:
-            logger.info("ReAct: evaluator sufficient at iter %d: %s", iteration, reason)
-            return {"done": True, "result": {
-                "answer": _fix_media_answer("已收集到足够数据进行分析。", tool_results),
-                "tool_results": tool_results, "findings": [],
-            }}
-
     return {
-        "done": False,
-        "messages": messages, "tool_results": tool_results,
-        "consecutive_failures": consecutive_failures,
-        "consecutive_no_progress": consecutive_no_progress,
-        "prev_result_count": prev_result_count,
+        "answer": result.get("answer", ""),
+        "tool_results": result.get("tool_results", []),
+        "findings": [],
+        "operation_id": result.get("operation_id", ""),
+        **({"error": result["error"]} if result.get("error") else {}),
     }
 
-
-def _push_thinking_for_calls(
-    result: FunctionCallResult, tools: ToolRegistry,
-    tool_results: list, cfg: dict,
-) -> None:
-    """Push a thinking event for tool calls."""
-    if result.content:
-        _push_event(cfg, "thinking", {"content": result.content.strip()})
-    else:
-        tool_names = []
-        for tc in result.tool_calls:
-            if tc.name not in tools.tool_names():
-                continue
-            args_key = json.dumps(tc.arguments, sort_keys=True)
-            if any(
-                prev.get("name") == tc.name
-                and json.dumps(prev.get("arguments", {}), sort_keys=True) == args_key
-                for prev in tool_results
-            ):
-                continue
-            tool_names.append(tc.name)
-        if tool_names:
-            _push_event(cfg, "thinking", {"content": f"正在调用 {'、'.join(tool_names)} 获取数据..."})
-
-
-def _react_handle_content(
-    result: FunctionCallResult,
-    messages: list,
-    tool_results: list,
-    iteration: int,
-    max_iterations: int,
-    consecutive_no_progress: int,
-    agent_def: Any,
-    task: str,
-    tools: ToolRegistry,
-    llm,
-) -> dict:
-    """Handle the content/no-tools branch of the ReAct loop.
-
-    Returns {done, result, messages, tool_results, consecutive_no_progress}.
-    """
-    if result.content:
-        if _is_refusal(result.content) and tool_results:
-            if iteration < max_iterations:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "你刚才说无法提供数据，但实际上工具已经返回了结果。"
-                        "请基于以上工具返回的真实数据回答用户的问题。"
-                        "直接给出天气信息，不要说你无法提供。"
-                    ),
-                })
-                return {
-                    "done": False, "messages": messages, "tool_results": tool_results,
-                    "consecutive_no_progress": consecutive_no_progress + 1,
-                }
-
-        return {"done": True, "result": {
-            "answer": _fix_media_answer(result.content.strip(), tool_results),
-            "tool_results": tool_results, "findings": [],
-        }}
-
-    # No content, no tool calls → fallback
-    react_result = _domain_react_fallback(agent_def, task, tool_results, tools, llm)
-    if react_result.get("answer"):
-        react_result["answer"] = _fix_media_answer(react_result["answer"], tool_results)
-        return {"done": True, "result": react_result}
-    if react_result.get("tool_results"):
-        return {"done": False, "messages": messages, "tool_results": react_result["tool_results"],
-                "consecutive_no_progress": consecutive_no_progress}
-
-    return {"done": True, "result": {
-        "answer": _fix_media_answer("无法完成任务，请检查工具和数据。", tool_results),
-        "tool_results": tool_results, "findings": [],
-    }}
-
-
-def _react_generate_partial_answer(
-    tool_results: list, llm,
-) -> dict[str, Any]:
-    """Generate a partial answer when max iterations reached."""
-    if tool_results:
-        try:
-            summary_prompt = f"""你已收集了以下工具结果，但步数已达上限。请基于这些数据给出一段简洁的回答：
-
-{json.dumps(tool_results, ensure_ascii=False, indent=2)}
-
-请直接回答用户的问题，不要提及"步数"或"限制"。"""
-            partial = llm.complete(
-                "你是专业的回答助手，请基于已有数据回答。",
-                [{"role": "user", "content": summary_prompt}],
-                temperature=0.1,
-            )
-            if partial and len(partial) > 10:
-                return {"answer": _fix_media_answer(partial, tool_results), "tool_results": tool_results, "findings": []}
-        except Exception as e:
-            logger.warning("_react_generate_partial_answer LLM failed: %s: %s", type(e).__name__, str(e)[:200])
-    return {
-        "answer": _fix_media_answer("已达到最大分析步数，请基于已有数据回答。", tool_results),
-        "tool_results": tool_results, "findings": [],
-    }
-
-
-# ── Fallback ReAct ───────────────────────────────────────────────────────────
-
-def _domain_react_fallback(
-    agent_def: Any,
-    task: str,
-    tool_results: list[dict[str, Any]],
-    tools: ToolRegistry,
-    llm,
-    max_iterations: int = MAX_REACT_ITERATIONS,
-) -> dict[str, Any]:
-    """Regex-based ReAct fallback for domain agents."""
-    tools_list = json.dumps(tools.list_tools(), ensure_ascii=False)
-    system_prompt = f"""You are {agent_def.name}, a domain expert.
-
-{agent_def.persona}
-
-Current task: {task}
-
-You have access to these tools: {tools_list}
-
-IMPORTANT: You MUST call tools using this exact format:
-<tool_call>tool_name</tool_call>
-<arguments>
-{{"param": "value"}}
-</arguments>
-
-You can call ONE tool at a time. After the tool responds, you can analyze
-the result and decide whether to call another tool or output the answer.
-
-After calling all needed tools, output your final answer with <answer>...</answer>."""
-
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": f"Complete this task: {task}"},
-    ]
-
-    for _ in range(max_iterations):
-        try:
-            response = llm.complete(system_prompt, messages, temperature=0.1)
-        except (LLMError, ConnectionError, TimeoutError, ValueError, OSError) as e:
-            logger.error("ReAct fallback LLM failed: %s", type(e).__name__)
-            return {"answer": "", "tool_results": tool_results, "findings": []}
-
-        tc_match = _extract_tool_call(response)
-        if tc_match:
-            tool_name = tc_match["name"]
-            try:
-                args = json.loads(tc_match["args"])
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            if tool_name in tools.tool_names():
-                try:
-                    result = tools.call(tool_name, args)
-                    if isinstance(result, dict) and "error" in result:
-                        tool_results.append({
-                            "name": tool_name, "arguments": args, "error": result["error"],
-                        })
-                    else:
-                        tool_results.append({
-                            "name": tool_name, "arguments": args, "result": result,
-                        })
-                except Exception as err:
-                    tool_results.append({
-                        "name": tool_name, "arguments": args, "error": str(err),
-                    })
-            messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": f"Tool result: {json.dumps(tool_results[-1], ensure_ascii=False)}"})
-            continue
-
-        answer_match = _extract_answer(response)
-        if answer_match:
-            return {"answer": answer_match, "tool_results": tool_results, "findings": []}
-
-        # No tool call or answer — stop
-        return {"answer": response.strip(), "tool_results": tool_results, "findings": []}
-
-    return {"answer": "", "tool_results": tool_results, "findings": []}
-
-
-def _extract_tool_call(text: str) -> dict[str, str] | None:
-    """Extract tool call from regex-based ReAct output."""
-    import re
-    tc = re.search(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL)
-    if not tc:
-        return None
-    args = re.search(r"<arguments>\s*(.*?)\s*</arguments>", text, re.DOTALL)
-    return {"name": tc.group(1).strip(), "args": args.group(1).strip() if args else "{}"}
-
-
-def _extract_answer(text: str) -> str | None:
-    """Extract answer from regex-based ReAct output."""
-    import re
-    m = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
-    return m.group(1).strip() if m else None
 
 
 # ── Plan-and-Execute: DAG router + Replan ────────────────────────────────────

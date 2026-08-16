@@ -178,7 +178,7 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 
 ### 独立 Runtime 的执行策略与调试边界
 
-标准 function-calling 单 Agent 路径可以通过 Runtime Adapter 进入独立 AgentRuntime；Commander、LangGraph DAG、replan、aggregate 和 reflection
+标准 function-calling 单 Agent 路径和 Agent-as-Tool 嵌套 Agent 均通过 Runtime Adapter 进入独立 AgentRuntime；Commander、LangGraph DAG、replan、aggregate 和 reflection
 仍由上层编排。Runtime 只接收应用层已经解析好的 ExecutionPolicy，不反向
 依赖 AgentRegistry、LangGraph 或 FastAPI。
 
@@ -191,6 +191,7 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 - DebugTrace 默认关闭。开启后只挂在当前 RunHandle 和 SSE 调试事件上，保存模型请求/响应、工具轨迹和策略诊断的脱敏内存副本，不写 Runtime SQLite durable events，也不写 Vault。
 - 进程重启恢复采用 fail-closed：`waiting_approval` 保留并允许用户继续审批；模型请求、工具执行、恢复中的其他中间态统一转为 `recovery_required`，记录 `recovery_required` 事件，不自动重放外部 effect。
 - Runtime effect journal 只用于审计未结算副作用，不作为自动重放授权；需要重试时由上层发起新的操作。
+- Agent-as-Tool 的递归深度控制仍属于应用层；每次嵌套委派创建独立的非 top-level Runtime operation，避免与父操作共享可变执行快照。
 
 HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默认行为。
 

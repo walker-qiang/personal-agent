@@ -12,8 +12,8 @@ Design notes:
     - The handler is a bound method of ``AgentToolWrapper``, which captures
       the ``AgentDefinition`` and a ``cfg_factory`` callable.  No global
       mutable state beyond the contextvar used for recursion tracking.
-    - ``_run_domain_agent_react`` is imported lazily inside the handler to
-      avoid a circular dependency (orchestration imports from tools).
+    - The child execution is delegated to the application Runtime adapter;
+      the Runtime Core remains independent from this tool wrapper.
     - All error paths return ``tool_error(...)`` dicts so the calling LLM
       can self-correct.
 """
@@ -78,7 +78,7 @@ class AgentToolWrapper:
     2. Checks recursion depth via ``contextvars`` (max depth = 2).
     3. Obtains the runtime ``cfg`` from ``cfg_factory``.
     4. Builds the agent's filtered ``ToolRegistry``.
-    5. Runs a ReAct loop via ``_run_domain_agent_react``.
+    5. Runs a nested Runtime operation through the application adapter.
     6. Truncates the answer and returns a result dict.
 
     The wrapper holds no mutable state beyond ``agent_def`` and
@@ -218,43 +218,37 @@ class AgentToolWrapper:
         if breaker is not None:
             agent_tools.set_circuit_breaker(breaker)
 
-        # ── 5. Run ReAct loop (increment depth) ──────────────────────────
+        # ── 5. Run nested Runtime operation (increment depth) ────────────
         token = _call_depth.set(current_depth + 1)
         try:
-            # Lazy import: orchestration.nodes.commander imports from tools,
-            # so importing at module level would create a circular dependency.
-            from ..orchestration.nodes.commander import _run_domain_agent_react
+            from ..orchestration.runtime_adapter import run_nested_agent_runtime
 
-            session_id = cfg.get("session_id", "")
-            result = _run_domain_agent_react(
+            result = run_nested_agent_runtime(
                 agent_def=self.agent_def,
                 task=task,
-                tools=agent_tools,
-                skill_results=[],
+                agent_tools=agent_tools,
                 cfg=cfg,
-                session_id=session_id,
-                agent_id=self.agent_def.id,
                 max_iterations=_MAX_AGENT_TOOL_ITERATIONS,
             )
         except ImportError as exc:
             logger.error(
-                "agent_tool[%s]: failed to import _run_domain_agent_react: %s",
+                "agent_tool[%s]: failed to import Runtime adapter: %s",
                 self.agent_def.id, exc,
             )
             return tool_error(
                 self.tool_name,
-                "导入 ReAct 引擎",
-                f"无法导入 _run_domain_agent_react: {exc}",
-                "请检查 orchestration 模块是否正确安装且无循环导入",
+                "导入 Runtime 适配器",
+                f"无法导入 Runtime adapter: {exc}",
+                "请检查 Runtime 适配器是否正确安装",
             )
         except Exception as exc:
             logger.error(
-                "agent_tool[%s]: _run_domain_agent_react failed: %s: %s",
+                "agent_tool[%s]: nested Runtime failed: %s: %s",
                 self.agent_def.id, type(exc).__name__, str(exc)[:200],
             )
             return tool_error(
                 self.tool_name,
-                "执行 Agent ReAct 循环",
+                "执行嵌套 Runtime",
                 f"{type(exc).__name__}: {str(exc)[:200]}",
                 "请稍后重试，或尝试将任务拆分为更小的子任务",
                 context={"agent": self.agent_def.id},
@@ -270,7 +264,7 @@ class AgentToolWrapper:
             return tool_error(
                 self.tool_name,
                 "获取 Agent 回答",
-                f"Agent '{self.agent_def.id}' 返回了空回答",
+                result.get("error") or f"Agent '{self.agent_def.id}' 返回了空回答",
                 "请尝试重新描述任务，或使用其他工具/Agent",
                 context={
                     "agent": self.agent_def.id,

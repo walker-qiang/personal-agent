@@ -3,15 +3,129 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
-from ..runtime.domain.requests import ExecutionPolicy, RunRequest
+from ..runtime.domain.requests import ExecutionOptions, ExecutionPolicy, RunRequest
 from ..runtime.domain.messages import Message
 from ..runtime.adapters.tools import tool_specs
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..runtime import AgentRuntime
 from .events import make_event
+
+
+def run_nested_agent_runtime(
+    *,
+    agent_def: Any,
+    task: str,
+    agent_tools: Any,
+    cfg: dict[str, Any],
+    max_iterations: int = 10,
+) -> dict[str, Any]:
+    """Run an Agent-as-Tool child through the independent Runtime.
+
+    Agent-as-Tool is an application-level nested execution.  It therefore
+    gets its own Runtime operation with a non-top-level scope, while all
+    prompt/context assembly remains at this boundary.  Runtime Core never
+    needs to know about AgentRegistry, LangGraph, or the parent graph node.
+    """
+    from .context_loader import enrich_system_prompt
+    from .nodes._helpers import (
+        DOMAIN_AGENT_REACT_SYSTEM,
+        _build_history_context,
+        _inject_agent_guidelines,
+        _inject_data_index,
+        _inject_lessons,
+        _inject_working_memory,
+        _today_cn,
+    )
+
+    session_id = str(cfg.get("session_id") or f"agent-tool-{uuid.uuid4().hex}")
+    owner_id = str(cfg.get("user_id") or "default")
+    history = cfg.get("history", [])
+    history_context = _build_history_context(history)
+    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
+        agent_name=agent_def.name,
+        persona=agent_def.persona,
+        task=task,
+        today=_today_cn(),
+    )
+    system_prompt = _inject_working_memory(
+        system_prompt, cfg.get("working_memory", {}), history,
+    )
+    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
+    system_prompt = enrich_system_prompt(
+        system_prompt,
+        agent_def=agent_def,
+        agent_registry=cfg.get("agent_registry"),
+    )
+    system_prompt = _inject_lessons(system_prompt, task, agent_def.id, cfg)
+
+    messages = [Message(
+        role="user",
+        content=build_multimodal_content(
+            history_context + f"请完成以下任务：{task}",
+            cfg.get("attachments", []),
+        ),
+    )]
+    system_prompt = _inject_data_index(
+        system_prompt, cfg.get("ref_store"),
+        [{"role": "user", "content": messages[0].content}],
+    )
+    policy = cfg.get("execution_policy", ExecutionPolicy())
+    request = RunRequest(
+        owner_id=owner_id,
+        session_id=session_id,
+        agent_id=agent_def.id,
+        messages=messages,
+        system_prompt=system_prompt,
+        model=getattr(cfg["llm"], "model", ""),
+        tools=tool_specs(agent_tools),
+        execution_options=ExecutionOptions(
+            max_turns=max(1, max_iterations),
+            max_tool_calls=min(32, max(1, max_iterations + 2)),
+        ),
+        execution_policy=policy,
+        orchestration_run_id=str(cfg.get("orchestration_run_id") or ""),
+        metadata={
+            "operation_scope": "nested_agent_tool",
+            "parent_operation_id": str(cfg.get("operation_id") or ""),
+        },
+    )
+    runtime_store = cfg.get("runtime_store")
+    if runtime_store is None:
+        from ..runtime.testing.memory_store import MemoryOperationStore
+        runtime_store = MemoryOperationStore()
+    runtime = AgentRuntime(
+        runtime_store,
+        MatrixModelAdapter(cfg["llm"]),
+        MatrixToolAdapter(
+            agent_tools,
+            session_id=session_id,
+            owner_id=owner_id,
+            mode=policy.mode,
+            allow_external_effects=policy.allow_external_effects,
+        ),
+    )
+    handle = runtime.start(request)
+    events = list(handle.events())
+    result = handle.result()
+    return {
+        "answer": result.final_message,
+        "error": result.error,
+        "tool_results": [
+            {
+                "name": item.name,
+                "result": item.result,
+                "error": item.error,
+                "call_id": item.call_id,
+            }
+            for item in result.tool_results
+        ],
+        "operation_id": handle.operation_id,
+        "events": events,
+    }
 
 
 def build_multimodal_content(
