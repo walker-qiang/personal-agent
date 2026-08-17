@@ -14,8 +14,56 @@ from pathlib import Path
 import pytest
 
 from matrix.context import ToolResultRefStore, make_get_stored_data_tool
+from matrix.chat._service import _normalize_research_result
 from matrix.skills.loader import SkillDefinition, load_skills, _split_frontmatter
 from matrix.skills.executor import execute_skill, _resolve_arguments, _resolve_template, _resolve_field_path
+
+
+class TestInvestmentResearchDataQuality:
+    """Deterministic gates prevent incomplete market data from becoming a thesis."""
+
+    def test_missing_financial_reports_forces_incomplete(self):
+        result = _normalize_research_result(
+            {"status": "complete", "information_completeness": "high", "decision": {}},
+            [
+                {"tool": "personal_os.market_quote", "result": {"price": 10, "datetime": "2026-08-16"}},
+                {"tool": "personal_os.financials", "result": {"data": {"reports": [], "metadata": {}}}},
+            ],
+            code="sh600519", name="贵州茅台", object_type="stock", research_date="2026-08-16",
+        )
+        assert result["status"] == "incomplete"
+        assert result["data_quality"]["status"] == "blocked"
+        assert "没有可用的多期财务报告" in result["data_quality"]["blockers"]
+        assert result["decision"]["action"] == "research before action"
+
+    def test_zero_source_date_is_removed_and_verified_fetch_is_kept(self):
+        result = _normalize_research_result(
+            {"sources": [{"title": "old", "url": "https://old.example", "date": "0001-01-01T00:00:00Z"}]},
+            [
+                {"tool": "personal_os.market_quote", "result": {"price": 10, "datetime": "2026-08-16"}},
+                {"tool": "personal_os.financials", "result": {"data": {"reports": [{"period_end": "2025-12-31", "currency": "HKD", "unit": "native_currency"}], "metadata": {"latest_report_period": "2025-12-31", "stale": False}}}},
+                {"tool": "personal_os.web_fetch", "result": {"url": "https://official.example/report.pdf", "source_name": "Official IR", "source_tier": "official", "verification_status": "verified", "report_period": "2026-06-30"}},
+            ],
+            code="hk00700", name="腾讯控股", object_type="stock", research_date="2026-08-16",
+        )
+        assert result["data_quality"]["status"] == "pass"
+        assert all(source.get("date") != "0001-01-01T00:00:00Z" for source in result["sources"])
+        fetched = next(source for source in result["sources"] if source["url"].endswith("report.pdf"))
+        assert fetched["verification_status"] == "verified"
+        assert fetched["report_period"] == "2026-06-30"
+
+    def test_unverified_official_document_blocks_stock_research(self):
+        result = _normalize_research_result(
+            {"status": "complete", "information_completeness": "high", "object_type": "stock", "decision": {}},
+            [
+                {"tool": "personal_os.market_quote", "result": {"price": 10, "datetime": "2026-08-16"}},
+                {"tool": "personal_os.financials", "result": {"data": {"reports": [{"period_end": "2025-12-31", "currency": "CNY", "unit": "native_currency"}], "metadata": {"stale": False}}}},
+                {"tool": "personal_os.web_fetch", "result": {"url": "https://static.cninfo.com.cn/report.pdf", "source_tier": "official", "verification_status": "fetched"}},
+            ],
+            code="sh600519", name="贵州茅台", object_type="stock", research_date="2026-08-16",
+        )
+        assert result["status"] == "incomplete"
+        assert "没有通过正文核验的官方公告或财报" in result["data_quality"]["blockers"]
 
 
 # ================================================================

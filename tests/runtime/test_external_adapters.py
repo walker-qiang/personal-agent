@@ -94,7 +94,7 @@ class FakeResearchTools:
             "personal_os.market_quote", "personal_os.financials",
             "personal_os.profile", "personal_os.dividend", "personal_os.valuation",
             "personal_os.peers", "personal_os.research_context",
-            "personal_os.information_search",
+            "personal_os.announcements", "personal_os.information_search",
         }
 
     def call(self, name, arguments, session_id=""):
@@ -102,7 +102,7 @@ class FakeResearchTools:
         if name in self.fail_once:
             self.fail_once.remove(name)
             raise RuntimeError("temporary tool failure")
-        if name == "personal_os.information_search":
+        if name in {"personal_os.announcements", "personal_os.information_search"}:
             return {"items": []}
         return {"name": name, "ok": True}
 
@@ -143,9 +143,9 @@ def test_deep_research_workflow_retries_evidence_and_persists_lifecycle():
     operation = store.load("owner-a", handle.operation_id)
 
     assert result.outcome is RunOutcome.COMPLETED
-    assert '"evidence_count": 8' in result.final_message
+    assert '"evidence_count": 9' in result.final_message
     assert operation.phase is OperationPhase.COMPLETED
-    assert len(tools.calls) == 9  # profile failed once and was retried
+    assert len(tools.calls) == 10  # profile failed once and was retried
     assert len(llm.prompts) == 1
     assert any(event.ui_event.get("type") == "tool_call" for event in events)
     assert any(event.runtime_event.event_type is RuntimeEventType.MESSAGE_DELTA for event in events)

@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import traceback
+from urllib.parse import unquote
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
@@ -90,25 +91,43 @@ def _normalize_research_result(
             {"name": key, "value": value}
             for key, value in metrics.items()
         ]
+    for field in ("highlights", "thesis", "antithesis", "risks", "triggers", "tags"):
+        value = normalized.get(field)
+        if isinstance(value, str) and value.strip():
+            normalized[field] = [value.strip()]
+        elif isinstance(value, dict):
+            normalized[field] = [
+                item for item in value.values()
+                if isinstance(item, (str, dict)) and str(item).strip()
+            ]
 
     existing_sources = normalized.get("sources")
-    sources = list(existing_sources) if isinstance(existing_sources, list) else []
+    sources = []
+    if isinstance(existing_sources, list):
+        for item in existing_sources:
+            if not isinstance(item, dict):
+                continue
+            source = dict(item)
+            source["date"] = _clean_source_date(source.get("date"))
+            sources.append(source)
     seen = {
         str(item.get("url") or item.get("title") or "").strip().lower()
         for item in sources
         if isinstance(item, dict)
     }
+    announcement_items: list[dict[str, Any]] = []
     info_items: list[dict[str, Any]] = []
     for entry in evidence:
-        if entry.get("tool") != "personal_os.information_search":
+        if entry.get("tool") not in {
+            "personal_os.announcements", "personal_os.information_search",
+        }:
             continue
         payload = entry.get("result")
         if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-            info_items.extend(
-                item for item in payload["items"] if isinstance(item, dict)
-            )
+            target = announcement_items if entry.get("tool") == "personal_os.announcements" else info_items
+            target.extend(item for item in payload["items"] if isinstance(item, dict))
 
-    for item in info_items:
+    for item in announcement_items + info_items:
         title = str(item.get("title") or item.get("source_name") or "").strip()
         url = str(item.get("url") or "").strip()
         key = (url or title).lower()
@@ -118,12 +137,11 @@ def _normalize_research_result(
             item.get("source_type")
             or ("official" if item.get("tier") == "official" else "supplementary")
         )
-        date = str(
+        date = _clean_source_date(
             item.get("date")
             or item.get("published_at")
             or item.get("publishedAt")
-            or ""
-        ).strip()
+        )
         sources.append({
             "title": title or url,
             "url": url,
@@ -131,6 +149,29 @@ def _normalize_research_result(
             "source_type": source_type,
         })
         seen.add(key)
+
+    for entry in evidence:
+        if entry.get("tool") != "personal_os.web_fetch":
+            continue
+        payload = entry.get("result")
+        if not isinstance(payload, dict) or not payload.get("url"):
+            continue
+        url = str(payload.get("url") or "").strip()
+        if not url or url.lower() in seen:
+            continue
+        title = str(payload.get("source_name") or url).strip()
+        source = {
+            "title": title,
+            "url": url,
+            "date": _clean_source_date(payload.get("published_at")),
+            "source_type": "web_fetch",
+            "verification_status": payload.get("verification_status") or "fetched",
+        }
+        report_period = _clean_source_date(payload.get("report_period"))
+        if report_period:
+            source["report_period"] = report_period
+        sources.append(source)
+        seen.add(url.lower())
 
     if not sources:
         sources = [
@@ -144,72 +185,468 @@ def _normalize_research_result(
             if entry.get("tool", "").startswith("personal_os.")
         ]
     normalized["sources"] = sources
+    normalized["tool_availability"] = _tool_availability(evidence)
+    authoritative_period = _latest_report_period_from_evidence(evidence, research_date)
+    if authoritative_period:
+        normalized["latest_report_period"] = authoritative_period
+    _enforce_research_quality(normalized, evidence)
     return normalized
+
+
+def _clean_source_date(value: Any) -> str:
+    """Keep real source dates only; never persist Go's zero-time placeholder."""
+    text = str(value or "").strip()
+    if not text or text.startswith("0001-01-01"):
+        return ""
+    return text
+
+
+def _tool_availability(evidence: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Expose whether a tool returned data so synthesis cannot call it missing."""
+    availability: dict[str, dict[str, Any]] = {}
+    for entry in evidence:
+        tool = str(entry.get("tool") or "").strip()
+        if not tool:
+            continue
+        result = entry.get("result")
+        error = entry.get("error")
+        available = not error and not (
+            isinstance(result, dict) and result.get("error")
+        )
+        item: dict[str, Any] = {"status": "available" if available else "unavailable"}
+        if not available:
+            item["error"] = str(error or (result.get("error") if isinstance(result, dict) else "tool unavailable"))
+        elif isinstance(result, dict):
+            item["has_data"] = bool(
+                result.get("data")
+                or result.get("items")
+                or result.get("companies")
+                or result.get("content")
+                or result.get("text")
+                or result.get("price")
+                or result.get("name")
+            )
+        availability[tool] = item
+    return availability
+
+
+def _safe_evidence_report_period(value: Any, research_date: str) -> str:
+    text = str(value or "").strip()[:10]
+    try:
+        import datetime as _datetime
+
+        period = _datetime.date.fromisoformat(text)
+        upper = _datetime.date.fromisoformat(str(research_date)[:10])
+    except (TypeError, ValueError):
+        return ""
+    if period.year < 2000 or period > upper:
+        return ""
+    return period.isoformat()
+
+
+def _latest_report_period_from_evidence(
+    evidence: list[dict[str, Any]], research_date: str,
+) -> str:
+    periods: list[str] = []
+    for entry in evidence:
+        tool = entry.get("tool")
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+        if tool == "personal_os.financials":
+            data = result.get("data")
+            if isinstance(data, dict):
+                metadata = data.get("metadata")
+                if isinstance(metadata, dict):
+                    period = _safe_evidence_report_period(
+                        metadata.get("latest_report_period"), research_date,
+                    )
+                    if period:
+                        periods.append(period)
+                reports = data.get("reports")
+                if isinstance(reports, list):
+                    for report in reports:
+                        if isinstance(report, dict):
+                            period = _safe_evidence_report_period(
+                                report.get("period_end"), research_date,
+                            )
+                            if period:
+                                periods.append(period)
+        elif tool == "personal_os.web_fetch":
+            if result.get("verification_status") == "verified":
+                period = _safe_evidence_report_period(result.get("report_period"), research_date)
+                if period:
+                    periods.append(period)
+        elif tool == "personal_os.research_context":
+            observed = result.get("observed_facts")
+            records = observed.get("reports", []) if isinstance(observed, dict) else []
+            if isinstance(records, list):
+                for report in records:
+                    if isinstance(report, dict):
+                        period = _safe_evidence_report_period(
+                            report.get("period_end"), research_date,
+                        )
+                        if period:
+                            periods.append(period)
+    return max(periods) if periods else ""
+
+
+def _enforce_research_quality(
+    normalized: dict[str, Any], evidence: list[dict[str, Any]]
+) -> None:
+    """Apply deterministic safety gates after model synthesis."""
+    results = {
+        str(entry.get("tool")): entry.get("result")
+        for entry in evidence
+        if entry.get("tool")
+    }
+    blockers: list[str] = []
+    quote = results.get("personal_os.market_quote")
+    if not isinstance(quote, dict) or quote.get("price") in (None, ""):
+        blockers.append("行情缺少可靠价格")
+    elif not quote.get("datetime"):
+        blockers.append("行情缺少数据时间")
+
+    financials = results.get("personal_os.financials")
+    financial_data = financials.get("data") if isinstance(financials, dict) else None
+    financial_data = financial_data if isinstance(financial_data, dict) else {}
+    reports = financial_data.get("reports")
+    metadata = financial_data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    structured_report_period = str(
+        metadata.get("latest_report_period")
+        or (
+            reports[0].get("period_end")
+            if isinstance(reports, list)
+            and reports
+            and isinstance(reports[0], dict)
+            else ""
+        )
+        or ""
+    )
+    if not isinstance(reports, list) or not reports:
+        blockers.append("没有可用的多期财务报告")
+    if not metadata.get("latest_report_period") and not reports:
+        blockers.append("无法确认最新财务报告期")
+    if isinstance(reports, list) and reports:
+        latest_report = reports[0] if isinstance(reports[0], dict) else {}
+        if not latest_report.get("currency"):
+            blockers.append("财务报告缺少币种")
+        if not latest_report.get("unit"):
+            blockers.append("财务报告缺少金额单位")
+
+    verified_official = any(
+        isinstance(entry.get("result"), dict)
+        and entry["result"].get("verification_status") == "verified"
+        and entry["result"].get("source_tier") == "official"
+        for entry in evidence
+        if entry.get("tool") == "personal_os.web_fetch"
+    )
+    reconciled_financials = (
+        metadata.get("source_verification") == "reconciled"
+        and metadata.get("provenance_ready") is True
+    )
+    official_evidence_ready = verified_official or reconciled_financials
+    verified_official_periods = [
+        str(entry["result"].get("report_period") or "")
+        for entry in evidence
+        if entry.get("tool") == "personal_os.web_fetch"
+        and isinstance(entry.get("result"), dict)
+        and entry["result"].get("verification_status") == "verified"
+        and entry["result"].get("source_tier") == "official"
+        and entry["result"].get("report_period")
+    ]
+    latest_official_period = max(verified_official_periods, default="")
+    stale_structured_data = metadata.get("stale") is True
+    stale_covered_by_official = bool(
+        stale_structured_data
+        and official_evidence_ready
+        and latest_official_period
+        and (
+            not structured_report_period
+            or latest_official_period > structured_report_period
+        )
+    )
+    if stale_structured_data and not stale_covered_by_official:
+        blockers.append("最新财务报告已过期")
+    if normalized.get("object_type", "stock") == "stock" and not official_evidence_ready:
+        blockers.append("没有通过正文核验的官方公告或财报")
+
+    quality = normalized.get("data_quality")
+    if not isinstance(quality, dict):
+        quality = {}
+    quality["status"] = "blocked" if blockers else "pass"
+    quality["blockers"] = blockers
+    warnings = quality.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    if not official_evidence_ready:
+        warning = "尚无通过正文报告期核验的官方文档"
+        if warning not in warnings:
+            warnings.append(warning)
+    if stale_covered_by_official:
+        warning = (
+            f"结构化财报缓存截至 {structured_report_period or '未知'}；"
+            f"已用官方正文核验 {latest_official_period} 补充"
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+    elif reconciled_financials and not verified_official:
+        warning = "财务事实已完成官方财报对账；本次证据未单独展开 web_fetch 正文"
+        if warning not in warnings:
+            warnings.append(warning)
+    quality["warnings"] = warnings
+    normalized["data_quality"] = quality
+
+    if not blockers:
+        return
+    normalized["status"] = "incomplete"
+    normalized["information_completeness"] = "low"
+    decision = normalized.get("decision")
+    if not isinstance(decision, dict):
+        decision = {}
+    decision["quality"] = "weak"
+    decision["action"] = "research before action"
+    decision["confidence"] = "low"
+    normalized["decision"] = decision
+    risks = normalized.get("risks")
+    if not isinstance(risks, list):
+        risks = []
+    for blocker in blockers:
+        message = f"数据质量闸门：{blocker}。"
+        if message not in risks:
+            risks.append(message)
+    normalized["risks"] = risks
+
+
+def _research_result_issues(
+    result: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    *,
+    research_date: str,
+) -> list[str]:
+    """Return deterministic persistence blockers for a synthesized card.
+
+    The model may produce valid JSON while still returning an unusable research
+    card.  Keep this gate independent from the prompt so callers cannot bypass
+    date, evidence, or structural checks by changing wording.
+    """
+    issues: list[str] = []
+    required = (
+        "schema_version", "type", "subject", "research_date", "data_date",
+        "latest_report_period", "summary", "decision",
+    )
+    for field in required:
+        if result.get(field) in (None, "", []):
+            issues.append(f"缺少 {field}")
+    if result.get("schema_version") != 2:
+        issues.append("schema_version 必须为 2")
+    if result.get("type") != "investment-research":
+        issues.append("type 必须为 investment-research")
+    if not isinstance(result.get("subject"), dict):
+        issues.append("subject 必须是对象")
+    if not isinstance(result.get("decision"), dict):
+        issues.append("decision 必须是对象")
+
+    def parse_date(value: Any) -> Any:
+        import datetime as _datetime
+
+        try:
+            return _datetime.date.fromisoformat(str(value or "")[:10])
+        except (TypeError, ValueError):
+            return None
+
+    upper = parse_date(research_date)
+    if upper is None:
+        issues.append("研究日期无效")
+    else:
+        for field in ("research_date", "data_date", "latest_report_period"):
+            parsed = parse_date(result.get(field))
+            if parsed is None:
+                issues.append(f"{field} 不是有效日期")
+            elif parsed > upper:
+                issues.append(f"{field} 不能晚于研究日期 {research_date}")
+
+    authoritative = _latest_report_period_from_evidence(evidence, research_date)
+    if authoritative:
+        current = parse_date(result.get("latest_report_period"))
+        if current is None or current > parse_date(authoritative):
+            # Evidence is authoritative; repair the model's future/stale value
+            # before the validation result is sent to the client or persisted.
+            result["latest_report_period"] = authoritative
+            for metric in result.get("metrics", []) if isinstance(result.get("metrics"), list) else []:
+                if not isinstance(metric, dict):
+                    continue
+                name = str(metric.get("name") or "").lower()
+                if "报告期" in name or "report period" in name:
+                    metric["value"] = authoritative
+            issues = [item for item in issues if "latest_report_period" not in item]
+
+    for field in ("highlights", "thesis", "antithesis", "risks", "metrics", "triggers"):
+        value = result.get(field)
+        if not isinstance(value, list) or not value:
+            issues.append(f"{field} 不能为空且必须是数组")
+
+    metrics = result.get("metrics")
+    if isinstance(metrics, list):
+        for index, metric in enumerate(metrics):
+            if not isinstance(metric, dict):
+                issues.append(f"metrics[{index}] 必须是对象")
+                continue
+            if not str(metric.get("name") or "").strip():
+                issues.append(f"metrics[{index}] 缺少 name")
+            if metric.get("value") in (None, ""):
+                issues.append(f"metrics[{index}] 缺少 value")
+
+    sources = result.get("sources")
+    if not isinstance(sources, list) or not sources:
+        issues.append("sources 不能为空且必须是数组")
+    else:
+        usable_sources = [
+            item for item in sources
+            if isinstance(item, dict) and str(item.get("url") or "").startswith(("http://", "https://"))
+        ]
+        if not usable_sources:
+            issues.append("sources 至少需要一个真实 URL")
+        official_sources = [
+            item for item in usable_sources
+            if str(item.get("source_type") or "").lower() in {"official", "web_fetch", "cninfo", "hkexnews"}
+        ]
+        if not official_sources and not authoritative:
+            issues.append("缺少官方来源或正文核验")
+
+    quality = result.get("data_quality")
+    if isinstance(quality, dict) and quality.get("status") == "blocked":
+        blockers = quality.get("blockers") or []
+        issues.append("数据质量闸门未通过：" + "、".join(str(item) for item in blockers))
+    if str(result.get("information_completeness") or "").lower() == "low":
+        issues.append("信息完整度为 low")
+    return list(dict.fromkeys(issues))
 
 
 def _select_latest_official_url(
     sources: list[dict[str, Any]],
     research_year: str,
 ) -> str | None:
-    """Prefer the newest official quarterly/earnings announcement."""
+    """Prefer the newest official filing, using its reporting period.
+
+    Search result titles are often generic (for example ``PDF Tencent``), while
+    the actual report period is present in an encoded PDF filename or in an
+    explicit ``report_period`` field.  A keyword score can therefore select an
+    older annual report over a newer interim result.  Period-first ordering is
+    deterministic and keeps the source selector independent of title quality.
+    """
     candidates = [
         item for item in sources
         if isinstance(item, dict)
         and item.get("url")
-        and item.get("tier") == "official"
+        and (item.get("tier") == "official" or item.get("source_level") == "official")
     ]
     if not candidates:
         return None
 
-    def score(item: dict[str, Any]) -> int:
-        text = f"{item.get('title', '')} {item.get('url', '')}".lower()
-        value = 0
-        if research_year and research_year in text:
-            value += 10
-        if any(token in text for token in ("二季度", "第二季", "q2", "中期", "季度")):
-            value += 8
-        if any(token in text for token in ("业绩", "results", "earnings")):
-            value += 4
-        if "年报" in text or "annual" in text:
-            value += 1
-        return value
+    def sort_key(item: dict[str, Any]) -> tuple[str, int, int]:
+        explicit = str(item.get("report_period") or "").strip()
+        period = explicit or _infer_report_period_from_text(
+            " ".join(str(item.get(key) or "") for key in ("title", "url", "summary"))
+        )
+        text = unquote(
+            " ".join(str(item.get(key) or "") for key in ("title", "url", "summary"))
+        ).lower()
+        is_document = int(
+            ".pdf" in text
+            or any(token in text for token in ("annual report", "interim", "业绩", "季报", "中期"))
+        )
+        verified = int(str(item.get("verification_status") or "") == "verified")
+        # Keep the requested year as a tie-breaker only; it must not outrank a
+        # newer report whose title happens to be generic.
+        year_hint = int(bool(research_year and research_year in text))
+        return (period or "0000-00-00", verified + year_hint, is_document)
 
-    return max(candidates, key=score).get("url")
+    return max(candidates, key=sort_key).get("url")
 
 
 def _extract_official_report_period(evidence: list[dict[str, Any]]) -> str:
     """Extract an explicit reporting date from an official fetched document."""
-    import re
-
-    text_parts: list[str] = []
     for entry in evidence:
         if entry.get("tool") != "personal_os.web_fetch":
             continue
         result = entry.get("result")
         if isinstance(result, dict):
-            text_parts.append(str(result.get("content") or result.get("text") or ""))
-    text = "\n".join(text_parts)
+            content = str(result.get("content") or result.get("text") or "")
+            period = _infer_report_period_from_text(content)
+            if period:
+                return period
+            period = _infer_report_period_from_text(str(result.get("url") or ""))
+            if period:
+                return period
+    return ""
+
+
+def _infer_report_period_from_text(value: str) -> str:
+    """Infer a report period only from explicit report/date language."""
+    import re
+
+    text = unquote(str(value or "")).replace("\\u0026", "&")
     if not text:
         return ""
 
-    arabic = re.search(r"(?:截至|as of|ended)\s*(\d{4})年?(\d{1,2})月?(\d{1,2})日", text, re.I)
+    arabic = re.search(
+        r"(?:截至|截至于|as of|as at|ended|ending|for the)\s*"
+        r"(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*日?",
+        text,
+        re.I,
+    )
     if arabic:
-        return f"{int(arabic.group(1)):04d}-{int(arabic.group(2)):02d}-{int(arabic.group(3)):02d}"
+        return _valid_report_period(*arabic.groups())
 
     chinese = re.search(
-        r"(?:截至|截至于)\s*([零〇一二三四五六七八九十百千万]+)年"
-        r"([零〇一二三四五六七八九十]+)月"
-        r"([零〇一二三四五六七八九十]+)日",
+        r"(?:截至|截至于|止|报告期(?:末|为)?|本报告期)?\s*"
+        r"([零〇一二三四五六七八九]{4})年\s*"
+        r"([零〇一二三四五六七八九十百千万两]+)月\s*"
+        r"([零〇一二三四五六七八九十百千万两]+)日",
         text,
     )
-    if not chinese:
+    if chinese:
+        return _valid_report_period(
+            str(_parse_chinese_number(chinese.group(1))),
+            str(_parse_chinese_number(chinese.group(2))),
+            str(_parse_chinese_number(chinese.group(3))),
+        )
+
+    year_match = re.search(r"(20\d{2})\s*(?:年|[-/.])", text)
+    if year_match:
+        year = year_match.group(1)
+    else:
+        chinese_year = re.search(r"([零〇一二三四五六七八九]{4})年", text)
+        if not chinese_year:
+            return ""
+        year = str(_parse_chinese_number(chinese_year.group(1)))
+
+    lower = text.lower()
+    if any(token in lower for token in ("annual report", "annual results", "年度报告", "年报")):
+        return _valid_report_period(year, "12", "31")
+    if any(token in lower for token in (
+        "interim report", "interim results", "中期报告", "中期业绩", "半年报",
+        "半年度报告", "上半年", "1h", "six months", "q2", "二季度", "第二季",
+    )):
+        return _valid_report_period(year, "06", "30")
+    if any(token in lower for token in ("q1", "一季度", "第一季")):
+        return _valid_report_period(year, "03", "31")
+    if any(token in lower for token in ("q3", "三季度", "第三季")):
+        return _valid_report_period(year, "09", "30")
+    return ""
+
+
+def _valid_report_period(year: str, month: str, day: str) -> str:
+    try:
+        year_int, month_int, day_int = int(year), int(month), int(day)
+        if not 2000 <= year_int <= 2100:
+            return ""
+        import datetime as _datetime
+        return _datetime.date(year_int, month_int, day_int).isoformat()
+    except (TypeError, ValueError):
         return ""
-    year = _parse_chinese_number(chinese.group(1))
-    month = _parse_chinese_number(chinese.group(2))
-    day = _parse_chinese_number(chinese.group(3))
-    if year <= 0 or month <= 0 or day <= 0:
-        return ""
-    return f"{year:04d}-{month:02d}-{day:02d}"
 
 
 def _parse_chinese_number(value: str) -> int:
@@ -344,6 +781,8 @@ class ChatService:
         self._runtime_store = SQLiteRuntimeStore(config.store_path)
         self._branch_summary_lock = threading.Lock()
         self._branch_summary_tasks: set[str] = set()
+        self._deep_research_lock = threading.Lock()
+        self._deep_research_active: set[tuple[str, str]] = set()
         self._recover_branch_summaries()
 
     def __enter__(self) -> "ChatService":
@@ -779,7 +1218,12 @@ class ChatService:
                 len(text),
             )
 
-            if getattr(session_llm, "provider", "") == "codex" and mode == "deep_research":
+            # Deep research is a workflow contract, not a Codex-only path.
+            # DeepSeek also implements ``complete_json`` and must use the
+            # fixed evidence-first workflow; otherwise a deep-research
+            # request falls through to the general Commander graph and can
+            # exhaust its tool-call budget without producing schema v2.
+            if mode == "deep_research":
                 yield from self._stream_deep_research_runtime(
                     session_llm, sid, text, history, user_id, attachments,
                 )
@@ -885,6 +1329,30 @@ class ChatService:
         user_id: str,
         attachments: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
+        """Run one deep-research operation per owner/session at a time."""
+        key = (user_id, session_id)
+        with self._deep_research_lock:
+            if key in self._deep_research_active:
+                yield {"type": "error", "message": "该研究任务仍在执行，请等待当前任务完成后再重试。"}
+                return
+            self._deep_research_active.add(key)
+        try:
+            yield from self._run_deep_research_runtime(
+                llm, session_id, question, history, user_id, attachments,
+            )
+        finally:
+            with self._deep_research_lock:
+                self._deep_research_active.discard(key)
+
+    def _run_deep_research_runtime(
+        self,
+        llm: LLMClient,
+        session_id: str,
+        question: str,
+        history: list[dict[str, str]],
+        user_id: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run the fixed evidence workflow with durable Runtime events."""
         del history
         import re
@@ -902,6 +1370,7 @@ class ChatService:
             llm,
             agent_tools,
             normalize_result=_normalize_research_result,
+            validate_result=_research_result_issues,
             preview_json=preview_json,
             select_latest_official_url=_select_latest_official_url,
             extract_official_report_period=_extract_official_report_period,

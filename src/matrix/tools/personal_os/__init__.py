@@ -113,12 +113,40 @@ def market_quote(code: str) -> dict[str, Any]:
     return _get("/api/tools/market/quote", {"code": _normalize_market_code(code)})
 
 
+def resolve_security(query: str) -> dict[str, Any]:
+    if not str(query).strip():
+        return tool_error("personal_os.resolve_security", "识别证券", "query is required")
+    return _get("/api/tools/market/resolve", {"q": query})
+
+
 def financials(code: str, periods: int = 4) -> dict[str, Any]:
     if not str(code).strip():
         return tool_error("personal_os.financials", "查询财报", "code is required")
     return _get(
         "/api/tools/market/financials",
         {"code": _normalize_market_code(code), "num": periods},
+    )
+
+
+def announcements(code: str, limit: int = 10) -> dict[str, Any]:
+    if not str(code).strip():
+        return tool_error("personal_os.announcements", "查询官方公告", "code is required")
+    return _get(
+        "/api/tools/market/announcements",
+        {"code": _normalize_market_code(code), "limit": limit},
+    )
+
+
+def price_history(code: str, limit: int = 30, adjustment: str = "none") -> dict[str, Any]:
+    if not str(code).strip():
+        return tool_error("personal_os.price_history", "查询历史行情", "code is required")
+    return _get(
+        "/api/tools/market/history",
+        {
+            "code": _normalize_market_code(code),
+            "limit": limit,
+            "adjustment": adjustment,
+        },
     )
 
 
@@ -171,11 +199,24 @@ def web_fetch(url: str) -> dict[str, Any]:
 def register_all(registry: ToolRegistry) -> None:
     registry.register(
         ToolDefinition(
-            name="personal_os.market_quote",
-            description="通过 personal-os 查询指定股票、ETF 或指数的最新行情和行情时间。只读。",
+            name="personal_os.resolve_security",
+            description="通过 personal-os 将中文名称、简称或代码解析为 A 股/港股证券身份。返回规范代码、市场、币种和匹配置信度。美股当前不支持。只读。",
             input_schema={
                 "type": "object",
-                "properties": {"code": {"type": "string", "description": "市场代码，如 sz000858、hk00700、usVTI.AM"}},
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            handler=resolve_security,
+            capabilities=["security_master", "source_provenance"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="personal_os.market_quote",
+            description="通过 personal-os 查询 A 股或港股指定证券的最新行情、数据时间、币种和新鲜度。美股当前不支持，不能用市场代码替换绕过。只读。",
+            input_schema={
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "市场代码，如 sz000858、600519.SH、hk00700、00700.HK"}},
                 "required": ["code"],
             },
             handler=market_quote,
@@ -185,7 +226,7 @@ def register_all(registry: ToolRegistry) -> None:
     registry.register(
         ToolDefinition(
             name="personal_os.financials",
-            description="通过 personal-os 查询指定股票或 ETF 的多期财务数据。只读，必须记录数据期间和 provider。",
+            description="通过 personal-os 查询 A 股或港股指定证券的完整多期财务数据。每个报告必须记录报告期、披露日期、币种、单位、来源和 reported/calculated 类型；只读。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -196,6 +237,45 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=financials,
             capabilities=["financial_data", "source_provenance"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="personal_os.announcements",
+            description=(
+                "通过 personal-os 查询 A 股 CNINFO 或港股 HKEXnews 的官方公告候选。"
+                "结果仅是 discovered，必须继续调用 personal_os.web_fetch 核验正文后才能作为研究证据。只读。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["code"],
+            },
+            handler=announcements,
+            capabilities=["official_announcements", "source_provenance"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="personal_os.price_history",
+            description=(
+                "通过 personal-os 查询 A 股或港股日线历史行情，明确复权口径。"
+                "A 股默认附带 BaoStock 第二来源校验，结果可能为 pass、conflict、incomplete 或 provider_unavailable。只读。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "adjustment": {"type": "string", "enum": ["none", "qfq", "hfq"]},
+                },
+                "required": ["code"],
+            },
+            handler=price_history,
+            capabilities=["historical_market_data", "source_validation", "source_provenance"],
         )
     )
     registry.register(
@@ -256,7 +336,7 @@ def register_all(registry: ToolRegistry) -> None:
     registry.register(
         ToolDefinition(
             name="personal_os.research_context",
-            description="读取 personal-assets 中该标的已经保存的 schema v2 研究记录。只读。",
+            description="读取 personal-assets 中该标的已经保存的 schema v2 研究记录，以及已完成官方核验的 observed facts。优先使用 observed_facts 的已核验报告事实；缺失或过期时再调用实时财务工具。只读。",
             input_schema={
                 "type": "object",
                 "properties": {

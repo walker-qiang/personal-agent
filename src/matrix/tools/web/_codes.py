@@ -1,134 +1,69 @@
-"""Legacy code mapping tables — kept for backward compatibility.
+"""Fast-path market code helpers.
 
-The actual resolution logic is now in _resolver.py, which uses the Sina suggest
-API for dynamic code resolution with SQLite caching. These tables are used as a
-fast-path fallback for the most common indices and market keywords.
-
-Do not add new stocks/indices here — the resolver handles them automatically.
+Dynamic security resolution and quote retrieval belong to personal-os. This
+module only keeps deterministic aliases used by the legacy finance tool.
 """
 
 from __future__ import annotations
 
 import re
-
-# ---- A-share indices (simplified format via s_ prefix) ----
-
-A_SHARE_INDICES: dict[str, str] = {
-    "上证指数": "s_sh000001",
-    "上证综指": "s_sh000001",
-    "沪指": "s_sh000001",
-    "深证成指": "s_sz399001",
-    "深成指": "s_sz399001",
-    "创业板指": "s_sz399006",
-    "创业板": "s_sz399006",
-    "沪深300": "s_sh000300",
-    "科创50": "s_sh000688",
-    "上证50": "s_sh000016",
-    "中证500": "s_sh000905",
-    "中证1000": "s_sh000852",
-}
-
-# ---- Global indices (int_ prefix, 4 fields) ----
-
-GLOBAL_INDICES: dict[str, str] = {
-    "道琼斯": "int_dji",
-    "道指": "int_dji",
-    "纳斯达克": "int_nasdaq",
-    "纳指": "int_nasdaq",
-    "标普500": "int_sp500",
-    "标普": "int_sp500",
-    "日经225": "int_nikkei",
-    "日经": "int_nikkei",
-    "恒生指数": "int_hangseng",
-    "恒指": "int_hangseng",
-    "恒生科技": "hkHSTECH",
-    "恒生科技指数": "hkHSTECH",
-    "恒科": "hkHSTECH",
-    "恒科指": "hkHSTECH",
-    "韩国综合": "int_kospi",
-    "富时100": "int_ftse",
-    "德国dax": "int_dax",
-    "法国cac": "int_cac",
-}
-
-# Regex for 6-digit A-share stock codes
-_STOCK_CODE_RE = re.compile(r'^(\d{6})$')
-
-# Merged index table for convenience
-ALL_INDICES: dict[str, str] = {**A_SHARE_INDICES, **GLOBAL_INDICES}
+from dataclasses import dataclass
 
 
-def _a_share_code_from_digits(code: str) -> str:
-    """Map a 6-digit stock code to Sina sh/sz prefix."""
+@dataclass(frozen=True)
+class ResolvedCode:
+    provider_code: str
+    display_name: str
+    market: str
+    source: str = "fast_path"
+
+
+def _a_share_prefix(code: str) -> str:
     if code.startswith(("60", "68", "90")):
         return f"sh{code}"
     return f"sz{code}"
 
 
-# ---- Backward-compatible interface ----
-# These functions delegate to the new resolver at call time.
+_DIGIT_CODE_RE = re.compile(r"^\d{6}$")
+
+_MARKET_OVERVIEW: dict[str, list[ResolvedCode]] = {
+    "a股": [ResolvedCode("sh000001", "上证指数", "a_share"), ResolvedCode("sz399001", "深证成指", "a_share"), ResolvedCode("sz399006", "创业板指", "a_share"), ResolvedCode("sh000300", "沪深300", "a_share")],
+    "a 股": [ResolvedCode("sh000001", "上证指数", "a_share"), ResolvedCode("sz399001", "深证成指", "a_share"), ResolvedCode("sz399006", "创业板指", "a_share"), ResolvedCode("sh000300", "沪深300", "a_share")],
+    "大盘": [ResolvedCode("sh000001", "上证指数", "a_share"), ResolvedCode("sz399001", "深证成指", "a_share"), ResolvedCode("sz399006", "创业板指", "a_share"), ResolvedCode("sh000300", "沪深300", "a_share")],
+    "美股": [ResolvedCode("us.DJI", "道琼斯", "us"), ResolvedCode("us.IXIC", "纳斯达克", "us"), ResolvedCode("us.INX", "标普500", "us")],
+    "港股": [ResolvedCode("hkHSI", "恒生指数", "hk"), ResolvedCode("hkHSTECH", "恒生科技", "hk")],
+    "全球股市": [ResolvedCode("us.DJI", "道琼斯", "us"), ResolvedCode("us.IXIC", "纳斯达克", "us"), ResolvedCode("us.INX", "标普500", "us"), ResolvedCode("hkHSI", "恒生指数", "hk"), ResolvedCode("sh000001", "上证指数", "a_share"), ResolvedCode("sz399001", "深证成指", "a_share")],
+}
+
+_COMMON_INDICES: dict[str, ResolvedCode] = {
+    "上证指数": ResolvedCode("sh000001", "上证指数", "a_share"), "上证综指": ResolvedCode("sh000001", "上证综指", "a_share"), "沪指": ResolvedCode("sh000001", "沪指", "a_share"),
+    "深证成指": ResolvedCode("sz399001", "深证成指", "a_share"), "深成指": ResolvedCode("sz399001", "深成指", "a_share"), "创业板指": ResolvedCode("sz399006", "创业板指", "a_share"), "创业板": ResolvedCode("sz399006", "创业板", "a_share"), "沪深300": ResolvedCode("sh000300", "沪深300", "a_share"),
+    "恒生指数": ResolvedCode("hkHSI", "恒生指数", "hk"), "恒指": ResolvedCode("hkHSI", "恒指", "hk"), "恒生科技": ResolvedCode("hkHSTECH", "恒生科技", "hk"), "恒生科技指数": ResolvedCode("hkHSTECH", "恒生科技指数", "hk"),
+    "道琼斯": ResolvedCode("us.DJI", "道琼斯", "us"), "道指": ResolvedCode("us.DJI", "道指", "us"), "纳斯达克": ResolvedCode("us.IXIC", "纳斯达克", "us"), "纳指": ResolvedCode("us.IXIC", "纳指", "us"), "标普500": ResolvedCode("us.INX", "标普500", "us"), "标普": ResolvedCode("us.INX", "标普", "us"),
+}
+
+
+def _check_fast_path(query: str) -> list[ResolvedCode] | None:
+    value = query.strip().lower()
+    for keyword, codes in _MARKET_OVERVIEW.items():
+        if keyword in value:
+            return list(codes)
+    if value in _COMMON_INDICES:
+        return [_COMMON_INDICES[value]]
+    if _DIGIT_CODE_RE.match(query.strip()):
+        return [ResolvedCode(_a_share_prefix(query.strip()), query.strip(), "a_share")]
+    results: list[ResolvedCode] = []
+    for name, code in _COMMON_INDICES.items():
+        if (name in query or (len(value) >= 2 and name.lower().startswith(value))) and code not in results:
+            results.append(code)
+    return results or None
+
 
 def resolve_code(query: str) -> str | None:
-    """Try to resolve a query to a single Sina code (legacy interface).
-
-    Delegates to _resolver.CodeResolver for dynamic resolution.
-    """
-    from ._resolver import CodeResolver, _check_fast_path
-
-    # Fast-path: exact index match or 6-digit code
-    fast = _check_fast_path(query)
-    if fast and len(fast) == 1:
-        return fast[0].sina_code
-    if fast and len(fast) > 1:
-        return fast[0].sina_code  # Return first match
-
-    # Use resolver singleton
-    resolver = _get_resolver()
-    results = resolver.resolve(query)
-    if results:
-        return results[0].sina_code
-    return None
+    results = _check_fast_path(query)
+    return results[0].provider_code if results else None
 
 
 def resolve_codes(query: str) -> list[str]:
-    """Resolve a query to multiple Sina codes (legacy interface).
-
-    Delegates to _resolver.CodeResolver for dynamic resolution.
-    """
-    from ._resolver import CodeResolver, _check_fast_path
-
-    # Fast-path: market keywords return multiple codes
-    fast = _check_fast_path(query)
-    if fast:
-        return [r.sina_code for r in fast]
-
-    # Use resolver singleton
-    resolver = _get_resolver()
-    results = resolver.resolve(query)
-    return [r.sina_code for r in results]
-
-
-# ---- Module-level resolver singleton (lazy init) ----
-
-_resolver_instance: CodeResolver | None = None
-
-
-def _get_resolver() -> CodeResolver:
-    global _resolver_instance
-    if _resolver_instance is None:
-        from ._resolver import CodeResolver
-        from pathlib import Path
-        _resolver_instance = CodeResolver(
-            cache_path=Path.home() / ".matrix" / "cache" / "code_resolver.sqlite",
-        )
-    return _resolver_instance
-
-
-# ---- Legacy keyword groups (kept for compatibility) ----
-
-A_SHARE_KEYWORDS = {"a股", "a 股", "沪深", "上证", "深证", "深成", "创业板", "科创板",
-                    "沪指", "深指", "大盘", "沪深300", "上证50", "科创50"}
-GLOBAL_KEYWORDS = {"全球股市", "全球市场", "全球指数", "国际市场", "全球行情",
-                   "海外市场", "全球主要", "全球大盘", "欧美股市", "亚太股市"}
-US_KEYWORDS = {"美股", "纳斯达克", "纳指", "道琼斯", "道指", "标普"}
-HK_KEYWORDS = {"港股", "恒生", "恒指", "恒生科技", "恒科"}
+    results = _check_fast_path(query)
+    return [item.provider_code for item in results] if results else []

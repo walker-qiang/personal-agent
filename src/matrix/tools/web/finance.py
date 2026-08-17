@@ -1,12 +1,4 @@
-"""finance_query — real-time market data via structured APIs.
-
-Queries A-share indices, global indices, US stocks, and HK stocks
-using the Sina hq API. Returns structured JSON with precise numbers,
-not news articles.
-
-Code resolution is handled by _resolver.py (dynamic Sina suggest API + SQLite cache).
-For news about finance, use news_search instead.
-"""
+"""finance_query — market data through the personal-os WeStock adapter."""
 
 from __future__ import annotations
 
@@ -14,15 +6,15 @@ import logging
 from typing import Any
 
 from ..base import ToolDefinition, tool_error
-from ._codes import resolve_codes  # backward-compatible interface
-from ._sina import fetch_quotes
+from ..personal_os import market_quote, resolve_security
+from ._codes import _check_fast_path
 
 logger = logging.getLogger("matrix.tools.web.finance")
 
 tool_definition = ToolDefinition(
     name="finance_query",
     description=(
-        "查询实时行情数据（A股指数/全球指数/美股/港股/ETF）。用于：股价、大盘指数、涨跌幅、行情走势。"
+        "查询行情数据（A股指数/全球指数/美股/港股/ETF）。用于：股价、大盘指数、涨跌幅、行情走势。"
         "返回精确数值（价格、涨跌额、涨跌幅），不是新闻。"
         "⚠️ 用户问「今天股市」「大盘多少点」「苹果股价」「全球股市表现」时用此工具，不要用 news_search。"
         "💡 效率提示：用宽泛关键词一次查全部。例如查A股直接传 query='A股'（返回上证+深证+创业板+沪深300），"
@@ -54,10 +46,7 @@ tool_definition = ToolDefinition(
 
 
 def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
-    """Query real-time market data.
-
-    Uses dynamic code resolution (Sina suggest API + SQLite cache) to resolve
-    any stock/index name to its Sina HQ API code. No hardcoded mapping needed.
+    """Query market data through personal-os.
 
     Args:
         query: Natural language query, e.g., "海螺水泥", "恒生科技", "苹果".
@@ -66,14 +55,20 @@ def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
     Returns:
         Dict with 'results' list and 'query' string.
     """
-    # Resolve via dynamic resolver (returns all matching codes)
-    codes = resolve_codes(query)
+    fast = _check_fast_path(query) if query.strip() else None
+    targets: list[tuple[str, str]] = []
+    if fast:
+        targets = [(item.provider_code, item.display_name) for item in fast]
+    elif not query.strip() and market != "auto":
+        targets = [(code, "") for code in _market_default_codes(market)]
+    elif query.strip():
+        resolved = resolve_security(query)
+        for match in resolved.get("matches", []) if isinstance(resolved, dict) else []:
+            code = str(match.get("symbol") or match.get("canonical_symbol") or "").strip()
+            if code:
+                targets.append((code, str(match.get("name") or "")))
 
-    # If market is specified, it may override/augment
-    if not codes and market != "auto":
-        codes = _market_default_codes(market)
-
-    if not codes:
+    if not targets:
         return tool_error(
             "finance_query", "行情查询",
             f"未识别到有效的查询目标: {query}",
@@ -81,15 +76,25 @@ def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
             {"query": query},
         )
 
-    # Fetch quotes
-    quotes = fetch_quotes(codes)
+    quotes: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for code, display_name in targets:
+        quote = market_quote(code)
+        if not isinstance(quote, dict) or quote.get("error"):
+            failures.append(code)
+            continue
+        result = dict(quote)
+        result["code"] = result.get("code") or code
+        if display_name:
+            result["name"] = display_name
+        quotes.append(result)
 
     if not quotes:
         return tool_error(
             "finance_query", "行情查询",
             f"行情数据获取失败，可能是网络问题或 API 限流: {query}",
             "请稍后重试，或尝试使用 news_search 获取相关财经新闻。",
-            {"query": query, "codes": codes},
+            {"query": query, "codes": [code for code, _ in targets], "failures": failures},
         )
 
     # Format output
@@ -97,21 +102,21 @@ def finance_query(query: str, market: str = "auto") -> dict[str, Any]:
         "results": quotes,
         "query": query,
         "count": len(quotes),
+        "warnings": [f"部分标的行情不可用: {', '.join(failures)}"] if failures else [],
     }
 
 
 def _market_default_codes(market: str) -> list[str]:
     """Return default codes for a given market."""
     if market == "a_share":
-        return ["s_sh000001", "s_sz399001", "s_sz399006", "s_sh000300"]
+        return ["sh000001", "sz399001", "sz399006", "sh000300"]
     elif market == "us":
-        return ["int_dji", "int_nasdaq", "int_sp500"]
+        return ["us.DJI", "us.IXIC", "us.INX"]
     elif market == "hk":
-        return ["int_hangseng", "hkHSTECH"]
+        return ["hkHSI", "hkHSTECH"]
     elif market == "global":
         return [
-            "int_dji", "int_nasdaq", "int_sp500",
-            "int_hangseng", "int_nikkei",
-            "s_sh000001", "s_sz399001",
+            "us.DJI", "us.IXIC", "us.INX",
+            "hkHSI", "sh000001", "sz399001",
         ]
     return []
