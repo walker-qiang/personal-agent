@@ -120,6 +120,79 @@ class FakeResearchLLM:
         }
 
 
+class SequentialResearchLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    def complete_json(self, system, messages):
+        self.prompts.append((system, messages))
+        return self.responses.pop(0)
+
+
+def _complete_research_result():
+    return {
+        "schema_version": 2,
+        "type": "investment-research",
+        "status": "complete",
+        "object_type": "stock",
+        "subject": {"code": "000001", "name": "测试公司"},
+        "research_date": "2026-08-19",
+        "data_date": "2026-08-19",
+        "latest_report_period": "2026-06-30",
+        "information_completeness": "standard",
+        "decision": {"action": "observe"},
+        "summary": "summary",
+        "highlights": ["h1", "h2", "h3"],
+        "thesis": ["t1", "t2", "t3"],
+        "antithesis": ["a1", "a2"],
+        "risks": ["r1", "r2", "r3"],
+        "metrics": [
+            {"name": "m1", "value": "1"},
+            {"name": "m2", "value": "2"},
+            {"name": "m3", "value": "3"},
+            {"name": "m4", "value": "4"},
+        ],
+        "triggers": [
+            {"type": "positive", "condition": "c1"},
+            {"type": "negative", "condition": "c2"},
+        ],
+        "sources": [
+            {
+                "title": "official",
+                "url": "https://example.com/official.pdf",
+                "date": "2026-08-13",
+                "source_type": "official",
+            },
+            {
+                "title": "supplementary",
+                "url": "https://example.com/market",
+                "date": "2026-08-19",
+                "source_type": "supplementary",
+            },
+        ],
+        "tags": ["investment-research", "stock"],
+    }
+
+
+def _minimum_contract_issues(result, evidence, **kwargs):
+    minimums = {
+        "highlights": 3,
+        "thesis": 3,
+        "antithesis": 2,
+        "risks": 3,
+        "metrics": 4,
+        "triggers": 2,
+        "sources": 2,
+    }
+    return [
+        f"{field} too short"
+        for field, minimum in minimums.items()
+        if not isinstance(result.get(field), list)
+        or len(result[field]) < minimum
+    ]
+
+
 def test_deep_research_workflow_retries_evidence_and_persists_lifecycle():
     store = MemoryOperationStore()
     tools = FakeResearchTools()
@@ -186,3 +259,108 @@ def test_deep_research_workflow_preserves_image_attachment_for_synthesis():
     }
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
+
+
+def test_deep_research_repairs_once_and_records_safe_diagnostics():
+    store = MemoryOperationStore()
+    tools = FakeResearchTools()
+    llm = SequentialResearchLLM([
+        {"summary": "do not persist this prose", "highlights": []},
+        _complete_research_result(),
+    ])
+    workflow = DeepResearchWorkflow(
+        store, llm, tools,
+        normalize_result=lambda result, evidence, **kwargs: result,
+        preview_json=lambda value: json.dumps(value, ensure_ascii=False),
+        select_latest_official_url=lambda sources, year: "",
+        extract_official_report_period=lambda evidence: "",
+        validate_result=_minimum_contract_issues,
+    )
+
+    handle = workflow.start(
+        owner_id="owner-a",
+        session_id="research-repair-success",
+        question="研究对象：测试公司\n标的代码：000001\n研究日期：2026-08-19",
+        research_date="2026-08-19",
+    )
+    result = handle.result()
+    events = store.event_list(handle.operation_id)
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert len(llm.prompts) == 2
+    assert "完整结构" in llm.prompts[1][0]
+    repair_event = next(
+        event for event in events
+        if event.payload.get("stage") == "validation_repair"
+    )
+    assert repair_event.payload["result_shape"]["fields"]["highlights"]["count"] == 0
+    assert "do not persist this prose" not in json.dumps(
+        repair_event.payload, ensure_ascii=False,
+    )
+    assert any(
+        event.payload.get("stage") == "validation_repair_passed"
+        for event in events
+    )
+
+
+def test_deep_research_fails_after_single_unsuccessful_repair():
+    store = MemoryOperationStore()
+    tools = FakeResearchTools()
+    llm = SequentialResearchLLM([
+        {"summary": "first", "highlights": []},
+        {"summary": "second", "highlights": []},
+    ])
+    workflow = DeepResearchWorkflow(
+        store, llm, tools,
+        normalize_result=lambda result, evidence, **kwargs: result,
+        preview_json=lambda value: json.dumps(value, ensure_ascii=False),
+        select_latest_official_url=lambda sources, year: "",
+        extract_official_report_period=lambda evidence: "",
+        validate_result=_minimum_contract_issues,
+    )
+
+    handle = workflow.start(
+        owner_id="owner-a",
+        session_id="research-repair-failure",
+        question="研究对象：测试公司\n标的代码：000001\n研究日期：2026-08-19",
+        research_date="2026-08-19",
+    )
+    result = handle.result()
+    events = store.event_list(handle.operation_id)
+
+    assert result.outcome is RunOutcome.FAILED
+    assert len(llm.prompts) == 2
+    assert "已修复 1 次" in result.error
+    failed_event = next(
+        event for event in events
+        if event.payload.get("stage") == "validation_failed"
+    )
+    assert failed_event.payload["attempt"] == 1
+    assert failed_event.payload["result_shape"]["fields"]["sources"]["count"] == 0
+    assert events[-1].event_type is RuntimeEventType.RUN_FAILED
+
+
+def test_deep_research_never_applies_future_period_after_validation():
+    store = MemoryOperationStore()
+    tools = FakeResearchTools()
+    llm = SequentialResearchLLM([_complete_research_result()])
+    workflow = DeepResearchWorkflow(
+        store, llm, tools,
+        normalize_result=lambda result, evidence, **kwargs: result,
+        preview_json=lambda value: json.dumps(value, ensure_ascii=False),
+        select_latest_official_url=lambda sources, year: "",
+        extract_official_report_period=lambda evidence: "2026-12-31",
+        validate_result=_minimum_contract_issues,
+    )
+
+    handle = workflow.start(
+        owner_id="owner-a",
+        session_id="research-future-period",
+        question="研究对象：测试公司\n标的代码：000001\n研究日期：2026-08-19",
+        research_date="2026-08-19",
+    )
+    result = handle.result()
+    payload = json.loads(result.final_message)
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert payload["latest_report_period"] == "2026-06-30"

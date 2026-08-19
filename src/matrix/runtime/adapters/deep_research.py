@@ -20,6 +20,68 @@ from ..domain.results import RunOutcome
 from ..ports.store import OperationStorePort
 
 
+RESEARCH_MINIMUM_ITEMS = {
+    "highlights": 3,
+    "thesis": 3,
+    "antithesis": 2,
+    "risks": 3,
+    "metrics": 4,
+    "triggers": 2,
+    "sources": 2,
+}
+
+
+def _result_shape_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Return debug-safe result shape without persisting report prose."""
+    list_fields: dict[str, dict[str, Any]] = {}
+    for field in RESEARCH_MINIMUM_ITEMS:
+        value = result.get(field)
+        list_fields[field] = {
+            "type": type(value).__name__,
+            "count": len(value) if isinstance(value, list) else 0,
+        }
+    sources = result.get("sources")
+    source_items = sources if isinstance(sources, list) else []
+    usable_sources = [
+        item for item in source_items
+        if isinstance(item, dict)
+        and str(item.get("url") or "").startswith(("http://", "https://"))
+    ]
+    official_sources = [
+        item for item in usable_sources
+        if str(item.get("source_type") or "").lower()
+        in {"official", "web_fetch", "cninfo", "hkexnews"}
+    ]
+    return {
+        "schema_version": result.get("schema_version"),
+        "type": result.get("type"),
+        "status": result.get("status"),
+        "research_date": result.get("research_date"),
+        "data_date": result.get("data_date"),
+        "latest_report_period": result.get("latest_report_period"),
+        "information_completeness": result.get("information_completeness"),
+        "fields": list_fields,
+        "usable_source_count": len(usable_sources),
+        "official_source_count": len(official_sources),
+    }
+
+
+def _bounded_report_period(value: Any, research_date: str) -> str:
+    """Accept an inferred report period only when it is real and not future."""
+    import datetime as _datetime
+
+    text = str(value or "").strip()[:10]
+    upper_text = str(research_date or "").strip()[:10]
+    try:
+        period = _datetime.date.fromisoformat(text)
+        upper = _datetime.date.fromisoformat(upper_text)
+    except (TypeError, ValueError):
+        return ""
+    if period.year < 2000 or period > upper:
+        return ""
+    return period.isoformat()
+
+
 def _build_multimodal_content(
     text: str, attachments: list[dict[str, Any]],
 ) -> str | list[dict[str, Any]]:
@@ -255,7 +317,10 @@ class DeepResearchHandle:
             )
             if not isinstance(result, dict):
                 raise ValueError("深度研究汇总结果不是 JSON 对象")
-            official_period = self.workflow.extract_official_report_period(evidence)
+            official_period = _bounded_report_period(
+                self.workflow.extract_official_report_period(evidence),
+                self.research_date,
+            )
             if official_period:
                 for entry in evidence:
                     if entry.get("tool") != "personal_os.web_fetch":
@@ -272,10 +337,16 @@ class DeepResearchHandle:
                 result, evidence, research_date=self.research_date,
             )
             if issues:
+                initial_issues = list(issues)
                 current, event = self.workflow._commit(
                     current, OperationPhase.REQUESTING_MODEL,
                     RuntimeEventType.MESSAGE_START,
-                    {"stage": "validation_repair", "issues": issues},
+                    {
+                        "stage": "validation_repair",
+                        "attempt": 1,
+                        "issues": initial_issues,
+                        "result_shape": _result_shape_summary(result),
+                    },
                     {"type": "thinking", "content": "首轮研究结果未通过质量校验，正在修正…"},
                 )
                 self._events.append(event)
@@ -299,17 +370,41 @@ class DeepResearchHandle:
                     result, evidence, research_date=self.research_date,
                 )
                 if issues:
-                    raise ValueError("研究结果质量闸门未通过：" + "；".join(issues))
-            if official_period and official_period > str(result.get("latest_report_period") or ""):
-                result["latest_report_period"] = official_period
-                metrics = result.get("metrics")
-                if not isinstance(metrics, list):
-                    metrics = []
-                    result["metrics"] = metrics
-                metrics.append({
-                    "name": "官方公告最新报告期", "value": official_period,
-                    "period": self.research_date, "source": "personal_os.web_fetch",
-                })
+                    current, event = self.workflow._commit(
+                        current, OperationPhase.REQUESTING_MODEL,
+                        RuntimeEventType.MESSAGE_END,
+                        {
+                            "stage": "validation_failed",
+                            "attempt": 1,
+                            "initial_issues": initial_issues,
+                            "issues": issues,
+                            "result_shape": _result_shape_summary(result),
+                        },
+                        {
+                            "type": "thinking",
+                            "content": "修正结果仍未通过质量校验。",
+                        },
+                    )
+                    self._events.append(event)
+                    yield event
+                    raise ValueError(
+                        "研究结果质量闸门未通过（已修复 1 次）："
+                        + "；".join(issues)
+                    )
+                current, event = self.workflow._commit(
+                    current, OperationPhase.REQUESTING_MODEL,
+                    RuntimeEventType.MESSAGE_END,
+                    {
+                        "stage": "validation_repair_passed",
+                        "attempt": 1,
+                        "initial_issues": initial_issues,
+                        "issues": [],
+                        "result_shape": _result_shape_summary(result),
+                    },
+                    {"type": "thinking", "content": "修正结果已通过质量校验。"},
+                )
+                self._events.append(event)
+                yield event
             answer = json.dumps(result, ensure_ascii=False)
             current, event = self.workflow._commit(
                 current, OperationPhase.REQUESTING_MODEL,
@@ -449,10 +544,28 @@ def _fact_check_summary(evidence: list[dict[str, Any]]) -> str:
         elif tool == "personal_os.financials":
             data = result.get("data")
             metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
+            report_verification = []
+            reports = data.get("reports", []) if isinstance(data, dict) else []
+            for report in reports if isinstance(reports, list) else []:
+                if not isinstance(report, dict):
+                    continue
+                source = report.get("source")
+                source = source if isinstance(source, dict) else {}
+                status = str(source.get("verification_status") or "unverified")
+                reconciliation = source.get("reconciliation")
+                if isinstance(reconciliation, dict):
+                    status = str(reconciliation.get("status") or status)
+                report_verification.append({
+                    "period": report.get("period_end"),
+                    "period_type": report.get("period_type"),
+                    "verification_status": status,
+                })
             facts.append({
                 "tool": tool,
                 "latest_report_period": metadata.get("latest_report_period"),
+                "latest_period_type": metadata.get("latest_period_type"),
                 "stale": metadata.get("stale"),
+                "report_verification": report_verification,
             })
         elif tool == "personal_os.web_fetch":
             facts.append({
@@ -544,6 +657,15 @@ PB、资本开支、资产负债表细节或同业组时，使用 standard，并
 如果已有更晚且通过核验的官方业绩公告，则使用该公告作为最新经营数据，不得因此把 information_completeness 降为 low，
 但要在 risks 或 data_quality warning 中说明结构化财报尚未同步。没有更晚官方证据时，才将财报过期作为硬性缺口。
 如果 financials.data.reports 存在，必须优先使用其中的多期数据分析趋势，不得只根据 latest 单期摘要推断趋势。
+financials.data.reports[].period_type 是期间口径的权威字段：Q2 表示第二季度单季，
+H1 表示上半年累计。不得仅根据 period_end=06-30 把 Q2 写成 H1、上半年或中期；
+指标名称、摘要和关键事实必须保持同一期间口径。
+financials.data.reports[].source.verification_status 或 source.reconciliation.status
+只有 verified/reconciled 才能作为 reported 确定性指标。unverified 报告期不得进入
+metrics；正文如需提及，必须明确标注“第三方结构化数据，尚未官方对账/待核实”，
+不得据此给出确定性同比或投资结论。
+valuation 返回 estimated=true 时，PE/PB 必须标记为 Calculated/Estimated，
+并在 metric name 或 source 中明确写“估算”，不得冒充官方披露指标。
 如果 personal_os.peers 返回 status=not_configured，必须说明同业组未配置，不得输出为系统故障，也不得自行猜测同业名单；这本身不是将核心研究降为 low 的理由。
 如果 personal_os.peers 返回 status=ok 或 partial 且 companies 中有成功数据，必须使用其中真实的公司名称和估值字段进行至少一条同业比较；
 不得说“同业数据未显示”或“无法比较”。对缺失的单项 PE/PB 要明确标记为不可计算，不得补猜。
@@ -561,14 +683,73 @@ TOOL AVAILABILITY:
         self, evidence_text: str, previous: dict[str, Any], issues: list[str],
         evidence: list[dict[str, Any]] | None = None,
     ) -> str:
+        minimums = json.dumps(RESEARCH_MINIMUM_ITEMS, ensure_ascii=False)
+        template = {
+            "schema_version": 2,
+            "type": "investment-research",
+            "status": "complete",
+            "object_type": "stock",
+            "subject": {"code": "从上一版保留", "name": "从上一版保留"},
+            "research_date": "从上一版保留",
+            "data_date": "证据数据日期，YYYY-MM-DD",
+            "latest_report_period": "证据中的最新报告期，YYYY-MM-DD",
+            "information_completeness": "standard 或 deep",
+            "decision": {
+                "quality": "基于证据填写",
+                "valuation": "基于证据填写",
+                "portfolio_role": "基于证据填写",
+                "action": "基于证据填写",
+                "confidence": "基于证据填写",
+            },
+            "summary": "完整研究摘要",
+            "highlights": ["关键事实 1", "关键事实 2", "关键事实 3"],
+            "thesis": ["正向逻辑 1", "正向逻辑 2", "正向逻辑 3"],
+            "antithesis": ["反方逻辑 1", "反方逻辑 2"],
+            "risks": ["风险 1", "风险 2", "风险 3"],
+            "metrics": [
+                {"name": "指标 1", "value": "证据值", "period": "报告期", "source": "工具名"},
+                {"name": "指标 2", "value": "证据值", "period": "报告期", "source": "工具名"},
+                {"name": "指标 3", "value": "证据值", "period": "报告期", "source": "工具名"},
+                {"name": "指标 4", "value": "证据值", "period": "报告期", "source": "工具名"},
+            ],
+            "triggers": [
+                {"type": "positive", "condition": "可验证条件"},
+                {"type": "negative", "condition": "可验证条件"},
+            ],
+            "sources": [
+                {
+                    "title": "官方来源标题",
+                    "url": "证据中的真实 URL",
+                    "date": "证据中的真实日期",
+                    "source_type": "official",
+                },
+                {
+                    "title": "补充来源标题",
+                    "url": "证据中的真实 URL",
+                    "date": "证据中的真实日期",
+                    "source_type": "supplementary",
+                },
+            ],
+            "tags": ["investment-research", "stock"],
+        }
         return (
-            "你正在修复一份投资研究 JSON。只输出一个合法 JSON 对象，不要 Markdown。\n"
+            "你正在完整重写一份未通过质量校验的投资研究 JSON。"
+            "只输出一个合法 JSON 对象，不要 Markdown，不要解释。\n"
             "必须保留 schema_version=2、type=investment-research、subject、research_date、"
             "data_date、latest_report_period、decision、summary。以下数组绝对不能为空："
             "highlights、thesis、antithesis、risks、metrics、triggers、sources。"
             "highlights/thesis/antithesis/risks 使用字符串数组；metrics 使用包含 name/value 的对象数组；"
             "triggers 使用包含 type/condition 的对象数组；sources 使用包含 title/url/date/source_type 的对象数组。"
-            "只能根据 PERSONAL-OS EVIDENCE 填写，缺少的事实必须明确写成待核实，不得编造数字。\n\n"
+            "禁止复制上一版中的空数组，禁止使用占位符、map[...]、整段工具对象或虚构 URL。"
+            "只能根据 PERSONAL-OS EVIDENCE 填写；缺少的事实要写成具体的待核实事项，不得编造数字。"
+            "financials 报告只有 source.verification_status/reconciliation.status 为 verified 或 reconciled"
+            "才能进入 metrics。unverified 报告必须从 metrics 删除；正文如提及必须明确标注"
+            "第三方结构化数据尚未官方对账。estimated=true 的 PE/PB 必须在 name 或 source 标注估算。"
+            "每个数组必须满足以下最小条目数：\n"
+            + minimums
+            + "\n输出必须遵循这个完整结构，示例文字必须替换为真实证据或具体待核实事项：\n"
+            + json.dumps(template, ensure_ascii=False)
+            + "\n\n"
             "上一版结果未通过以下确定性校验：\n"
             + json.dumps(issues, ensure_ascii=False)
             + "\n上一版 JSON：\n"

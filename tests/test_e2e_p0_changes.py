@@ -14,7 +14,13 @@ from pathlib import Path
 import pytest
 
 from matrix.context import ToolResultRefStore, make_get_stored_data_tool
-from matrix.chat._service import _normalize_research_result
+from matrix.chat._service import (
+    _extract_official_report_period,
+    _infer_report_period_from_text,
+    _normalize_research_result,
+    _research_result_issues,
+    _select_latest_official_url,
+)
 from matrix.skills.loader import SkillDefinition, load_skills, _split_frontmatter
 from matrix.skills.executor import execute_skill, _resolve_arguments, _resolve_template, _resolve_field_path
 
@@ -64,6 +70,228 @@ class TestInvestmentResearchDataQuality:
         )
         assert result["status"] == "incomplete"
         assert "没有通过正文核验的官方公告或财报" in result["data_quality"]["blockers"]
+
+    def test_minimum_content_contract_rejects_thin_research(self):
+        result = {
+            "schema_version": 2,
+            "type": "investment-research",
+            "status": "complete",
+            "subject": {"code": "hk00700", "name": "腾讯控股"},
+            "research_date": "2026-08-19",
+            "data_date": "2026-08-19",
+            "latest_report_period": "2026-06-30",
+            "information_completeness": "standard",
+            "decision": {"action": "observe"},
+            "summary": "summary",
+            "highlights": ["one"],
+            "thesis": ["one"],
+            "antithesis": ["one"],
+            "risks": ["one"],
+            "metrics": [{"name": "revenue", "value": "1"}],
+            "triggers": [{"type": "positive", "condition": "one"}],
+            "sources": [{
+                "title": "Tencent IR",
+                "url": "https://www.tencent.com/report.pdf",
+                "date": "2026-08-13",
+                "source_type": "official",
+            }],
+        }
+        issues = _research_result_issues(
+            result,
+            [{
+                "tool": "personal_os.financials",
+                "result": {
+                    "data": {
+                        "reports": [{"period_end": "2026-06-30"}],
+                        "metadata": {"latest_report_period": "2026-06-30"},
+                    },
+                },
+            }],
+            research_date="2026-08-19",
+        )
+
+        assert "highlights 至少需要 3 项有效内容，当前 1 项" in issues
+        assert "thesis 至少需要 3 项有效内容，当前 1 项" in issues
+        assert "antithesis 至少需要 2 项有效内容，当前 1 项" in issues
+        assert "risks 至少需要 3 项有效内容，当前 1 项" in issues
+        assert "metrics 至少需要 4 项有效内容，当前 1 项" in issues
+        assert "triggers 至少需要 2 项有效内容，当前 1 项" in issues
+        assert "sources 至少需要 2 项有效内容，当前 1 项" in issues
+        assert "sources 至少需要 2 个真实 URL，当前 1 个" in issues
+
+    def test_q2_evidence_rejects_half_year_label(self):
+        result = {
+            "schema_version": 2,
+            "type": "investment-research",
+            "status": "complete",
+            "subject": {"code": "hk00700", "name": "腾讯控股"},
+            "research_date": "2026-08-19",
+            "data_date": "2026-08-19",
+            "latest_report_period": "2026-06-30",
+            "information_completeness": "standard",
+            "decision": {"action": "observe"},
+            "summary": "腾讯 2026 年上半年收入增长。",
+            "highlights": ["上半年收入稳健", "现金流良好", "估值合理"],
+            "thesis": ["t1", "t2", "t3"],
+            "antithesis": ["a1", "a2"],
+            "risks": ["r1", "r2", "r3"],
+            "metrics": [
+                {"name": "2026H1收入", "value": "2048", "period": "2026-06-30"},
+                {"name": "m2", "value": "2"},
+                {"name": "m3", "value": "3"},
+                {"name": "m4", "value": "4"},
+            ],
+            "triggers": [
+                {"type": "positive", "condition": "c1"},
+                {"type": "negative", "condition": "c2"},
+            ],
+            "sources": [
+                {
+                    "title": "Tencent Q2 Results",
+                    "url": "https://www.tencent.com/q2.pdf",
+                    "date": "2026-08-13",
+                    "source_type": "official",
+                },
+                {
+                    "title": "Market",
+                    "url": "https://example.org/market",
+                    "date": "2026-08-19",
+                    "source_type": "supplementary",
+                },
+            ],
+        }
+        issues = _research_result_issues(
+            result,
+            [{
+                "tool": "personal_os.financials",
+                "result": {
+                    "data": {
+                        "reports": [{
+                            "period_end": "2026-06-30",
+                            "period_type": "Q2",
+                        }],
+                        "metadata": {"latest_report_period": "2026-06-30"},
+                    },
+                },
+            }],
+            research_date="2026-08-19",
+        )
+
+        assert any("period_type=Q2" in issue for issue in issues)
+
+    def test_half_year_forecast_is_not_promoted_to_annual_report(self):
+        text = (
+            "宜宾五粮液股份有限公司 2026 年半年度业绩预告\n"
+            "业绩预告期间：2026 年 1 月 1 日至 2026 年 6 月 30 日"
+        )
+        assert _infer_report_period_from_text(text) == "2026-06-30"
+        assert _extract_official_report_period([{
+            "tool": "personal_os.web_fetch",
+            "result": {
+                "report_period": "2026-06-30",
+                "fetched_at": "2026-08-19T12:00:00+08:00",
+                "content": text,
+            },
+        }]) == "2026-06-30"
+
+    def test_official_source_selector_excludes_earnings_forecast(self):
+        sources = [
+            {
+                "title": "2026 年半年度业绩预告",
+                "url": "https://static.cninfo.com.cn/forecast.pdf",
+                "tier": "official",
+                "report_type": "earnings_forecast",
+                "report_period": "2026-06-30",
+            },
+            {
+                "title": "2025 年年度报告",
+                "url": "https://static.cninfo.com.cn/annual.pdf",
+                "tier": "official",
+                "report_type": "annual_report",
+                "report_period": "2025-12-31",
+            },
+        ]
+
+        assert _select_latest_official_url(
+            sources, "2026",
+        ) == "https://static.cninfo.com.cn/annual.pdf"
+
+    def test_unverified_reports_and_estimated_valuation_are_not_hard_facts(self):
+        result = {
+            "schema_version": 2,
+            "type": "investment-research",
+            "status": "complete",
+            "subject": {"code": "sz000858", "name": "五粮液"},
+            "research_date": "2026-08-19",
+            "data_date": "2026-08-19",
+            "latest_report_period": "2026-03-31",
+            "information_completeness": "standard",
+            "decision": {"action": "observe"},
+            "summary": "2025 年营收 405 亿元，同比大幅下降。",
+            "highlights": ["2025 年度每股现金分红 3.17 元", "h2", "h3"],
+            "thesis": ["t1", "t2", "t3"],
+            "antithesis": ["a1", "a2"],
+            "risks": ["r1", "r2", "r3"],
+            "metrics": [
+                {"name": "2025 年营收", "value": "405", "period": "2025-12-31"},
+                {"name": "PE(TTM)", "value": "31", "period": "2026-08-19", "source": "valuation"},
+                {"name": "m3", "value": "3"},
+                {"name": "m4", "value": "4"},
+            ],
+            "triggers": [
+                {"type": "positive", "condition": "c1"},
+                {"type": "negative", "condition": "c2"},
+            ],
+            "sources": [
+                {
+                    "title": "Q1 report",
+                    "url": "https://static.cninfo.com.cn/q1.pdf",
+                    "date": "2026-04-30",
+                    "source_type": "official",
+                },
+                {
+                    "title": "Market",
+                    "url": "https://example.org/market",
+                    "date": "2026-08-19",
+                    "source_type": "supplementary",
+                },
+            ],
+        }
+        evidence = [
+            {
+                "tool": "personal_os.financials",
+                "result": {
+                    "data": {
+                        "reports": [
+                            {
+                                "period_end": "2026-03-31",
+                                "period_type": "Q1",
+                                "source": {"verification_status": "reconciled"},
+                            },
+                            {
+                                "period_end": "2025-12-31",
+                                "period_type": "FY",
+                                "source": {"verification_status": "unverified"},
+                            },
+                        ],
+                        "metadata": {"latest_report_period": "2026-03-31"},
+                    },
+                },
+            },
+            {
+                "tool": "personal_os.valuation",
+                "result": {"estimated": True, "pe_approx": 31},
+            },
+        ]
+
+        issues = _research_result_issues(
+            result, evidence, research_date="2026-08-19",
+        )
+
+        assert any("metrics[0] 使用尚未官方对账" in issue for issue in issues)
+        assert any("summary 引用了尚未官方对账" in issue for issue in issues)
+        assert any("metrics[1] 的 PE/PB 来自 estimated" in issue for issue in issues)
+        assert not any("highlights[0] 引用了尚未官方对账" in issue for issue in issues)
 
 
 # ================================================================

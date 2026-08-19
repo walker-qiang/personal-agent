@@ -35,7 +35,10 @@ from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..runtime.adapters.sqlite_store import SQLiteRuntimeStore
 from ..runtime.adapters.external_agent import ExternalAgentAdapter
-from ..runtime.adapters.deep_research import DeepResearchWorkflow
+from ..runtime.adapters.deep_research import (
+    RESEARCH_MINIMUM_ITEMS,
+    DeepResearchWorkflow,
+)
 from ..runtime import AgentRuntime, ExecutionPolicy, ResumeInput
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
@@ -291,6 +294,56 @@ def _latest_report_period_from_evidence(
     return max(periods) if periods else ""
 
 
+def _latest_report_period_type_from_evidence(
+    evidence: list[dict[str, Any]], research_date: str,
+) -> tuple[str, str]:
+    candidates: list[tuple[str, str]] = []
+    for entry in evidence:
+        if entry.get("tool") != "personal_os.financials":
+            continue
+        result = entry.get("result")
+        data = result.get("data") if isinstance(result, dict) else None
+        reports = data.get("reports") if isinstance(data, dict) else None
+        for report in reports if isinstance(reports, list) else []:
+            if not isinstance(report, dict):
+                continue
+            period = _safe_evidence_report_period(
+                report.get("period_end"), research_date,
+            )
+            period_type = str(report.get("period_type") or "").strip().upper()
+            if period and period_type:
+                candidates.append((period, period_type))
+    return max(candidates, default=("", ""))
+
+
+def _financial_report_verification(
+    evidence: list[dict[str, Any]],
+) -> dict[str, str]:
+    verification: dict[str, str] = {}
+    for entry in evidence:
+        if entry.get("tool") != "personal_os.financials":
+            continue
+        result = entry.get("result")
+        data = result.get("data") if isinstance(result, dict) else None
+        reports = data.get("reports") if isinstance(data, dict) else None
+        for report in reports if isinstance(reports, list) else []:
+            if not isinstance(report, dict):
+                continue
+            period = str(report.get("period_end") or "").strip()[:10]
+            source = report.get("source")
+            source = source if isinstance(source, dict) else {}
+            status = str(source.get("verification_status") or "").lower()
+            reconciliation = source.get("reconciliation")
+            if isinstance(reconciliation, dict):
+                status = str(reconciliation.get("status") or status).lower()
+            verification[period] = (
+                "verified"
+                if status in {"verified", "reconciled"}
+                else "unverified"
+            )
+    return verification
+
+
 def _enforce_research_quality(
     normalized: dict[str, Any], evidence: list[dict[str, Any]]
 ) -> None:
@@ -482,10 +535,128 @@ def _research_result_issues(
                     metric["value"] = authoritative
             issues = [item for item in issues if "latest_report_period" not in item]
 
-    for field in ("highlights", "thesis", "antithesis", "risks", "metrics", "triggers"):
+    latest_period, latest_period_type = _latest_report_period_type_from_evidence(
+        evidence, research_date,
+    )
+    if latest_period_type == "Q2":
+        wrong_period_tokens = ("h1", "上半年", "中期", "半年")
+        mislabeled: list[str] = []
+        narrative = [str(result.get("summary") or "")]
+        highlights = result.get("highlights")
+        if isinstance(highlights, list):
+            narrative.extend(str(item) for item in highlights)
+        if any(
+            token in text.lower()
+            for text in narrative
+            for token in wrong_period_tokens
+        ):
+            mislabeled.append("summary/highlights")
+        metrics = result.get("metrics")
+        if isinstance(metrics, list):
+            for index, metric in enumerate(metrics):
+                if not isinstance(metric, dict):
+                    continue
+                metric_period = str(metric.get("period") or "")[:10]
+                metric_name = str(metric.get("name") or "").lower()
+                if (
+                    metric_period == latest_period
+                    and any(token in metric_name for token in wrong_period_tokens)
+                ):
+                    mislabeled.append(f"metrics[{index}]")
+        if mislabeled:
+            issues.append(
+                f"最新报告 {latest_period} 的 period_type=Q2，"
+                f"不得标记为 H1/上半年/中期：{','.join(mislabeled)}"
+            )
+
+    report_verification = _financial_report_verification(evidence)
+    unverified_periods = {
+        period for period, status in report_verification.items()
+        if period and status == "unverified"
+    }
+    metrics = result.get("metrics")
+    if isinstance(metrics, list):
+        for index, metric in enumerate(metrics):
+            if not isinstance(metric, dict):
+                continue
+            metric_period = str(metric.get("period") or "")[:10]
+            if metric_period in unverified_periods:
+                issues.append(
+                    f"metrics[{index}] 使用尚未官方对账的报告期 "
+                    f"{metric_period}，不得作为确定性指标"
+                )
+
+    allowed_unverified_labels = (
+        "未核验", "待核实", "第三方结构化", "尚未官方对账",
+        "unverified", "not reconciled",
+    )
+    financial_claim_tokens = (
+        "营收", "收入", "净利润", "利润", "现金流", "eps",
+        "资产", "负债", "权益", "同比", "环比", "毛利", "营业成本",
+        "revenue", "profit", "cash flow", "assets", "liabilities", "equity",
+    )
+    unverified_years = sorted({period[:4] for period in unverified_periods})
+    narrative_fields = (
+        "summary", "highlights", "thesis", "antithesis", "risks",
+    )
+    for field in narrative_fields:
+        raw = result.get(field)
+        values = raw if isinstance(raw, list) else [raw]
+        for index, value in enumerate(values):
+            text = str(value or "")
+            lowered = text.lower()
+            if not any(token in lowered for token in financial_claim_tokens):
+                continue
+            for year in unverified_years:
+                if year not in text:
+                    continue
+                if any(label in lowered for label in allowed_unverified_labels):
+                    continue
+                location = field if not isinstance(raw, list) else f"{field}[{index}]"
+                issues.append(
+                    f"{location} 引用了尚未官方对账的 {year} 年财务数据，"
+                    "必须明确标注第三方结构化数据/待核实，且不得给出确定性同比结论"
+                )
+
+    valuation = next(
+        (
+            entry.get("result")
+            for entry in evidence
+            if entry.get("tool") == "personal_os.valuation"
+            and isinstance(entry.get("result"), dict)
+        ),
+        {},
+    )
+    if isinstance(valuation, dict) and valuation.get("estimated") is True:
+        estimate_labels = ("估算", "估计", "approx", "estimated")
+        if isinstance(metrics, list):
+            for index, metric in enumerate(metrics):
+                if not isinstance(metric, dict):
+                    continue
+                name = str(metric.get("name") or "").lower()
+                if not any(token in name for token in ("pe", "pb", "市盈率", "市净率")):
+                    continue
+                source = str(metric.get("source") or "").lower()
+                if not any(label in name or label in source for label in estimate_labels):
+                    issues.append(
+                        f"metrics[{index}] 的 PE/PB 来自 estimated 估值，"
+                        "名称或 source 必须明确标注估算"
+                    )
+
+    string_list_fields = {"highlights", "thesis", "antithesis", "risks"}
+    for field, minimum in RESEARCH_MINIMUM_ITEMS.items():
         value = result.get(field)
-        if not isinstance(value, list) or not value:
-            issues.append(f"{field} 不能为空且必须是数组")
+        if not isinstance(value, list):
+            issues.append(f"{field} 必须是数组且至少包含 {minimum} 项")
+            continue
+        valid_count = len(value)
+        if field in string_list_fields:
+            valid_count = sum(
+                1 for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        if valid_count < minimum:
+            issues.append(f"{field} 至少需要 {minimum} 项有效内容，当前 {valid_count} 项")
 
     metrics = result.get("metrics")
     if isinstance(metrics, list):
@@ -498,6 +669,17 @@ def _research_result_issues(
             if metric.get("value") in (None, ""):
                 issues.append(f"metrics[{index}] 缺少 value")
 
+    triggers = result.get("triggers")
+    if isinstance(triggers, list):
+        for index, trigger in enumerate(triggers):
+            if not isinstance(trigger, dict):
+                issues.append(f"triggers[{index}] 必须是对象")
+                continue
+            if not str(trigger.get("type") or "").strip():
+                issues.append(f"triggers[{index}] 缺少 type")
+            if not str(trigger.get("condition") or "").strip():
+                issues.append(f"triggers[{index}] 缺少 condition")
+
     sources = result.get("sources")
     if not isinstance(sources, list) or not sources:
         issues.append("sources 不能为空且必须是数组")
@@ -506,14 +688,18 @@ def _research_result_issues(
             item for item in sources
             if isinstance(item, dict) and str(item.get("url") or "").startswith(("http://", "https://"))
         ]
-        if not usable_sources:
-            issues.append("sources 至少需要一个真实 URL")
+        minimum_sources = RESEARCH_MINIMUM_ITEMS["sources"]
+        if len(usable_sources) < minimum_sources:
+            issues.append(
+                f"sources 至少需要 {minimum_sources} 个真实 URL，"
+                f"当前 {len(usable_sources)} 个"
+            )
         official_sources = [
             item for item in usable_sources
             if str(item.get("source_type") or "").lower() in {"official", "web_fetch", "cninfo", "hkexnews"}
         ]
-        if not official_sources and not authoritative:
-            issues.append("缺少官方来源或正文核验")
+        if not official_sources:
+            issues.append("sources 至少需要一个官方来源")
 
     quality = result.get("data_quality")
     if isinstance(quality, dict) and quality.get("status") == "blocked":
@@ -541,6 +727,13 @@ def _select_latest_official_url(
         if isinstance(item, dict)
         and item.get("url")
         and (item.get("tier") == "official" or item.get("source_level") == "official")
+        and str(item.get("report_type") or "").lower() != "earnings_forecast"
+        and not any(
+            token in unquote(
+                " ".join(str(item.get(key) or "") for key in ("title", "url", "summary"))
+            ).lower()
+            for token in ("业绩预告", "盈利预告", "earnings forecast", "profit warning")
+        )
     ]
     if not candidates:
         return None
@@ -573,6 +766,12 @@ def _extract_official_report_period(evidence: list[dict[str, Any]]) -> str:
             continue
         result = entry.get("result")
         if isinstance(result, dict):
+            explicit = _safe_evidence_report_period(
+                result.get("report_period"),
+                str(result.get("fetched_at") or "")[:10] or "2100-01-01",
+            )
+            if explicit:
+                return explicit
             content = str(result.get("content") or result.get("text") or "")
             period = _infer_report_period_from_text(content)
             if period:
@@ -624,13 +823,13 @@ def _infer_report_period_from_text(value: str) -> str:
         year = str(_parse_chinese_number(chinese_year.group(1)))
 
     lower = text.lower()
-    if any(token in lower for token in ("annual report", "annual results", "年度报告", "年报")):
-        return _valid_report_period(year, "12", "31")
     if any(token in lower for token in (
         "interim report", "interim results", "中期报告", "中期业绩", "半年报",
-        "半年度报告", "上半年", "1h", "six months", "q2", "二季度", "第二季",
+        "半年度报告", "半年度业绩", "上半年", "1h", "six months", "q2", "二季度", "第二季",
     )):
         return _valid_report_period(year, "06", "30")
+    if any(token in lower for token in ("annual report", "annual results", "年度报告", "年报")):
+        return _valid_report_period(year, "12", "31")
     if any(token in lower for token in ("q1", "一季度", "第一季")):
         return _valid_report_period(year, "03", "31")
     if any(token in lower for token in ("q3", "三季度", "第三季")):
