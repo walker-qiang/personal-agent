@@ -30,3 +30,13 @@ async def healthz(request: Request) -> dict:
         "mcp_available": getattr(request.app.state, "mcp_client", None) is not None,
         "mcp_error": getattr(request.app.state, "mcp_error", ""),
     }
+
+
+@router.post("/rag/warmup")
+async def warmup_rag(request: Request) -> dict:
+    """Start RAG initialization without waiting for the model and index to load."""
+    start_warmup = getattr(request.app.state, "start_rag_warmup", None)
+    if start_warmup is None:
+        return {"ok": False, "rag_status": "disabled"}
+    status = start_warmup()
+    return {"ok": status != "disabled", "rag_status": status}

@@ -142,6 +142,29 @@ async def _initialize_rag(
         logger.warning("rag: initialization failed (will run without RAG): %s", exc)
 
 
+def _start_rag_warmup(
+    app: FastAPI,
+    config: AgentConfig,
+    tools_registry: ToolRegistry,
+) -> str:
+    """Schedule the single RAG initialization task when warmup is requested."""
+    status = getattr(app.state, "rag_status", "disabled")
+    task = getattr(app.state, "rag_task", None)
+    if status == "ready" or (task is not None and not task.done()):
+        return status
+    if not config.rag_docs_path or not Path(config.rag_docs_path).is_dir():
+        app.state.rag_status = "disabled"
+        return "disabled"
+
+    app.state.rag_error = ""
+    app.state.rag_status = "initializing"
+    app.state.rag_task = asyncio.create_task(
+        _initialize_rag(app, config, tools_registry),
+    )
+    logger.info("rag: warmup scheduled")
+    return "initializing"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize application state on startup."""
@@ -222,16 +245,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if synced:
             logger.info("memory_sync: %d user(s) synced from %s", synced, sync_path)
 
-    # Initialize RAG retriever in the background if docs path is configured.
+    # Keep startup light; the product client requests warmup after its first load.
     app.state.retriever = None
     app.state.rag_error = ""
     app.state.rag_status = "disabled"
     app.state.rag_task = None
+    app.state.start_rag_warmup = lambda: _start_rag_warmup(
+        app, config, tools_registry,
+    )
     if config.rag_docs_path and Path(config.rag_docs_path).is_dir():
-        app.state.rag_status = "initializing"
-        app.state.rag_task = asyncio.create_task(
-            _initialize_rag(app, config, tools_registry),
-        )
+        app.state.rag_status = "pending"
 
     # ---- CODE SANDBOX ----
     if config.code_sandbox_enabled:
