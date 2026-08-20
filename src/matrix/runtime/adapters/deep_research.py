@@ -7,6 +7,7 @@ operation/event lifecycle underneath it.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
 import json
 import re
@@ -28,6 +29,116 @@ RESEARCH_MINIMUM_ITEMS = {
     "metrics": 4,
     "triggers": 2,
     "sources": 2,
+}
+
+DEEP_RESEARCH_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "schema_version",
+        "type",
+        "status",
+        "object_type",
+        "subject",
+        "research_date",
+        "data_date",
+        "latest_report_period",
+        "information_completeness",
+        "decision",
+        "summary",
+        "highlights",
+        "thesis",
+        "antithesis",
+        "risks",
+        "metrics",
+        "triggers",
+        "sources",
+        "tags",
+    ],
+    "properties": {
+        "schema_version": {"type": "integer", "enum": [2]},
+        "type": {"type": "string", "enum": ["investment-research"]},
+        "status": {"type": "string", "minLength": 1},
+        "object_type": {"type": "string", "minLength": 1},
+        "subject": {
+            "type": "object",
+            "required": ["code", "name"],
+            "properties": {
+                "code": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1},
+            },
+        },
+        "research_date": {"type": "string", "minLength": 10},
+        "data_date": {"type": "string", "minLength": 10},
+        "latest_report_period": {"type": "string", "minLength": 10},
+        "information_completeness": {"type": "string", "minLength": 1},
+        "decision": {"type": "object"},
+        "summary": {"type": "string", "minLength": 1},
+        "highlights": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["highlights"],
+            "items": {"type": "string", "minLength": 1},
+        },
+        "thesis": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["thesis"],
+            "items": {"type": "string", "minLength": 1},
+        },
+        "antithesis": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["antithesis"],
+            "items": {"type": "string", "minLength": 1},
+        },
+        "risks": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["risks"],
+            "items": {"type": "string", "minLength": 1},
+        },
+        "metrics": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["metrics"],
+            "items": {
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "value": {},
+                },
+            },
+        },
+        "triggers": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["triggers"],
+            "items": {
+                "type": "object",
+                "required": ["type", "condition"],
+                "properties": {
+                    "type": {"type": "string", "minLength": 1},
+                    "condition": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "sources": {
+            "type": "array",
+            "minItems": RESEARCH_MINIMUM_ITEMS["sources"],
+            "items": {
+                "type": "object",
+                "required": ["title", "url", "date", "source_type"],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1},
+                    "url": {
+                        "type": "string",
+                        "pattern": r"^https?://",
+                    },
+                    "date": {"type": "string"},
+                    "source_type": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+    },
 }
 
 
@@ -104,6 +215,106 @@ def _build_multimodal_content(
             },
         })
     return blocks
+
+
+def _report_verification_status(report: dict[str, Any]) -> str:
+    source = report.get("source")
+    source = source if isinstance(source, dict) else {}
+    status = str(source.get("verification_status") or "").strip().lower()
+    reconciliation = source.get("reconciliation")
+    if isinstance(reconciliation, dict):
+        status = str(reconciliation.get("status") or status).strip().lower()
+    return status or "unverified"
+
+
+def _redact_unverified_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Keep report identity while hiding unverified financial values from LLMs."""
+    keep_fields = {
+        "period_start", "period_end", "period_type", "report_type",
+        "reported_at", "currency", "unit", "data_type",
+    }
+    redacted = {
+        key: copy.deepcopy(value)
+        for key, value in report.items()
+        if key in keep_fields
+    }
+    source = report.get("source")
+    if isinstance(source, dict):
+        redacted["source"] = {
+            key: copy.deepcopy(source[key])
+            for key in (
+                "verification_status", "reconciliation", "source_url",
+                "source_name", "statement_coverage",
+            )
+            if key in source
+        }
+    redacted["data_type"] = "reported_unverified_metadata_only"
+    return redacted
+
+
+def _model_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove unverified financial values from the model-visible evidence view."""
+    visible = copy.deepcopy(evidence)
+    for entry in visible:
+        tool = entry.get("tool")
+        result = entry.get("result")
+        if not isinstance(result, dict):
+            continue
+
+        if tool == "personal_os.financials":
+            data = result.get("data")
+            if not isinstance(data, dict):
+                continue
+            reports = data.get("reports")
+            if isinstance(reports, list):
+                data["reports"] = [
+                    report
+                    if not isinstance(report, dict)
+                    or _report_verification_status(report) in {"verified", "reconciled"}
+                    else _redact_unverified_report(report)
+                    for report in reports
+                ]
+            latest = data.get("latest")
+            if isinstance(latest, dict):
+                latest_period = str(
+                    latest.get("period")
+                    or latest.get("period_end")
+                    or ""
+                ).strip()[:10]
+                matching = next(
+                    (
+                        report for report in reports
+                        if isinstance(report, dict)
+                        and str(report.get("period_end") or "").strip()[:10]
+                        == latest_period
+                    ),
+                    None,
+                ) if isinstance(reports, list) else None
+                if matching and _report_verification_status(matching) not in {
+                    "verified", "reconciled",
+                }:
+                    data["latest"] = _redact_unverified_report(matching)
+            metadata = data.get("metadata")
+            if isinstance(metadata, dict):
+                metadata["model_note"] = (
+                    "未官方对账报告仅保留期间和状态，禁止作为确定性事实；"
+                    "请使用 verified/reconciled 报告或明确写数据缺口。"
+                )
+
+        elif tool == "personal_os.research_context":
+            observed = result.get("observed_facts")
+            if not isinstance(observed, dict):
+                continue
+            reports = observed.get("reports")
+            if isinstance(reports, list):
+                observed["reports"] = [
+                    report
+                    if not isinstance(report, dict)
+                    or _report_verification_status(report) in {"verified", "reconciled"}
+                    else _redact_unverified_report(report)
+                    for report in reports
+                ]
+    return visible
 
 
 @dataclass(frozen=True)
@@ -299,7 +510,10 @@ class DeepResearchHandle:
                 self._events.append(event)
                 yield event
 
-            evidence_text = json.dumps(evidence, ensure_ascii=False, default=str)[:60000]
+            model_evidence = _model_evidence(evidence)
+            evidence_text = json.dumps(
+                model_evidence, ensure_ascii=False, default=str,
+            )[:60000]
             current, event = self.workflow._commit(
                 current, OperationPhase.REQUESTING_MODEL,
                 RuntimeEventType.MESSAGE_START,
@@ -333,6 +547,9 @@ class DeepResearchHandle:
                 result, evidence, code=code, name=self.name,
                 object_type=object_type, research_date=self.research_date,
             )
+            result = self.workflow.sanitize_result(
+                result, evidence, research_date=self.research_date,
+            )
             issues = self.workflow.validate_result(
                 result, evidence, research_date=self.research_date,
             )
@@ -359,12 +576,17 @@ class DeepResearchHandle:
                         "role": "user",
                         "content": _build_multimodal_content(self.question, self.attachments),
                     }],
+                    schema=DEEP_RESEARCH_RESULT_SCHEMA,
+                    temperature=0,
                 )
                 if not isinstance(repaired, dict):
                     raise ValueError("研究结果修复响应不是 JSON 对象")
                 result = self.workflow.normalize_result(
                     repaired, evidence, code=code, name=self.name,
                     object_type=object_type, research_date=self.research_date,
+                )
+                result = self.workflow.sanitize_result(
+                    result, evidence, research_date=self.research_date,
                 )
                 issues = self.workflow.validate_result(
                     result, evidence, research_date=self.research_date,
@@ -589,6 +811,7 @@ class DeepResearchWorkflow:
         select_latest_official_url: Callable[[list[Any], str], str],
         extract_official_report_period: Callable[[list[dict[str, Any]]], str],
         validate_result: Callable[..., list[str]] | None = None,
+        sanitize_result: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.store = store
         self.llm = llm
@@ -598,6 +821,7 @@ class DeepResearchWorkflow:
         self.select_latest_official_url = select_latest_official_url
         self.extract_official_report_period = extract_official_report_period
         self.validate_result = validate_result or (lambda result, evidence, **kwargs: [])
+        self.sanitize_result = sanitize_result or (lambda result, evidence, **kwargs: result)
 
     def start(
         self, *, owner_id: str, session_id: str, question: str,
@@ -735,6 +959,10 @@ TOOL AVAILABILITY:
         return (
             "你正在完整重写一份未通过质量校验的投资研究 JSON。"
             "只输出一个合法 JSON 对象，不要 Markdown，不要解释。\n"
+            "这是一次修复调用，不是摘要调用。即使上一版缺少字段，也必须补齐完整结构；"
+            "任何数组都不允许省略、设为空或用 null 代替。输出前请逐项检查每个数组的条目数。"
+            "缺少事实时，只能根据 PERSONAL-OS EVIDENCE 写出具体的“待核实事项”，"
+            "不能用“暂无”“待补充”“N/A”等空泛占位语句。\n"
             "必须保留 schema_version=2、type=investment-research、subject、research_date、"
             "data_date、latest_report_period、decision、summary。以下数组绝对不能为空："
             "highlights、thesis、antithesis、risks、metrics、triggers、sources。"
@@ -745,8 +973,19 @@ TOOL AVAILABILITY:
             "financials 报告只有 source.verification_status/reconciliation.status 为 verified 或 reconciled"
             "才能进入 metrics。unverified 报告必须从 metrics 删除；正文如提及必须明确标注"
             "第三方结构化数据尚未官方对账。estimated=true 的 PE/PB 必须在 name 或 source 标注估算。"
+            "如果校验问题指出某个 highlights、summary、thesis、antithesis 或 risks 引用了"
+            "尚未官方对账的报告期，必须删除或改写整条断言，改用已对账报告期的证据或明确的数据缺口；"
+            "不能只在原句末尾添加“待核实”后继续保留确定性同比、增长或经营判断。"
+            "如果校验问题指出 metrics 使用未对账报告期，必须删除该 metric 并用已对账证据补足，"
+            "不能只修改 name、source 或 period 的文字来绕过校验。\n"
+            "修复后每个数组仍必须满足最小条目数；如果正向证据不足，"
+            "thesis 必须用已对账事实支持的条件性判断或明确的待验证路径补足至少 3 条，"
+            "不得引用被隐藏的未对账期间，也不得用空泛口号充数。\n"
             "每个数组必须满足以下最小条目数：\n"
             + minimums
+            + "\n机器校验还会强制执行以下规则：所有必填字段必须出现；字符串数组条目不得为空；"
+            "metrics 每项必须有 name/value；triggers 每项必须有 type/condition；"
+            "sources 每项必须有 title/url/date/source_type，url 必须以 http:// 或 https:// 开头。"
             + "\n输出必须遵循这个完整结构，示例文字必须替换为真实证据或具体待核实事项：\n"
             + json.dumps(template, ensure_ascii=False)
             + "\n\n"

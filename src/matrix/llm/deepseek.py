@@ -243,6 +243,13 @@ class DeepSeekClient:
         Uses text.format={type: "json_object"} in Responses API.
         The system prompt must contain the word "json" for this to work.
         """
+        if schema:
+            system += (
+                "\nReturn JSON matching this schema. Do not omit required fields, "
+                "use null for required arrays, or return empty arrays when minItems "
+                "is specified. Schema:\n"
+                + json.dumps(schema, ensure_ascii=False)
+            )
         url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(
             system, messages, temperature=temperature, json_mode=True,

@@ -574,6 +574,11 @@ def _research_result_issues(
         period for period, status in report_verification.items()
         if period and status == "unverified"
     }
+    verified_periods = sorted(
+        period for period, status in report_verification.items()
+        if period and status == "verified"
+    )
+    verified_period_text = "、".join(verified_periods) or "无"
     metrics = result.get("metrics")
     if isinstance(metrics, list):
         for index, metric in enumerate(metrics):
@@ -583,7 +588,9 @@ def _research_result_issues(
             if metric_period in unverified_periods:
                 issues.append(
                     f"metrics[{index}] 使用尚未官方对账的报告期 "
-                    f"{metric_period}，不得作为确定性指标"
+                    f"{metric_period}，不得作为确定性指标；修复时必须删除该项，"
+                    f"改用已对账报告期（{verified_period_text}）的证据，"
+                    "不得仅改写指标名称或继续保留该报告期"
                 )
 
     allowed_unverified_labels = (
@@ -615,7 +622,8 @@ def _research_result_issues(
                 location = field if not isinstance(raw, list) else f"{field}[{index}]"
                 issues.append(
                     f"{location} 引用了尚未官方对账的 {year} 年财务数据，"
-                    "必须明确标注第三方结构化数据/待核实，且不得给出确定性同比结论"
+                    f"必须删除或改写为已对账报告期（{verified_period_text}）的事实，"
+                    "且不得给出确定性同比结论；不能只补“待核实”字样后继续保留原断言"
                 )
 
     valuation = next(
@@ -708,6 +716,91 @@ def _research_result_issues(
     if str(result.get("information_completeness") or "").lower() == "low":
         issues.append("信息完整度为 low")
     return list(dict.fromkeys(issues))
+
+
+def _sanitize_unverified_research_result(
+    result: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Remove deterministic claims tied to unverified financial periods."""
+    del kwargs
+    unverified_periods = {
+        period for period, status in _financial_report_verification(evidence).items()
+        if period and status == "unverified"
+    }
+    if not unverified_periods:
+        return result
+
+    unverified_years = {period[:4] for period in unverified_periods}
+    financial_claim_tokens = (
+        "营收", "收入", "净利润", "利润", "现金流", "eps",
+        "资产", "负债", "权益", "同比", "环比", "毛利", "营业成本",
+        "revenue", "profit", "cash flow", "assets", "liabilities", "equity",
+    )
+
+    def is_unverified_claim(value: Any) -> bool:
+        text = str(value or "")
+        lowered = text.lower()
+        return any(year in text for year in unverified_years) and any(
+            token in lowered for token in financial_claim_tokens
+        )
+
+    sanitized = dict(result)
+    for field in ("highlights", "thesis", "antithesis", "risks"):
+        values = sanitized.get(field)
+        if not isinstance(values, list):
+            continue
+        kept = [value for value in values if not is_unverified_claim(value)]
+        if field == "risks" and len(kept) < len(values):
+            kept.append("部分历史期财务数据尚未完成官方对账，不作为确定性依据。")
+        sanitized[field] = kept
+
+    summary = sanitized.get("summary")
+    if is_unverified_claim(summary):
+        sanitized["summary"] = (
+            "本次研究仅使用已官方对账的财务事实；"
+            "未完成对账的历史期数据不作为确定性结论。"
+        )
+
+    metrics = sanitized.get("metrics")
+    if isinstance(metrics, list):
+        valuation = next(
+            (
+                entry.get("result")
+                for entry in evidence
+                if entry.get("tool") == "personal_os.valuation"
+                and isinstance(entry.get("result"), dict)
+            ),
+            {},
+        )
+        valuation_is_estimated = (
+            isinstance(valuation, dict) and valuation.get("estimated") is True
+        )
+        estimate_labels = ("估算", "估计", "approx", "estimated")
+        clean_metrics = []
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                clean_metrics.append(metric)
+                continue
+            if str(metric.get("period") or "").strip()[:10] in unverified_periods:
+                continue
+            metric = dict(metric)
+            name = str(metric.get("name") or "")
+            lowered_name = name.lower()
+            is_pe_or_pb = any(
+                token in lowered_name
+                for token in ("pe", "pb", "市盈率", "市净率")
+            )
+            source = str(metric.get("source") or "")
+            if valuation_is_estimated and is_pe_or_pb and not any(
+                label in lowered_name or label in source.lower()
+                for label in estimate_labels
+            ):
+                metric["name"] = name + "（估算）"
+            clean_metrics.append(metric)
+        sanitized["metrics"] = clean_metrics
+    return sanitized
 
 
 def _select_latest_official_url(
@@ -1570,6 +1663,7 @@ class ChatService:
             agent_tools,
             normalize_result=_normalize_research_result,
             validate_result=_research_result_issues,
+            sanitize_result=_sanitize_unverified_research_result,
             preview_json=preview_json,
             select_latest_official_url=_select_latest_official_url,
             extract_official_report_period=_extract_official_report_period,

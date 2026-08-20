@@ -111,7 +111,7 @@ class FakeResearchLLM:
     def __init__(self):
         self.prompts = []
 
-    def complete_json(self, system, messages):
+    def complete_json(self, system, messages, **kwargs):
         self.prompts.append((system, messages))
         return {
             "status": "complete", "information_completeness": "high",
@@ -125,7 +125,7 @@ class SequentialResearchLLM:
         self.responses = list(responses)
         self.prompts = []
 
-    def complete_json(self, system, messages):
+    def complete_json(self, system, messages, **kwargs):
         self.prompts.append((system, messages))
         return self.responses.pop(0)
 
