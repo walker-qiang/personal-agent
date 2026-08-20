@@ -177,6 +177,60 @@ def _result_shape_summary(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sanitization_summary(
+    before: dict[str, Any], after: dict[str, Any],
+) -> dict[str, Any]:
+    """Record shape-only evidence for deterministic content removal."""
+    return {
+        "before_sanitization": _result_shape_summary(before),
+        "after_sanitization": _result_shape_summary(after),
+    }
+
+
+def _merge_repaired_text_lists(
+    initial: dict[str, Any], repaired: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Keep safe first-pass text items when a repair rewrites too thinly."""
+    merged = dict(repaired)
+    retained_from_initial: dict[str, int] = {}
+    for field in ("highlights", "thesis", "antithesis", "risks"):
+        items: list[str] = []
+        seen: set[str] = set()
+        repair_items = repaired.get(field)
+        initial_items = initial.get(field)
+        for item in repair_items if isinstance(repair_items, list) else []:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            value = item.strip()
+            fingerprint = " ".join(value.split()).casefold()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            items.append(value)
+        minimum = RESEARCH_MINIMUM_ITEMS[field]
+        if len(items) < minimum:
+            values = initial_items if isinstance(initial_items, list) else []
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if len(items) >= minimum:
+                    break
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                value = item.strip()
+                fingerprint = " ".join(value.split()).casefold()
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                items.append(value)
+                retained_from_initial[field] = (
+                    retained_from_initial.get(field, 0) + 1
+                )
+        if isinstance(repair_items, list) or isinstance(initial_items, list):
+            merged[field] = items
+    return merged, retained_from_initial
+
+
 def _bounded_report_period(value: Any, research_date: str) -> str:
     """Accept an inferred report period only when it is real and not future."""
     import datetime as _datetime
@@ -543,13 +597,14 @@ class DeepResearchHandle:
                     if isinstance(payload, dict) and payload.get("content"):
                         payload["report_period"] = official_period
                         payload["verification_status"] = "verified"
-            result = self.workflow.normalize_result(
+            normalized_result = self.workflow.normalize_result(
                 result, evidence, code=code, name=self.name,
                 object_type=object_type, research_date=self.research_date,
             )
             result = self.workflow.sanitize_result(
-                result, evidence, research_date=self.research_date,
+                normalized_result, evidence, research_date=self.research_date,
             )
+            initial_sanitization = _sanitization_summary(normalized_result, result)
             issues = self.workflow.validate_result(
                 result, evidence, research_date=self.research_date,
             )
@@ -563,6 +618,7 @@ class DeepResearchHandle:
                         "attempt": 1,
                         "issues": initial_issues,
                         "result_shape": _result_shape_summary(result),
+                        "sanitization": initial_sanitization,
                     },
                     {"type": "thinking", "content": "首轮研究结果未通过质量校验，正在修正…"},
                 )
@@ -581,12 +637,18 @@ class DeepResearchHandle:
                 )
                 if not isinstance(repaired, dict):
                     raise ValueError("研究结果修复响应不是 JSON 对象")
-                result = self.workflow.normalize_result(
+                normalized_repaired = self.workflow.normalize_result(
                     repaired, evidence, code=code, name=self.name,
                     object_type=object_type, research_date=self.research_date,
                 )
-                result = self.workflow.sanitize_result(
-                    result, evidence, research_date=self.research_date,
+                sanitized_repaired = self.workflow.sanitize_result(
+                    normalized_repaired, evidence, research_date=self.research_date,
+                )
+                repair_sanitization = _sanitization_summary(
+                    normalized_repaired, sanitized_repaired,
+                )
+                result, retained_initial_items = _merge_repaired_text_lists(
+                    result, sanitized_repaired,
                 )
                 issues = self.workflow.validate_result(
                     result, evidence, research_date=self.research_date,
@@ -601,6 +663,8 @@ class DeepResearchHandle:
                             "initial_issues": initial_issues,
                             "issues": issues,
                             "result_shape": _result_shape_summary(result),
+                            "repair_sanitization": repair_sanitization,
+                            "retained_initial_text_items": retained_initial_items,
                         },
                         {
                             "type": "thinking",
@@ -622,6 +686,8 @@ class DeepResearchHandle:
                         "initial_issues": initial_issues,
                         "issues": [],
                         "result_shape": _result_shape_summary(result),
+                        "repair_sanitization": repair_sanitization,
+                        "retained_initial_text_items": retained_initial_items,
                     },
                     {"type": "thinking", "content": "修正结果已通过质量校验。"},
                 )

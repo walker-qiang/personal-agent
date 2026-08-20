@@ -14,6 +14,15 @@ from ..principal import current_principal
 from ..registry import ToolRegistry
 
 
+def _tool_timeout_seconds() -> float:
+    """Leave room for personal-os providers while keeping a bounded wait."""
+    raw = os.environ.get("PERSONAL_OS_TOOL_TIMEOUT_SEC", "60").strip()
+    try:
+        return min(max(float(raw), 5.0), 90.0)
+    except ValueError:
+        return 60.0
+
+
 def _normalize_market_code(code: str) -> str:
     """Normalize common user-facing codes to personal-os market codes."""
     normalized = str(code).strip()
@@ -34,7 +43,9 @@ def _get(path: str, params: dict[str, Any]) -> dict[str, Any]:
         headers={"Accept": "application/json", "User-Agent": "personal-agent/personal-os-tools"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(
+            request, timeout=_tool_timeout_seconds(),
+        ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         return {"error": f"personal-os tool request failed: {exc}"}
