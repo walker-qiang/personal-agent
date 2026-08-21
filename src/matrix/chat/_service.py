@@ -1182,6 +1182,57 @@ class ChatService:
                 return self._build_llm(provider, model or None)
         return self._default_llm
 
+    def probe_llm(self, session_id: str | None = None, user_id: str = "default") -> dict[str, Any]:
+        """Run a small provider request without loading user or research data."""
+        started = time.perf_counter()
+        provider_info = self.get_provider(session_id, user_id=user_id)
+        provider = provider_info["provider"]
+        model = provider_info["model"]
+        if not self.config.llm_available and provider == self.config.agent_provider:
+            return {
+                "ok": False,
+                "provider": provider,
+                "model": model,
+                "error": self.config.llm_unavailable_reason,
+            }
+        try:
+            probe_llm = build_llm_client(
+                provider=provider,
+                deepseek_api_key=self.config.deepseek_api_key,
+                anthropic_api_key=self.config.anthropic_api_key,
+                agnes_api_key=self.config.agnes_api_key,
+                model=model,
+                deepseek_base_url=self.config.deepseek_base_url,
+                codex_bin=self.config.codex_bin,
+                codex_workdir=self.config.codex_workdir,
+                codex_sandbox=self.config.codex_sandbox,
+                codex_reasoning_effort=self.config.codex_reasoning_effort,
+                agnes_base_url=self.config.agnes_base_url,
+                max_tokens=16,
+                timeout_sec=min(self.config.agent_model_timeout_sec, 10.0),
+                max_message_chars=500,
+            )
+            answer = probe_llm.complete(
+                "You are a connectivity probe. Reply with OK only.",
+                [{"role": "user", "content": "Reply with OK only."}],
+            ).strip()
+            if not answer:
+                raise RuntimeError("provider returned an empty response")
+            return {
+                "ok": True,
+                "provider": provider,
+                "model": model,
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+        except Exception as err:
+            return {
+                "ok": False,
+                "provider": provider,
+                "model": model,
+                "error": str(err) or err.__class__.__name__,
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+
     def reset(self, session_id: str, user_id: str = "default") -> bool:
         if session_id:
             # Reset remains idempotent for a session that does not exist,
