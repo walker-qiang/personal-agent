@@ -711,7 +711,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
             else:
                 final_answer = _strip_all_verification_tags(final_answer)
                 # P1 fallback: heuristic number check when no [VERIFICATION] blocks
-                # Use main agent LLM (DeepSeek V4 Flash) for regex-based verification
+                # Use the configured main agent LLM for regex-based verification.
                 final_answer = _heuristic_number_check(
                     final_answer, all_tool_results, cfg["llm"], user_msg,
                 )

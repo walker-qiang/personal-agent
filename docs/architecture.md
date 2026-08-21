@@ -362,7 +362,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 - 索引注入系统提示，让 LLM 知道有哪些数据可用
 
 **Budget 预算控制**（`context/budget.py`）：
-- 拒绝阈值：98%（免费模型）
+- 拒绝阈值：98%（具体成本和模型由当前评估配置决定）
 - 警告阈值：90%
 - 输出预留：4096 tokens
 
@@ -461,7 +461,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | 层 | 技术 |
 |----|------|
 | 后端框架 | Python 3.10+, FastAPI, LangGraph |
-| LLM | DeepSeek, Anthropic Claude, Agnes |
+| LLM | Codex CLI, DeepSeek；Agnes 用于图片/视频生成 |
 | 向量检索 | ChromaDB, sentence-transformers, BM25 |
 | 可观测 | OpenTelemetry (OTLP), SQLite Trace |
 | 前端 (主) | React 18 + TypeScript + Vite |

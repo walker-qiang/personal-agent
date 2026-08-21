@@ -290,7 +290,7 @@ def cmd_quality(args: argparse.Namespace) -> int:
     chat_service = _create_chat_service()
     config = chat_service.config
 
-    # Use the pipeline LLM for judging (free Agnes model)
+    # Use the configured pipeline LLM for judging.
     judge_llm = build_llm_client(
         provider=config.pipeline_provider,
         agnes_api_key=config.agnes_api_key,

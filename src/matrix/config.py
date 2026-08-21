@@ -106,12 +106,9 @@ VIDEO_MODELS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
-# Pipeline model: used for internal tasks (classify, plan, reflection, aggregate)
-# Defaults to DeepSeek V4 Flash — planning is the cornerstone of the whole task;
-# a stronger model here prevents cascading failures from bad decomposition / routing.
-# The execution path (ReAct tool-calling + answer generation) defaults to the
-# cheaper Agnes 2.0 Flash, which is adequately covered by guardrails
-# (CircuitBreaker, anti-hallucination, Reflexion retry).
+# Pipeline model: used for internal tasks (classify, plan, reflection, aggregate).
+# The default is configured independently from the main execution provider so
+# planning and evaluation can be tuned without changing the Runtime contract.
 ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
 ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
 DEFAULT_PIPELINE_PROVIDER = "codex"

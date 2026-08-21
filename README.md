@@ -1,6 +1,6 @@
 # Project Matrix — 个人智能协作网络
 
-基于"通用底座 + 领域聚焦"架构的 Agent 系统，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。
+基于“通用底座 + 领域聚焦”架构的 Agent 应用与 Runtime，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。顶层执行统一进入独立 Runtime；Runtime 负责可恢复 operation、approval、effect 和 session 状态。
 
 ## 架构
 
@@ -20,7 +20,7 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── context/                    # 上下文管理（DataBus、Compaction、Budget）
 │   ├── evaluation/                 # 评估框架（Eval runner、baseline、metrics）
 │   ├── guardrails/                 # 安全护栏（输入/输出/间接注入/隐私/Tool）
-│   ├── llm/                        # LLM 客户端（DeepSeek / Anthropic / Agnes）
+│   ├── llm/                        # LLM 客户端（Codex / DeepSeek；Agnes 用于媒体生成）
 │   ├── memory/                     # 记忆演化（MemoryEvolution 4 阶段管线）
 │   ├── observability/              # 可观测性（OTel、JSONL Trace）
 │   ├── orchestration/              # LangGraph 编排（图、节点、状态、反幻觉）
@@ -32,12 +32,10 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── config.py                   # 统一配置
 │   └── store.py                    # 持久化存储（SQLite）
 ├── docs/                           # 项目文档
-│   ├── architecture.md             # 系统架构
-│   ├── gap-analysis.md             # 差距分析与优化设计
-│   ├── frontend-spec.md            # 前端规格
-│   ├── quality-gate-plan.md        # 质量门禁
-│   ├── code-sandbox-plan.md        # 代码沙箱安全模型
-│   └── browser-automation-plan.md  # 浏览器自动化
+│   ├── architecture.md             # 当前系统架构
+│   ├── frontend-spec.md            # 当前前端规格
+│   ├── quality-gate-plan.md        # 当前质量门禁
+│   └── archive/                    # 已完成方案和历史差距记录
 ├── scripts/                        # 运维脚本
 ├── tools/mcp/                      # 独立 MCP server 源码（browser/utility）
 ├── tests/                          # 测试用例
@@ -52,7 +50,8 @@ uv sync
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY
+# 至少配置 JWT_SECRET；默认文本 provider 为 Codex。
+# 使用 DeepSeek 时再配置 DEEPSEEK_API_KEY。
 
 # 启动
 ./.venv/bin/python -m matrix
@@ -111,6 +110,17 @@ cp .env.example .env
 | `/tools/call` | POST | 直接调用工具 |
 | `/api/provider` | GET/POST | LLM 提供商列表/切换 |
 
+### Runtime 与记忆
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/runtime/operations` | GET | 查询当前用户的 Runtime operations |
+| `/api/runtime/approvals` | GET | 查询待处理审批 |
+| `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件 |
+| `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
+| `/memory/list` | GET | 查询用户记忆 |
+| `/memory/lessons` | GET | 查询跨会话经验教训 |
+
 ### 其他
 
 | 端点 | 方法 | 说明 |
@@ -129,6 +139,13 @@ cp .env.example .env
 | `/mcp/servers` | GET/POST | MCP 服务器管理 |
 | `/mcp/servers/{name}` | PUT/DELETE | MCP 服务器更新/删除 |
 | `/mcp/servers/{name}/toggle` | POST | MCP 服务器启用/禁用 |
+
+## 当前执行边界
+
+- 默认模式为 `read_only`。
+- `writeback` 只允许显式 allowlist 操作，并且必须经过 Runtime approval。
+- `writeback.execute_plan` 通过 `personal-os` API 执行，Agent 不直接写 `personal-assets`。
+- Runtime SQLite 保存可恢复运行态，不是 finance facts 或 broader knowledge 的事实源。
 
 ## 开发
 

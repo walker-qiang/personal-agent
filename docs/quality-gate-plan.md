@@ -1,7 +1,8 @@
 # 质量保障方案：Eval-Driven Development with Baseline Regression
 
 > 目标：确保每次更新 agent、skill、知识库后，质量至少不下降。
-> 约束：个人用户，通过 git 持久化代码，无 CI/CD 服务器，使用免费 LLM 模型（Agnes）。
+> 约束：个人用户，通过 git 持久化代码，无 CI/CD 服务器。评估使用当前
+> `PIPELINE_PROVIDER` / `PIPELINE_MODEL` 配置，不假设免费模型或固定 Provider。
 >
 > 业界对标：本方案基于 **Eval-Driven Development（评估驱动开发）** 范式，
 > 对标 Hamel Husain 三级评估模型（Unit Tests → Model/Human Eval → A/B Test）
@@ -17,7 +18,7 @@
 | Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge + 质量基线对比逻辑 |
 | 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
 
-**测试覆盖**：651 passed, 4 skipped, 0 failed
+**最近一次全量测试（2026-08-21）**：876 passed, 11 skipped, 0 failed；共收集 887 个测试。
 
 ## 现状分析
 
@@ -25,7 +26,7 @@
 
 | 能力 | 现状 | 评估 |
 |------|------|------|
-| 单元测试 | 651 个测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
+| 单元测试 | 887 个已收集测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
 | 评估数据集 | eval_dataset.json（20 条 case） | 已扩展，覆盖 6 大场景 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
@@ -75,7 +76,7 @@
 - **基线驱动**：Layer 2/3 的核心不是"绝对分数"，而是"相对基线的变化"
 - **个人友好**：不依赖 CI 服务器，git hooks 本地执行；CLI 一条命令搞定
 - **渐进采用**：三层相互独立，可先上 Layer 1，后续再加 Layer 2/3
-- **零 AI 成本**：所有层使用已配置的免费模型（Agnes），不产生额外费用
+- **Provider 可配置**：Layer 2/3 使用当前配置的 pipeline provider/model；运行成本和可用性由本地配置决定
 
 ---
 
@@ -573,10 +574,11 @@ git push --no-verify
 | 层级 | 频率 | 耗时 | AI 成本 |
 |------|------|------|---------|
 | Layer 1 | 每次 push (~10次/周) | ~15s | ¥0（无 LLM 调用） |
-| Layer 2 | 发布前 (~2次/周) | ~3min | ¥0（使用 Agnes 免费模型） |
-| Layer 3 | 重大变更 (~2次/月) | ~8min | ¥0（使用 Agnes 免费模型） |
+| Layer 2 | 发布前 (~2次/周) | ~3min | 取决于当前 pipeline provider/model |
+| Layer 3 | 重大变更 (~2次/月) | ~8min | 取决于当前 pipeline provider/model |
 
-所有层均使用已配置的免费模型，不产生额外费用。唯一成本是运行时间。
+Layer 2/3 使用当前配置的 pipeline provider/model；唯一固定成本是运行时间，
+模型调用成本和可用性由本地配置决定。
 
 ---
 

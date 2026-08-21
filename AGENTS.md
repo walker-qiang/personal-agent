@@ -5,7 +5,7 @@
 - 不修改 `personal-os` 代码；与 `personal-os` 的集成通过 HTTP 代理（`agent.go`）和共享 SQLite cache 实现。
 - 不把运行态提交到 Git：`.env`、`var/`、`__pycache__`、`*.pyc`、`dist`、`build` 都必须忽略。
 - `var/` 下的文件只是可重建的本地 cache，不提交。
-- 所有工具默认只读；后续写操作需走受控接口。
+- 默认 Agent mode 为只读；受控写操作必须通过 `personal-os` API、Runtime approval 和明确 allowlist。
 - 工具调用必须记录审计日志（JSONL trace）。
 - 代码风格：类型注解、dataclass、Protocol、无隐式全局状态。
 # 工具错误信息规范
