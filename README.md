@@ -145,6 +145,7 @@ cp .env.example .env
 - 默认模式为 `read_only`。
 - `writeback` 只允许显式 allowlist 操作，并且必须经过 Runtime approval。
 - `writeback.execute_plan` 通过 `personal-os` API 执行，Agent 不直接写 `personal-assets`。
+- Memory 和 Skill mutation 调用 `personal-os /api/vault/*`，由 AssetStore 提交和同步。
 - Runtime SQLite 保存可恢复运行态，不是 finance facts 或 broader knowledge 的事实源。
 
 ## 开发

@@ -12,7 +12,6 @@ import time
 import traceback
 from urllib.parse import unquote
 import uuid
-from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -45,6 +44,7 @@ from ..runtime.adapters.tools import MatrixToolAdapter
 from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ..memory import EvolutionConfig, MemoryEvolution
 from ..memory.lesson_store import LessonStore
+from ..vault_client import VaultWriteError, sync_memory_profile
 from ._utils import(
     MEMORY_EXTRACTION_PROMPT,
     _drain_queue,
@@ -2361,6 +2361,7 @@ class ChatService:
 
     def _extract_memories(self, question: str, answer: str, user_id: str) -> None:
         """Extract key facts from conversation and store in user profile."""
+        durable_sync_needed = False
         try:
             prompt = MEMORY_EXTRACTION_PROMPT.format(
                 question=question[:500], answer=answer[:1000],
@@ -2368,7 +2369,6 @@ class ChatService:
             data = self._pipeline_llm.complete_json(
                 prompt, [{"role": "user", "content": "Extract memories from this Q&A."}],
             )
-            updated = False
             for mem in data.get("memories", []):
                 key = mem["key"].strip()
                 value = mem["value"].strip()
@@ -2376,10 +2376,7 @@ class ChatService:
                 if key and value:
                     self.store.upsert_profile(user_id, key, value, memory_type=mem_type)
                     logger.debug("memory_upsert: user=%s key=%s type=%s", user_id, key, mem_type)
-                    updated = True
-            if updated and self.config.memory_sync_path:
-                json_path = Path(self.config.memory_sync_path) / f"{user_id}.json"
-                self.store.sync_profile_to_file(user_id, str(json_path))
+                    durable_sync_needed = True
         except Exception as exc:
             logger.warning("memory_extraction failed: %s", exc, exc_info=True)
             pass  # Memory extraction is best-effort
@@ -2391,8 +2388,20 @@ class ChatService:
                 logger.info(
                     "memory_evolved: user=%s %s", user_id, str(report),
                 )
+            if (
+                report.conflicts_resolved
+                or report.memories_consolidated
+                or report.memories_forgotten
+            ):
+                durable_sync_needed = True
         except Exception:
             pass  # Evolution is best-effort
+
+        if durable_sync_needed:
+            try:
+                sync_memory_profile(user_id, self.store.get_profile(user_id))
+            except VaultWriteError as exc:
+                logger.warning("memory durable sync failed: %s", exc)
 
     def _is_empty_tool_result(self, result: Any) -> bool:
         """Check if a tool result is effectively empty (no real data).

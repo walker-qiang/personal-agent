@@ -19,6 +19,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ...vault_client import VaultWriteError, sync_memory_profile
+
 logger = logging.getLogger("matrix.server.memory")
 
 router = APIRouter()
@@ -42,11 +44,6 @@ def _get_evolution(request: Request):
 def _get_lesson_store(request: Request):
     """Get the LessonStore instance from ChatService."""
     return request.app.state.chat._lesson_store
-
-
-def _get_chat_service(request: Request):
-    """Get the ChatService for config access (sync path etc.)."""
-    return request.app.state.chat
 
 
 # ── User Memory CRUD ──────────────────────────────────────────────────────
@@ -78,7 +75,6 @@ async def upsert_memory(request: Request):
     Body: {"key": str, "value": str, "memory_type": "preference"|"policy"}
     """
     store = _get_store(request)
-    chat = _get_chat_service(request)
     user_id = _get_user_id(request)
 
     payload = await request.json()
@@ -91,23 +87,13 @@ async def upsert_memory(request: Request):
     if memory_type not in ("preference", "policy"):
         raise HTTPException(status_code=400, detail="memory_type must be 'preference' or 'policy'")
 
-    # For policy deletions, require confirmation
-    is_policy_delete = (
-        payload.get("_confirm_delete_policy") is True
-        and memory_type == "policy"
-    )
-
+    profile = store.get_profile(user_id)
+    profile[key] = value
+    try:
+        sync_memory_profile(user_id, profile)
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     store.upsert_profile(user_id, key, value, memory_type=memory_type)
-
-    # Sync to JSON file if configured
-    sync_path = chat.config.memory_sync_path
-    if sync_path:
-        import pathlib
-        json_path = pathlib.Path(sync_path) / f"{user_id}.json"
-        try:
-            store.sync_profile_to_file(user_id, str(json_path))
-        except Exception as exc:
-            logger.warning("memory sync_to_file failed: %s", exc)
 
     logger.info("memory upsert: user=%s key=%s type=%s", user_id, key, memory_type)
     return {"ok": True, "key": key, "memory_type": memory_type}
@@ -120,7 +106,6 @@ async def delete_memory(request: Request, key: str):
     For policy-type memories, requires ?confirm=true query param.
     """
     store = _get_store(request)
-    chat = _get_chat_service(request)
     user_id = _get_user_id(request)
 
     # Check if the memory is a policy — require confirmation
@@ -135,19 +120,15 @@ async def delete_memory(request: Request, key: str):
                        "请添加 ?confirm=true 确认删除。",
             )
 
-    deleted = store.delete_profile_key(user_id, key)
-    if not deleted:
+    if mem is None:
         raise HTTPException(status_code=404, detail=f"memory key '{key}' not found")
-
-    # Sync to JSON file if configured
-    sync_path = chat.config.memory_sync_path
-    if sync_path:
-        import pathlib
-        json_path = pathlib.Path(sync_path) / f"{user_id}.json"
-        try:
-            store.sync_profile_to_file(user_id, str(json_path))
-        except Exception as exc:
-            logger.warning("memory sync_to_file failed: %s", exc)
+    profile = store.get_profile(user_id)
+    profile.pop(key, None)
+    try:
+        sync_memory_profile(user_id, profile)
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    store.delete_profile_key(user_id, key)
 
     logger.info("memory delete: user=%s key=%s", user_id, key)
     return {"ok": True, "key": key}

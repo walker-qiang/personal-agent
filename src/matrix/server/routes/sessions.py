@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from ...vault_client import VaultWriteError, mutate_skill
+
 router = APIRouter()
 
 
@@ -207,10 +209,21 @@ async def get_leaf(request: Request, session_id: str):
 
 def _get_skills_domain_dir(request: Request, domain: str = "investment") -> Path:
     """Get the skills directory for a domain (e.g. skills_base_dir / investment)."""
-    from pathlib import Path
     from ...chat import ChatService
     chat: ChatService = request.app.state.chat
-    return chat.config.skills_base_dir / domain
+    base = chat.config.skills_base_dir
+    if base.is_dir() and any(
+        item.is_dir() and (item / "SKILL.md").is_file()
+        for item in base.iterdir()
+    ):
+        return base
+    return base / domain
+
+
+def _skill_domain(request: Request, skills_dir: Path) -> str:
+    from ...chat import ChatService
+    chat: ChatService = request.app.state.chat
+    return "" if skills_dir == chat.config.skills_base_dir else skills_dir.name
 
 
 def _list_all_skills(request: Request):
@@ -257,7 +270,7 @@ async def list_skills(request: Request):
 async def create_skill(request: Request):
     """Create a new skill directory with SKILL.md. Defaults to investment domain."""
     from ...chat import ChatService
-    from ...skills import SkillDefinition, create_skill_dir
+    from ...skills import SkillDefinition, render_skill
 
     chat: ChatService = request.app.state.chat
     payload = await request.json()
@@ -284,7 +297,15 @@ async def create_skill(request: Request):
         description=description,
         output_format=str(payload.get("output_format", "")).strip(),
     )
-    create_skill_dir(skills_dir, skill)
+    try:
+        mutate_skill(
+            "create_skill",
+            domain=_skill_domain(request, skills_dir),
+            skill_name=safe_name,
+            content=render_skill(skill),
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True, "name": safe_name, "domain": domain}
 
@@ -293,7 +314,7 @@ async def create_skill(request: Request):
 async def update_skill(request: Request, skill_name: str):
     """Update a skill's SKILL.md. Defaults to investment domain."""
     from ...chat import ChatService
-    from ...skills import SkillDefinition, update_skill_dir
+    from ...skills import SkillDefinition, render_skill
 
     chat: ChatService = request.app.state.chat
     payload = await request.json()
@@ -311,7 +332,15 @@ async def update_skill(request: Request, skill_name: str):
         description=description,
         output_format=str(payload.get("output_format", "")).strip(),
     )
-    update_skill_dir(skills_dir, skill_name, skill)
+    try:
+        mutate_skill(
+            "update_skill",
+            domain=_skill_domain(request, skills_dir),
+            skill_name=skill_name,
+            content=render_skill(skill),
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}
 
@@ -320,14 +349,20 @@ async def update_skill(request: Request, skill_name: str):
 async def delete_skill(request: Request, skill_name: str):
     """Delete a skill directory entirely. Defaults to investment domain."""
     from ...chat import ChatService
-    from ...skills import delete_skill_dir
 
     chat: ChatService = request.app.state.chat
     domain = str(request.query_params.get("domain", "investment")).strip() or "investment"
     skills_dir = _get_skills_domain_dir(request, domain)
     if not (skills_dir / skill_name).is_dir():
         raise HTTPException(status_code=404, detail="skill not found")
-    delete_skill_dir(skills_dir, skill_name)
+    try:
+        mutate_skill(
+            "delete_skill",
+            domain=_skill_domain(request, skills_dir),
+            skill_name=skill_name,
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}
 
@@ -339,6 +374,9 @@ def _find_skill_dir(request: Request, skill_name: str) -> Path | None:
     from ...chat import ChatService
     chat: ChatService = request.app.state.chat
     base = chat.config.skills_base_dir
+    direct = base / skill_name
+    if direct.is_dir():
+        return direct
     for domain_dir in base.iterdir():
         if not domain_dir.is_dir():
             continue
@@ -363,8 +401,6 @@ async def list_knowledge(request: Request, skill_name: str):
 @router.put("/skills/{skill_name}/knowledge/{filename:path}")
 async def write_knowledge(request: Request, skill_name: str, filename: str):
     """Write a knowledge file."""
-    from ...skills import write_knowledge
-
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
@@ -372,7 +408,17 @@ async def write_knowledge(request: Request, skill_name: str, filename: str):
 
     payload = await request.json()
     content = str(payload.get("content", ""))
-    write_knowledge(skill_dir.parent, skill_name, filename, content)
+    domain = _skill_domain(request, skill_dir.parent)
+    try:
+        mutate_skill(
+            "write_knowledge",
+            domain=domain,
+            skill_name=skill_name,
+            filename=filename,
+            content=content,
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}
 
@@ -392,13 +438,20 @@ async def get_knowledge_file(request: Request, skill_name: str, filename: str):
 @router.delete("/skills/{skill_name}/knowledge/{filename:path}")
 async def remove_knowledge(request: Request, skill_name: str, filename: str):
     """Delete a knowledge file."""
-    from ...skills import delete_knowledge
-
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
         raise HTTPException(status_code=404, detail="skill not found")
-    delete_knowledge(skill_dir.parent, skill_name, filename)
+    domain = _skill_domain(request, skill_dir.parent)
+    try:
+        mutate_skill(
+            "delete_knowledge",
+            domain=domain,
+            skill_name=skill_name,
+            filename=filename,
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}
 
@@ -418,8 +471,6 @@ async def get_script_file(request: Request, skill_name: str, filename: str):
 @router.put("/skills/{skill_name}/scripts/{filename:path}")
 async def write_script(request: Request, skill_name: str, filename: str):
     """Write a script file."""
-    from ...skills import write_script
-
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
@@ -427,7 +478,17 @@ async def write_script(request: Request, skill_name: str, filename: str):
 
     payload = await request.json()
     content = str(payload.get("content", ""))
-    write_script(skill_dir.parent, skill_name, filename, content)
+    domain = _skill_domain(request, skill_dir.parent)
+    try:
+        mutate_skill(
+            "write_script",
+            domain=domain,
+            skill_name=skill_name,
+            filename=filename,
+            content=content,
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}
 
@@ -435,12 +496,19 @@ async def write_script(request: Request, skill_name: str, filename: str):
 @router.delete("/skills/{skill_name}/scripts/{filename:path}")
 async def remove_script(request: Request, skill_name: str, filename: str):
     """Delete a script file."""
-    from ...skills import delete_script
-
     chat = request.app.state.chat
     skill_dir = _find_skill_dir(request, skill_name)
     if not skill_dir:
         raise HTTPException(status_code=404, detail="skill not found")
-    delete_script(skill_dir.parent, skill_name, filename)
+    domain = _skill_domain(request, skill_dir.parent)
+    try:
+        mutate_skill(
+            "delete_script",
+            domain=domain,
+            skill_name=skill_name,
+            filename=filename,
+        )
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     chat.agent_registry.reload_skills()
     return {"ok": True}

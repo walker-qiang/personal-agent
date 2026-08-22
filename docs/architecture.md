@@ -184,6 +184,8 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 
 - read_only 是默认策略；标记为 side_effect 的工具会在 Runtime 工具边界被拦截。
 - writeback 只允许受审批的外部 effect；它不等于开放任意文件或 Vault 写入。
+- Memory/Skill 管理 API 不直接写 Vault；mutation 经 `personal-os /api/vault/*`
+  使用 operation-specific 校验和 AssetStore。
 - WritebackService 第一批只开放 `finance.snapshot.create`，采用 plan → approval → execute；
   `MATRIX_WRITEBACK_APPROVAL_MODE=auto_allowlist` 可对显式 allowlist 操作启用策略自动审批，
   但仍会创建 Runtime approval 和 effect journal。
@@ -411,6 +413,9 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | `/skills/{name}/knowledge` | GET | 列出技能知识文件 |
 | `/skills/{name}/knowledge/{filename}` | GET/PUT/DELETE | 读写删知识文件 |
 | `/skills/{name}/scripts/{filename}` | GET/PUT/DELETE | 读写删脚本文件 |
+
+PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只负责请求
+校验、内容生成和成功后的 Skill reload。
 
 ### 工具与提供商
 
