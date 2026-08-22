@@ -370,7 +370,13 @@ class CodexCLIClient:
             return {"type": "message", "content": text} if text else None
         if item_type == "error":
             message = str(item.get("message") or "")
-            if "deprecated" in message.lower() or "skill descriptions were shortened" in message.lower():
+            lower_message = message.lower()
+            if (
+                "deprecated" in lower_message
+                or "skill descriptions were shortened" in lower_message
+                or "configured service tier" in lower_message
+                or "model metadata for" in lower_message
+            ):
                 return {"type": "progress", "message": "Codex 已加载运行配置"}
             return {"type": "error", "message": message or "Codex 执行失败"}
         labels = {
