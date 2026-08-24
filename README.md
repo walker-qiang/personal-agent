@@ -89,6 +89,7 @@ cp .env.example .env
 | `/sessions/batch-archive` | POST | 批量归档 |
 | `/sessions/batch-unarchive` | POST | 批量取消归档 |
 | `/sessions/{id}/branch` | POST | 从指定消息创建会话分支 |
+| `/sessions/{id}/branch-summaries` | GET | 获取分支摘要 |
 | `/sessions/{id}/branches` | GET | 列出会话的所有分支 |
 | `/sessions/{id}/leaf` | GET | 获取会话当前叶子节点 |
 
@@ -119,7 +120,11 @@ cp .env.example .env
 | `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件 |
 | `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
 | `/memory/list` | GET | 查询用户记忆 |
+| `/memory` | POST | 创建用户记忆 |
+| `/memory/{key}` | DELETE | 删除用户记忆 |
+| `/memory/evolve` | POST | 手动触发记忆演化 |
 | `/memory/lessons` | GET | 查询跨会话经验教训 |
+| `/memory/lessons/{id}` | DELETE | 删除经验教训 |
 
 ### 其他
 
@@ -129,7 +134,9 @@ cp .env.example .env
 | `/api/auth/register` | POST | 注册 |
 | `/api/auth/login` | POST | 登录 |
 | `/api/auth/logout` | POST | 登出 |
+| `/api/auth/stream-ticket` | POST | 创建 SSE 流式请求票据 |
 | `/api/upload` | POST | 文件上传 |
+| `/rag/warmup` | POST | 异步启动 RAG 初始化 |
 | `/api/trace/sessions` | GET | Trace 会话列表 |
 | `/api/trace/sessions/{id}` | GET | Trace 详情 |
 | `/api/trace/events` | GET | Trace 事件查询 |

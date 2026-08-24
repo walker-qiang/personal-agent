@@ -61,7 +61,8 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 
 ### React SPA 前端
 
-Matrix 使用 React SPA 作为唯一前端界面。旧版React SPA（/react-app 提供同样内容）已移除。
+Matrix 使用 React SPA 作为唯一前端界面。旧版前端已移除；当前 React
+SPA 同时通过根路径 `/` 和 `/react-app/` 提供访问。
 
 | 维度 | React SPA |
 |------|-----------|

@@ -22,12 +22,17 @@
 | `ToolSection` | 工具调用结果展示，可折叠，显示耗时和错误 |
 | `SkillPanel` | 右侧技能列表，支持发送/编辑/删除/新建 |
 | `SkillEditor` | 技能编辑弹窗（name/description/prompt/workflow/output_format） |
-| `RightPanel` | 信息面板（待办/任务产物/参考信息，目前为空状态） |
+| `RightPanel` | 信息面板（待办/任务产物/参考信息） |
 | `ModelSelector` | 模型选择下拉，分组展示（对话/图片/视频模型） |
 | `QuickQuestions` | 5 个预设快捷问题按钮 |
 | `StatusBar` | 底部状态栏，4 种状态动画（idle/thinking/executing/generating） |
 | `FileUpload` | 文件上传，支持拖拽和点击，图片预览 |
 | `ConfirmDialog` | HITL 确认弹窗，approve/skip |
+| `MemoryPanel` | 用户记忆、经验教训和演化日志管理 |
+| `McpPanel` | MCP 服务增删改和启停管理 |
+| `TracePanel` | Trace 会话、事件和统计查看 |
+| `BranchBanner` | 分叉会话提示 |
+| `SkillListModal` | 技能列表管理弹窗 |
 
 ### 页面布局
 
@@ -46,6 +51,9 @@
 - 对话：SSE 流式，Markdown 渲染，工具调用/结果展示
 - Agent Chain：可视化多 Agent 执行步骤
 - HITL 确认：危险操作弹窗确认
+- Memory：用户记忆、经验教训和记忆演化管理
+- MCP：MCP 服务管理
+- Trace：Trace 会话、事件和统计查看
 - 文件上传：拖拽 + 点击，图片预览
 - 快捷问题：5 个预设场景
 - 流式 thinking/progress 展示
