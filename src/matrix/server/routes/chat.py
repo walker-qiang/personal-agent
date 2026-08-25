@@ -220,6 +220,7 @@ def _trace_error(request: Request, error: str) -> None:
             "ok": False,
             "error": error,
             "path": request.url.path,
+            "owner_id": getattr(request.state, "user_id", ""),
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     )

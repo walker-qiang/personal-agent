@@ -21,6 +21,7 @@ from ..domain.messages import Message
 from ..domain.tools import RecoveryPolicy, ToolSpec
 from ..domain.results import RunOutcome, RunResult
 from ..ports.model import ModelPort
+from ..ports.context import ContextPort
 from ..ports.store import OperationStorePort
 from ..ports.tools import ToolExecutorPort
 from .loop import execute_operation
@@ -81,10 +82,12 @@ class AgentRuntime:
         store: OperationStorePort,
         model: ModelPort | None = None,
         tools: ToolExecutorPort | None = None,
+        context: ContextPort | None = None,
     ) -> None:
         self.store = store
         self.model = model
         self.tools = tools
+        self.context = context
 
     def start(self, request: RunRequest) -> RunHandle:
         if self.model is None or self.tools is None:
@@ -153,6 +156,7 @@ class AgentRuntime:
             store=self.store,
             model=self.model,
             tools=self.tools,
+            context=self.context,
             debug_trace=current_handle._debug,
         )
         return handle
@@ -305,6 +309,7 @@ class AgentRuntime:
             store=self.store,
             model=self.model,
             tools=self.tools,
+            context=self.context,
             debug_trace=handle._debug,
             resume_approval_id=resolved.approval_id,
             resume_decision=resolved.decision.value if resolved.decision else decision.value,

@@ -195,7 +195,9 @@ async def list_lessons(request: Request):
 async def delete_lesson(request: Request, lesson_id: int):
     """Delete a lesson by ID."""
     lesson_store = _get_lesson_store(request)
-    deleted = lesson_store.delete_lesson(lesson_id)
+    deleted = lesson_store.delete_lesson(
+        lesson_id, user_id=_get_user_id(request),
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail=f"lesson {lesson_id} not found")
     return {"ok": True, "lesson_id": lesson_id}

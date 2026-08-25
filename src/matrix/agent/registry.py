@@ -117,16 +117,15 @@ class AgentRegistry:
         if agent is None:
             raise ValueError(f"agent not found: {agent_id}")
         if not agent.tools:
-            # Empty tools list = all tools available
-            return full_registry
+            # Empty tools list = all tools available, but keep request-local
+            # breaker state isolated from the application-wide registry.
+            return full_registry.fork()
 
-        filtered = ToolRegistry()
+        selected: set[str] = set()
         for tool_name in full_registry.tool_names():
             if agent.matches_tool(tool_name):
-                tool_def = full_registry.get(tool_name)
-                if tool_def is not None:
-                    filtered.register(tool_def)
-        return filtered
+                selected.add(tool_name)
+        return full_registry.fork(selected)
 
     # ---- Skill Binding ----
 

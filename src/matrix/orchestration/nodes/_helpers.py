@@ -207,7 +207,9 @@ def _get_configurable(config: RunnableConfig) -> dict[str, Any]:
 def _trace(cfg: dict[str, Any], event: dict[str, Any]) -> None:
     sink = cfg.get("trace")
     if sink is not None:
-        sink.record(event)
+        payload = dict(event)
+        payload.setdefault("owner_id", str(cfg.get("user_id", "")))
+        sink.record(payload)
 
 
 @contextlib.contextmanager
@@ -251,6 +253,7 @@ def _trace_span(cfg: dict[str, Any], name: str, **kwargs: Any):
                 name,
                 session_id=session_id,
                 agent_id=agent_id,
+                owner_id=str(cfg.get("user_id", "")),
                 iteration=iteration,
             )
         except Exception:

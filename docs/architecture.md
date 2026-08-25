@@ -4,6 +4,11 @@
 
 Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个落地场景为投资分析员。后端为 Python FastAPI + LangGraph，当前默认前端为 React SPA。
 
+在 `personal-system` 中，`personal-agent` 是独立的 Agent Application
+和 Runtime 执行引擎，不拥有 `personal-assets` 的事实，也不拥有
+`personal-os` 的用户和业务领域。用户、Finance、Research、durable write
+由 `personal-os` 负责；Agent 通过通用 Tool Provider 协议使用这些能力。
+
 ## 整体架构
 
 ```
@@ -56,6 +61,69 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 │  └──────────┘ └──────────┘ └──────────────────┘   │
 └────────────────────────────────────────────────────┘
 ```
+
+## 领域边界
+
+### Runtime Core
+
+Runtime Core 只负责一个独立 Agent operation 的执行：
+
+- model/tool loop；
+- operation phase、event、approval、effect journal；
+- retry、timeout、cancel 和 recovery；
+- 通用 `ModelPort`、`ToolExecutorPort`、`ContextPort` 和 `OperationStorePort`。
+
+Runtime Core 不应依赖 FastAPI、LangGraph、AgentRegistry、`personal-os`、
+Finance、Research、`personal-assets`、Vault 或 Git。
+
+`owner_id`、`session_id` 在 Runtime 中只是不可解释的运行态关联键，
+不代表 Runtime 拥有用户领域。
+
+### Agent Application / Orchestration
+
+Application 层负责：
+
+- Commander 和 Domain Agent 定义；
+- LangGraph 计划、DAG、Replan、Aggregate 和 Reflection；
+- 将业务上下文转换为通用 Runtime request；
+- 将用户确认和产品事件转换为 Runtime resume；
+- 维护 HTTP/SSE 兼容契约。
+
+这一层可以知道 Agent、Skill 和产品请求，但不应直接写 durable Vault。
+
+### Tool Provider Boundary
+
+工具分为三类：
+
+1. 通用工具：web、code、通用 MCP、媒体生成，放在 Agent 或
+   `personal-tools`，不定义个人事实。
+2. 业务工具：Finance、Research、个人资产读取，由 `personal-os`
+   提供。
+3. durable write 工具：只调用 `personal-os` 的 operation-specific
+   API，必须经过 Runtime approval 和 API/AssetStore 校验。
+
+`src/matrix/tools/adapters/personal_os.py` 是远程 Tool Provider connector，属于
+Adapter，不属于 Runtime Core。未来可以替换为其他 RPC 或进程内实现，
+而不改变 Runtime domain/ports。
+
+### User Boundary
+
+当前系统是单用户单节点。`personal-agent` 可以接收不透明的用户和
+session 上下文，用于运行态隔离、审计和恢复，但用户身份、产品配置和
+业务权限的权威边界属于 `personal-os`。当前不建设多租户 Agent 服务。
+
+### Agent Gateway 与运行时回调
+
+```text
+personal-os Agent Gateway
+    -> personal-agent HTTP/SSE
+        -> Generic ToolExecutorPort
+            -> personal-os Tool Provider
+```
+
+这是一个受控的数据回调，不是 Runtime Core 对 `personal-os` 的领域依赖。
+Tool Provider 只能执行请求中声明的工具，不能重新启动同一个 Agent operation，
+也不能绕过 Runtime approval、personal-os API 或 AssetStore。
 
 ## 关键设计决策
 

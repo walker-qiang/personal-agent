@@ -11,14 +11,20 @@ router = APIRouter(prefix="/api/trace", tags=["trace"])
 async def list_sessions(request: Request, limit: int = Query(50, ge=1, le=200)):
     """List recent trace sessions with summary stats."""
     trace = request.app.state.trace
-    return trace.sessions(limit=limit)
+    return trace.sessions(
+        limit=limit,
+        owner_id=getattr(request.state, "user_id", ""),
+    )
 
 
 @router.get("/sessions/{session_id}")
 async def session_detail(request: Request, session_id: str):
     """Get all trace events for a session."""
     trace = request.app.state.trace
-    events = trace.session_detail(session_id)
+    events = trace.session_detail(
+        session_id,
+        owner_id=getattr(request.state, "user_id", ""),
+    )
     return {"session_id": session_id, "events": events}
 
 
@@ -33,6 +39,7 @@ async def query_events(
     """Query trace events with optional filters."""
     trace = request.app.state.trace
     return trace.query(
+        owner_id=getattr(request.state, "user_id", ""),
         session_id=session_id,
         event_type=event_type,
         limit=limit,
@@ -44,7 +51,7 @@ async def query_events(
 async def trace_stats(request: Request):
     """Get overall trace statistics."""
     trace = request.app.state.trace
-    return trace.stats()
+    return trace.stats(owner_id=getattr(request.state, "user_id", ""))
 
 
 @router.get("/spans")
@@ -59,6 +66,7 @@ async def query_spans(
     if not hasattr(trace, "query_spans"):
         return {"spans": []}
     spans = trace.query_spans(
+        owner_id=getattr(request.state, "user_id", ""),
         trace_id=trace_id,
         session_id=session_id,
         limit=limit,
@@ -78,6 +86,8 @@ async def otlp_export_buffer(request: Request):
     if not hasattr(trace, "export_otlp"):
         return {"exports": [], "enabled": False}
     return {
-        "exports": trace.export_otlp(),
+        "exports": trace.export_otlp(
+            owner_id=getattr(request.state, "user_id", ""),
+        ),
         "enabled": getattr(trace, "_otlp_export", False),
     }

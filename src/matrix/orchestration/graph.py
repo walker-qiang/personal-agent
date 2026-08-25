@@ -75,8 +75,27 @@ def build_graph() -> StateGraph:
         lambda state: "runtime_confirm" if state.get("needs_confirmation") else "aggregate",
         {"runtime_confirm": "runtime_confirm", "aggregate": "aggregate"},
     )
-    graph.add_edge("runtime_confirm", "aggregate")
-    graph.add_edge("runtime_delegate", "replan_node")
+    graph.add_conditional_edges(
+        "runtime_confirm",
+        lambda state: (
+            "replan_node"
+            if len(state.get("delegation_plan", [])) > 1
+            else "aggregate"
+        ),
+        {"replan_node": "replan_node", "aggregate": "aggregate"},
+    )
+    graph.add_conditional_edges(
+        "runtime_delegate",
+        lambda state: (
+            "runtime_confirm"
+            if state.get("needs_confirmation")
+            else "replan_node"
+        ),
+        {
+            "runtime_confirm": "runtime_confirm",
+            "replan_node": "replan_node",
+        },
+    )
 
     # replan_node → conditional:
     #   needs_replan → commander_plan (regenerate plan)
@@ -128,7 +147,12 @@ def _route_dag_first(state: AgentState):
         return "runtime_agent"
 
     completed = state.get("completed_steps", [])
-    ready = _get_ready_steps(plan, completed)
+    ready = _get_ready_steps(
+        plan,
+        completed,
+        state.get("completed_step_refs", []),
+        state.get("plan_revision", 0),
+    )
 
     if not ready:
         return "aggregate"
@@ -141,9 +165,11 @@ def _route_dag_first(state: AgentState):
             "user_message": state.get("user_message", ""),
             "session_id": state.get("session_id", ""),
             "owner_id": state.get("owner_id", "default"),
+            "plan_revision": state.get("plan_revision", 0),
             "runtime_mode": "runtime",
             "orchestration_run_id": state.get("orchestration_run_id", ""),
             "agent_results": state.get("agent_results", []),
+            "completed_step_refs": state.get("completed_step_refs", []),
         })
         for s in ready
     ]
@@ -161,7 +187,12 @@ def _route_after_replan(state: AgentState):
 
     plan = state.get("delegation_plan", [])
     completed = state.get("completed_steps", [])
-    ready = _get_ready_steps(plan, completed)
+    ready = _get_ready_steps(
+        plan,
+        completed,
+        state.get("completed_step_refs", []),
+        state.get("plan_revision", 0),
+    )
 
     if not ready:
         # All steps done or no more executable steps
@@ -175,9 +206,11 @@ def _route_after_replan(state: AgentState):
             "user_message": state.get("user_message", ""),
             "session_id": state.get("session_id", ""),
             "owner_id": state.get("owner_id", "default"),
+            "plan_revision": state.get("plan_revision", 0),
             "runtime_mode": "runtime",
             "orchestration_run_id": state.get("orchestration_run_id", ""),
             "agent_results": state.get("agent_results", []),
+            "completed_step_refs": state.get("completed_step_refs", []),
         })
         for s in ready
     ]

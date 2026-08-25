@@ -19,6 +19,7 @@ from ..domain.requests import RunRequest
 from ..domain.results import RunOutcome, RunResult, Suspension
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 from ..ports.model import ModelPort, ModelRequest, ModelResponse
+from ..ports.context import ContextPort
 from ..ports.store import OperationStorePort
 from ..ports.tools import ToolExecutorPort
 from .reducer import with_next_phase
@@ -33,6 +34,7 @@ def execute_operation(
     store: OperationStorePort,
     model: ModelPort,
     tools: ToolExecutorPort,
+    context: ContextPort | None = None,
     resume_approval_id: str = "",
     resume_decision: str = "",
     committed_events: tuple[RuntimeEvent, ...] = (),
@@ -137,6 +139,7 @@ def execute_operation(
                 debug_trace=debug_trace,
                 started_at=started_at,
                 timeout_seconds=request.execution_options.timeout_seconds,
+                context=context,
             )
             _check_timeout(started_at, request.execution_options.timeout_seconds)
             if response is None:
@@ -416,6 +419,7 @@ def _complete_with_retry(
     debug_trace: EphemeralDebugTrace | None = None,
     started_at: float | None = None,
     timeout_seconds: float = 300.0,
+    context: ContextPort | None = None,
 ) -> tuple[ModelResponse | None, OperationState]:
     attempts = request.execution_options.max_model_retries + 1
     for attempt in range(attempts):
@@ -424,9 +428,14 @@ def _complete_with_retry(
         if handle._cancel_requested:
             return None, operation
         try:
+            model_messages = (
+                context.fit(request.system_prompt, messages)
+                if context is not None
+                else list(messages)
+            )
             model_request = ModelRequest(
                 system_prompt=request.system_prompt,
-                messages=list(messages),
+                messages=model_messages,
                 tools=request.tools,
                 model=request.model,
                 metadata={

@@ -55,6 +55,7 @@ class AgentState(BaseModel):
         default_factory=list,
         description="[{step, agent_id, task, skill_name, purpose}]",
     )
+    plan_revision: int = 0
     current_step: int = 0  # index into delegation_plan
 
     # Agent execution results — operator.add concatenates results from parallel branches
@@ -96,6 +97,10 @@ class AgentState(BaseModel):
     completed_steps: Annotated[list[int], operator.add] = Field(
         default_factory=list,
         description="Step numbers (1-based) that have completed execution",
+    )
+    completed_step_refs: Annotated[list[str], operator.add] = Field(
+        default_factory=list,
+        description="Revision-qualified completed steps, e.g. '1:2'",
     )
     needs_replan: bool = False       # signal from replan_node → commander_plan retry
     replan_attempts: int = 0         # max replan attempts to prevent infinite loops

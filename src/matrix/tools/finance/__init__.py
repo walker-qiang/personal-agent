@@ -19,6 +19,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             description=holdings.tool_definition.description,
             input_schema=holdings.tool_definition.input_schema,
             handler=lambda **kwargs: holdings.holdings_summary(cache_path=str(cache_path), **kwargs),
+            capabilities=holdings.tool_definition.capabilities,
         )
     )
     registry.register(
@@ -27,6 +28,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             description=assets.tool_definition.description,
             input_schema=assets.tool_definition.input_schema,
             handler=lambda **kwargs: assets.asset_lookup(cache_path=str(cache_path), **kwargs),
+            capabilities=assets.tool_definition.capabilities,
         )
     )
     registry.register(
@@ -35,6 +37,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             description=snapshots.history_tool.description,
             input_schema=snapshots.history_tool.input_schema,
             handler=lambda **kwargs: snapshots.snapshot_history(cache_path=str(cache_path), **kwargs),
+            capabilities=snapshots.history_tool.capabilities,
         )
     )
     registry.register(
@@ -43,6 +46,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             description=snapshots.recent_tool.description,
             input_schema=snapshots.recent_tool.input_schema,
             handler=lambda **kwargs: snapshots.recent_snapshots(cache_path=str(cache_path), **kwargs),
+            capabilities=snapshots.recent_tool.capabilities,
         )
     )
     registry.register(
@@ -51,6 +55,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             description=allocation.tool_definition.description,
             input_schema=allocation.tool_definition.input_schema,
             handler=lambda **kwargs: allocation.bucket_allocation(cache_path=str(cache_path), **kwargs),
+            capabilities=allocation.tool_definition.capabilities,
         )
     )
 

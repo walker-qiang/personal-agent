@@ -287,6 +287,7 @@ class Tracer:
         # Add standard attributes
         span.set_attribute("session.id", attributes.pop("session_id", ""))
         span.set_attribute("agent.id", attributes.pop("agent_id", ""))
+        span.set_attribute("owner.id", attributes.pop("owner_id", ""))
         for k, v in attributes.items():
             span.set_attribute(k, v)
 
@@ -443,12 +444,33 @@ class OTLPExporter:
             "resourceSpans": scope_spans,
         }
 
-    def get_buffered(self) -> list[dict[str, Any]]:
+    def get_buffered(self, owner_id: str | None = None) -> list[dict[str, Any]]:
         """Get buffered exports (for testing)."""
-        return list(self._buffer)
+        if not owner_id:
+            return list(self._buffer)
+        return [_filter_otlp_payload(payload, owner_id) for payload in self._buffer]
 
     def clear_buffer(self) -> None:
         self._buffer.clear()
+
+
+def _filter_otlp_payload(payload: dict[str, Any], owner_id: str) -> dict[str, Any]:
+    """Keep only spans carrying the requested owner attribute."""
+    filtered = dict(payload)
+    resource_spans = []
+    for resource_span in payload.get("resourceSpans", []):
+        spans = [
+            span for span in resource_span.get("spans", [])
+            if any(
+                attribute.get("key") == "owner.id"
+                and attribute.get("value", {}).get("stringValue") == owner_id
+                for attribute in span.get("attributes", [])
+            )
+        ]
+        if spans:
+            resource_spans.append({**resource_span, "spans": spans})
+    filtered["resourceSpans"] = resource_spans
+    return filtered
 
 
 # ---- Helpers ----------------------------------------------------------------

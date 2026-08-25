@@ -9,6 +9,7 @@ from langgraph.types import RunnableConfig, interrupt
 from ...runtime import AgentRuntime, ExecutionPolicy, RunRequest
 from ...runtime.adapters.model import MatrixModelAdapter
 from ...runtime.adapters.tools import MatrixToolAdapter, tool_specs
+from ...runtime.adapters.context import MatrixContextAdapter
 from ...runtime.domain.messages import Message
 from ...runtime.domain.results import RunOutcome
 from ...runtime.domain.tools import ToolResult
@@ -89,6 +90,7 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
             mode=cfg.get("execution_policy", ExecutionPolicy()).mode,
             allow_external_effects=cfg.get("execution_policy", ExecutionPolicy()).allow_external_effects,
         ),
+        context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
     handle = runtime.start(request)
     _push_event(cfg, "progress", {"message": "独立 Runtime 正在执行 Agent 任务...", "operation_id": handle.operation_id})
@@ -128,7 +130,10 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         return {
             "needs_confirmation": True,
             "pending_actions": [action],
-            "runtime_operation_id": handle.operation_id,
+            "runtime_operation_ids": [{
+                "step": step.get("step", current_step + 1),
+                "operation_id": handle.operation_id,
+            }],
         }
 
     runtime_tool_results = [
@@ -148,6 +153,9 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         "tool_results": runtime_tool_results,
         "tool_call_count": len(runtime_tool_results),
         "completed_steps": [step.get("step", current_step + 1)],
+        "completed_step_refs": [
+            f"{state.get('plan_revision', 0)}:{step.get('step', current_step + 1)}"
+        ],
     }
 
 
@@ -156,9 +164,18 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
     cfg = _get_configurable(config)
     actions = state.get("pending_actions", [])
     decision = interrupt({"type": "confirm", "actions": actions})
-    if decision not in (True, "approve", "confirmed"):
-        return {"error": "用户取消了操作", "confirmed": True}
-    operation_id = state.get("runtime_operation_id", "")
+    approval_decision = (
+        "approve" if decision in (True, "approve", "confirmed") else "skip"
+    )
+    operation_id = ""
+    approval_id = ""
+    if actions and isinstance(actions[0], dict):
+        operation_id = str(actions[0].get("operation_id", ""))
+        approval_id = str(actions[0].get("approval_id", ""))
+    if not operation_id:
+        operation_ids = state.get("runtime_operation_ids", [])
+        if operation_ids and isinstance(operation_ids[0], dict):
+            operation_id = str(operation_ids[0].get("operation_id", ""))
     operation = cfg["runtime_store"].load(cfg.get("user_id", "default"), operation_id)
     if operation is None:
         return {"error": "Runtime operation not found", "confirmed": True}
@@ -173,12 +190,14 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
             mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
             allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
         ),
+        context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
-    approval_id = actions[0].get("approval_id", "") if actions else ""
     handle = runtime.resume(
         cfg.get("user_id", "default"), operation_id,
         __import__("matrix.runtime.domain.requests", fromlist=["ResumeInput"]).ResumeInput(
-            kind="approval", decision="approve", payload={"approval_id": approval_id},
+            kind="approval",
+            decision=approval_decision,
+            payload={"approval_id": approval_id},
         ),
     )
     events = list(handle.events())
@@ -189,18 +208,55 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
                 "operation_id": handle.operation_id,
                 "event": trace_event,
             })
-    return {
+    step_number: int | None = None
+    if operation.step_id:
+        try:
+            step_number = int(operation.step_id)
+        except ValueError:
+            step_number = None
+    if step_number is None:
+        plan = state.get("delegation_plan", [])
+        current_step = state.get("current_step", 0)
+        if 0 <= current_step < len(plan):
+            raw_step = plan[current_step].get("step")
+            if isinstance(raw_step, int):
+                step_number = raw_step
+
+    task = ""
+    if step_number is not None:
+        for item in state.get("delegation_plan", []):
+            if item.get("step") == step_number:
+                task = item.get("task", "")
+                break
+
+    agent_result: dict[str, Any] = {
+        "agent_id": operation.agent_id,
+        "task": task,
+        "result": result.final_message,
+        "operation_id": operation_id,
+    }
+    if step_number is not None:
+        agent_result["step"] = step_number
+    if result.error:
+        agent_result["error"] = result.error
+
+    result_data: dict[str, Any] = {
         "confirmed": True,
         "needs_confirmation": False,
         "pending_actions": [],
-        "agent_results": [{
-            "agent_id": operation.agent_id, "task": "",
-            "result": result.final_message, "operation_id": operation_id,
-            **({"error": result.error} if result.error else {}),
-        }],
+        "agent_results": [agent_result],
         "tool_results": [_tool_result_dict(item) for item in result.tool_results],
-        "completed_steps": [state.get("delegation_plan", [{}])[0].get("step", 1)],
+        "runtime_operation_ids": [{
+            "step": step_number,
+            "operation_id": operation_id,
+        }] if step_number is not None else [],
     }
+    if step_number is not None and result.outcome is RunOutcome.COMPLETED:
+        result_data["completed_steps"] = [step_number]
+        result_data["completed_step_refs"] = [
+            f"{state.get('plan_revision', 0)}:{step_number}"
+        ]
+    return result_data
 
 
 def runtime_delegate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:

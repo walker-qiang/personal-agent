@@ -25,7 +25,7 @@ from ..tools import ToolRegistry
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
-from ..tools.personal_os import register_all as register_personal_os_tools
+from ..tools.adapters.personal_os import register_all as register_personal_os_tools
 from ..tools.rag import register_all as register_rag_tools
 from .routes import auth, chat, health, memory, provider, runtime, sessions, tools, trace, upload
 from .middleware import AuthMiddleware

@@ -49,6 +49,7 @@ def register_all(
             description=_tool.description,
             input_schema=_tool.input_schema,
             handler=_tool.handler,
+            capabilities=_tool.capabilities,
         )
     )
 

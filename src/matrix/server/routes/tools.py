@@ -47,6 +47,7 @@ async def tools_call(request: Request) -> JSONResponse:
             {
                 "event_type": "tool_call",
                 "ok": not is_error,
+                "owner_id": user_id,
                 "tool_name": tool,
                 "session_id": session_id,
                 "arguments": arguments,
@@ -77,6 +78,7 @@ def _trace_error(request: Request, error: str) -> None:
     trace.record(
         {
             "ok": False,
+            "owner_id": getattr(request.state, "user_id", ""),
             "error": error,
             "path": request.url.path,
             "ts": timestamp(),

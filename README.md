@@ -2,6 +2,11 @@
 
 基于“通用底座 + 领域聚焦”架构的 Agent 应用与 Runtime，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。顶层执行统一进入独立 Runtime；Runtime 负责可恢复 operation、approval、effect 和 session 状态。
 
+在 `personal-system` 中，`personal-agent` 是通用 Agent Application
+和 Runtime 执行引擎。`personal-os` 拥有用户、Finance、Research、MCP
+配置和 durable write；`personal-agent` 只接收不透明运行上下文和受控
+Tool Provider 能力，不拥有 `personal-assets` 的长期事实。
+
 ## 架构
 
 ```
@@ -153,6 +158,8 @@ cp .env.example .env
 - `writeback` 只允许显式 allowlist 操作，并且必须经过 Runtime approval。
 - `writeback.execute_plan` 通过 `personal-os` API 执行，Agent 不直接写 `personal-assets`。
 - Memory 和 Skill mutation 调用 `personal-os /api/vault/*`，由 AssetStore 提交和同步。
+- Finance/Research 的 `personal_os.*` 工具属于远程 Tool Provider connector；
+  Runtime Core 不直接依赖 `personal-os` 业务对象。
 - Runtime SQLite 保存可恢复运行态，不是 finance facts 或 broader knowledge 的事实源。
 
 ## 开发

@@ -435,13 +435,19 @@ class LessonStore:
 
         return [self._row_to_lesson(row) for row in rows]
 
-    def delete_lesson(self, lesson_id: int) -> bool:
+    def delete_lesson(self, lesson_id: int, user_id: str = "") -> bool:
         """删除一条教训. Returns True if deleted."""
         with self._lock:
             conn = self._get_conn()
-            cursor = conn.execute(
-                "DELETE FROM agent_lessons WHERE id=?", (lesson_id,),
-            )
+            if user_id:
+                cursor = conn.execute(
+                    "DELETE FROM agent_lessons WHERE id=? AND user_id=?",
+                    (lesson_id, user_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM agent_lessons WHERE id=?", (lesson_id,),
+                )
             conn.commit()
             return cursor.rowcount > 0
 

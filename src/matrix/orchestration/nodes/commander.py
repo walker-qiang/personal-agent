@@ -444,13 +444,31 @@ def _run_domain_agent_react(
 MAX_REPLAN_ATTEMPTS = 2
 
 
-def _get_ready_steps(plan: list[dict[str, Any]], completed: list[int]) -> list[dict[str, Any]]:
+def _get_ready_steps(
+    plan: list[dict[str, Any]],
+    completed: list[int],
+    completed_refs: list[str] | None = None,
+    plan_revision: int = 0,
+) -> list[dict[str, Any]]:
     """Find steps whose dependencies are all satisfied.
 
     A step is "ready" if all steps in its depends_on list have been completed.
     Steps that are already in completed_steps are excluded.
     """
     completed_set = set(completed)
+    revision_prefix = f"{plan_revision}:"
+    revision_completed = {
+        int(ref.split(":", 1)[1])
+        for ref in (completed_refs or [])
+        if ref.startswith(revision_prefix)
+        and ref.split(":", 1)[1].isdigit()
+    }
+    if revision_completed:
+        completed_set = revision_completed
+    elif completed_refs:
+        # A new plan revision has no completed steps yet. Do not reuse
+        # step numbers from an older revision.
+        completed_set = set()
     ready = []
     for s in plan:
         step_num = s.get("step", 0)
@@ -547,6 +565,7 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             "delegation_plan": revised_plan,
             "needs_replan": True,
             "replan_attempts": replan_attempts + 1,
+            "plan_revision": replan_attempts + 1,
         }
 
     if needs_revision:

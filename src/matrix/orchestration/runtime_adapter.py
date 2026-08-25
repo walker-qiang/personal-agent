@@ -11,6 +11,7 @@ from ..runtime.domain.messages import Message
 from ..runtime.adapters.tools import tool_specs
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
+from ..runtime.adapters.context import MatrixContextAdapter
 from ..runtime import AgentRuntime
 from .events import make_event
 
@@ -107,6 +108,7 @@ def run_nested_agent_runtime(
             mode=policy.mode,
             allow_external_effects=policy.allow_external_effects,
         ),
+        context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
     handle = runtime.start(request)
     events = list(handle.events())
@@ -207,6 +209,7 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
             mode=request.execution_policy.mode,
             allow_external_effects=request.execution_policy.allow_external_effects,
         ),
+        context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
     handle = runtime.start(request)
     events = list(handle.events())
@@ -219,6 +222,22 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
                     "name": event.payload.get("name", ""),
                     "args": {},
                 }))
+    if result.outcome.value == "suspended" and result.suspension is not None:
+        action = {
+            "approval_id": result.suspension.approval_id,
+            "operation_id": handle.operation_id,
+            "name": result.suspension.payload.get("tool_name", ""),
+            "args": result.suspension.payload.get("arguments", {}),
+            "risk": "runtime approval required",
+        }
+        return {
+            "needs_confirmation": True,
+            "pending_actions": [action],
+            "runtime_operation_ids": [{
+                "step": step.get("step"),
+                "operation_id": handle.operation_id,
+            }],
+        }
     return {
         "agent_results": [{
             "step": step.get("step"),
@@ -232,6 +251,9 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
             for item in result.tool_results
         ],
         "completed_steps": [step.get("step")],
+        "completed_step_refs": [
+            f"{state.get('plan_revision', 0)}:{step.get('step')}"
+        ],
         "runtime_operation_ids": [{"step": step.get("step"), "operation_id": handle.operation_id}],
     }
 

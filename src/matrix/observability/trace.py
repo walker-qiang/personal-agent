@@ -75,11 +75,12 @@ class TraceStore:
             conn = self._get_conn()
             conn.execute(
                 """INSERT INTO trace_events
-                   (session_id, event_type, node_name, agent_id, tool_name,
+                   (owner_id, session_id, event_type, node_name, agent_id, tool_name,
                     ok, elapsed_ms, arguments, result_preview, error,
                     span_id, parent_span_id, ts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    event.get("owner_id", ""),
                     event.get("session_id", ""),
                     event.get("event_type", "unknown"),
                     event.get("node_name"),
@@ -115,12 +116,13 @@ class TraceStore:
 
             conn.execute(
                 """INSERT INTO otel_spans
-                   (trace_id, span_id, parent_span_id, name, kind,
+                   (owner_id, trace_id, span_id, parent_span_id, name, kind,
                     start_time_unix_nano, end_time_unix_nano,
                     status_code, status_message,
                     attributes, events, resource, session_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    span.attributes.get("owner.id", ""),
                     span.trace_id,
                     span.span_id,
                     span.parent_span_id,
@@ -188,10 +190,14 @@ class TraceStore:
         trace_id: str | None = None,
         session_id: str | None = None,
         limit: int = 100,
+        owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Query OTel spans by trace_id or session_id."""
         conditions = []
         params: list[Any] = []
+        if owner_id:
+            conditions.append("owner_id = ?")
+            params.append(owner_id)
         if trace_id:
             conditions.append("trace_id = ?")
             params.append(trace_id)
@@ -207,9 +213,9 @@ class TraceStore:
         ).fetchall()
         return [_span_row_to_dict(r) for r in rows]
 
-    def export_otlp(self) -> list[dict[str, Any]]:
+    def export_otlp(self, owner_id: str | None = None) -> list[dict[str, Any]]:
         """Get buffered OTLP exports (for debugging/testing)."""
-        return self._exporter.get_buffered()
+        return self._exporter.get_buffered(owner_id=owner_id)
 
     def query(
         self,
@@ -217,10 +223,14 @@ class TraceStore:
         event_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Query trace events with optional filters."""
         conditions = []
         params: list[Any] = []
+        if owner_id:
+            conditions.append("owner_id = ?")
+            params.append(owner_id)
         if session_id:
             conditions.append("session_id = ?")
             params.append(session_id)
@@ -237,9 +247,13 @@ class TraceStore:
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
-    def sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+    def sessions(
+        self, limit: int = 50, owner_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List recent sessions with summary stats."""
         conn = self._get_conn()
+        owner_clause = "AND owner_id = ?" if owner_id else ""
+        owner_params: list[Any] = [owner_id] if owner_id else []
         rows = conn.execute(
             """SELECT
                  session_id,
@@ -249,32 +263,49 @@ class TraceStore:
                  SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS errors,
                  SUM(CASE WHEN event_type = 'tool_call' THEN 1 ELSE 0 END) AS tool_calls
                FROM trace_events
-               WHERE session_id != ''
+               WHERE session_id != '' """
+            + owner_clause
+            + """
                GROUP BY session_id
                ORDER BY MIN(id) DESC
                LIMIT ?""",
-            (limit,),
+            [*owner_params, limit],
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def session_detail(self, session_id: str) -> list[dict[str, Any]]:
+    def session_detail(
+        self, session_id: str, owner_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Get all events for a session, ordered chronologically."""
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT * FROM trace_events WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
-        ).fetchall()
+        sql = "SELECT * FROM trace_events WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if owner_id:
+            sql += " AND owner_id = ?"
+            params.append(owner_id)
+        rows = conn.execute(sql + " ORDER BY id ASC", params).fetchall()
         return [_row_to_dict(r) for r in rows]
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, owner_id: str | None = None) -> dict[str, Any]:
         """Get overall trace statistics."""
         conn = self._get_conn()
-        total = conn.execute("SELECT COUNT(*) FROM trace_events").fetchone()[0]
+        where = " WHERE owner_id = ?" if owner_id else ""
+        params: list[Any] = [owner_id] if owner_id else []
+        total = conn.execute(
+            "SELECT COUNT(*) FROM trace_events" + where, params,
+        ).fetchone()[0]
         errors = conn.execute(
-            "SELECT COUNT(*) FROM trace_events WHERE ok = 0"
+            "SELECT COUNT(*) FROM trace_events"
+            + (" WHERE owner_id = ? AND ok = 0" if owner_id else " WHERE ok = 0"),
+            params if owner_id else [],
         ).fetchone()[0]
         sessions = conn.execute(
-            "SELECT COUNT(DISTINCT session_id) FROM trace_events WHERE session_id != ''"
+            "SELECT COUNT(DISTINCT session_id) FROM trace_events"
+            + (
+                " WHERE owner_id = ? AND session_id != ''"
+                if owner_id else " WHERE session_id != ''"
+            ),
+            params if owner_id else [],
         ).fetchone()[0]
         return {
             "total_events": total,
@@ -293,6 +324,7 @@ class TraceStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS trace_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL DEFAULT '',
             event_type TEXT NOT NULL DEFAULT 'unknown',
             node_name TEXT,
@@ -311,6 +343,9 @@ class TraceStore:
         # Migrate: add span_id column if missing (pre-existing DBs)
         _add_column_if_missing(conn, "trace_events", "span_id", "TEXT")
         _add_column_if_missing(conn, "trace_events", "parent_span_id", "TEXT")
+        _add_column_if_missing(
+            conn, "trace_events", "owner_id", "TEXT NOT NULL DEFAULT ''",
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trace_span ON trace_events(span_id)"
         )
@@ -326,6 +361,7 @@ class TraceStore:
         # OTel spans table (standardized span storage)
         conn.execute("""CREATE TABLE IF NOT EXISTS otel_spans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id TEXT NOT NULL DEFAULT '',
             trace_id TEXT NOT NULL,
             span_id TEXT NOT NULL,
             parent_span_id TEXT NOT NULL DEFAULT '',
@@ -346,6 +382,12 @@ class TraceStore:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_otel_session ON otel_spans(session_id)"
+        )
+        _add_column_if_missing(
+            conn, "otel_spans", "owner_id", "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_otel_owner ON otel_spans(owner_id)"
         )
         conn.commit()
 

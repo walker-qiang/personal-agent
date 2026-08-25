@@ -38,6 +38,24 @@ class ToolRegistry:
             raise ValueError(f"tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def fork(self, names: set[str] | None = None) -> "ToolRegistry":
+        """Create an isolated registry view with shared application guards.
+
+        Tool definitions and static guards are safe to share. The circuit
+        breaker is intentionally left unset because it is request-scoped and
+        must not leak between concurrent sessions.
+        """
+        forked = ToolRegistry()
+        selected = names if names is not None else set(self._tools)
+        for name in sorted(selected):
+            tool = self._tools.get(name)
+            if tool is not None:
+                forked.register(tool)
+        forked._guard = self._guard
+        forked._code_guard = self._code_guard
+        forked._injection_guard = self._injection_guard
+        return forked
+
     def list_tools(self) -> list[dict[str, Any]]:
         """Return all tool definitions in LLM-compatible format."""
         return [tool.to_dict() for tool in self._tools.values()]

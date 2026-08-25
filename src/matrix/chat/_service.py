@@ -41,6 +41,7 @@ from ..runtime.adapters.deep_research import (
 from ..runtime import AgentRuntime, ExecutionPolicy, ResumeInput
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
+from ..runtime.adapters.context import MatrixContextAdapter
 from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ..memory import EvolutionConfig, MemoryEvolution
 from ..memory.lesson_store import LessonStore
@@ -1071,6 +1072,7 @@ class ChatService:
         # Runtime state is authoritative in the same SQLite file as sessions,
         # but uses dedicated runtime_* tables and an independent store API.
         self._runtime_store = SQLiteRuntimeStore(config.store_path)
+        self._runtime_context = MatrixContextAdapter()
         self._branch_summary_lock = threading.Lock()
         self._branch_summary_tasks: set[str] = set()
         self._deep_research_lock = threading.Lock()
@@ -1968,6 +1970,7 @@ class ChatService:
                 "circuit_breaker": CircuitBreaker(),
                 "question": "",
                 "runtime_store": self._runtime_store,
+                "runtime_context": self._runtime_context,
                 "execution_policy": ExecutionPolicy(),
                 "user_id": "default",
             }
@@ -2189,6 +2192,7 @@ class ChatService:
                 "lesson_store": self._lesson_store,
                 "user_id": user_id,
                 "runtime_store": self._runtime_store,
+                "runtime_context": self._runtime_context,
                 "execution_policy": agent_policy or ExecutionPolicy(),
             },
             "thread_id": sid,
