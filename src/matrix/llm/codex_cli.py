@@ -292,8 +292,6 @@ class CodexCLIClient:
             "-c",
             f'model_reasoning_effort="{self.reasoning_effort}"',
             "-c",
-            "features.codex_hooks=false",
-            "-c",
             "features.hooks=true",
         ]
         if self.model != "codex-cli":

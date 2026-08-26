@@ -1211,7 +1211,7 @@ class ChatService:
                 codex_reasoning_effort=self.config.codex_reasoning_effort,
                 agnes_base_url=self.config.agnes_base_url,
                 max_tokens=16,
-                timeout_sec=min(self.config.agent_model_timeout_sec, 10.0),
+                timeout_sec=min(self.config.agent_model_timeout_sec, 30.0),
                 max_message_chars=500,
             )
             answer = probe_llm.complete(
