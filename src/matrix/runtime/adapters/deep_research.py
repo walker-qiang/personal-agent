@@ -739,7 +739,7 @@ class DeepResearchHandle:
             yield from self._fail(current, str(exc) or exc.__class__.__name__)
 
     def _parse_request(self) -> tuple[str, str]:
-        code_match = re.search(r"标的代码[:：]\s*([A-Za-z0-9_.-]+)", self.question)
+        code_match = re.search(r"(?:标的|基金)代码[:：]\s*([A-Za-z0-9_.-]+)", self.question)
         name_match = re.search(r"研究对象[:：]\s*(.+)", self.question)
         code = code_match.group(1).strip() if code_match else ""
         self.name = name_match.group(1).strip() if name_match else self.name
