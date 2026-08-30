@@ -2,7 +2,7 @@
 
 ## 概述
 
-Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个落地场景为投资分析员。后端为 Python FastAPI + LangGraph，当前默认前端为 React SPA。
+Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个落地场景为投资分析员。服务端为 Python FastAPI + LangGraph，通过 HTTP API 和 SSE 向外部客户端提供能力。
 
 在 `personal-system` 中，`personal-agent` 是独立的 Agent Application
 和 Runtime 执行引擎，不拥有 `personal-assets` 的事实，也不拥有
@@ -12,13 +12,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 ## 整体架构
 
 ```
-┌──────────────────────────────────────────────────┐
-│                    前端层                          │
-│  ┌─────────────────────┐  ┌───────────────────┐  │
-│  │         │  │ React SPA (默认 UI) │  ││  │     │  │ static/react-app/   │  ││  │          │  │ 服务路径: / 和 /react-app│ ││  └─────────┬───────────┘  └────────┬──────────┘  │
-└────────────┼───────────────────────┼──────────────┘
-             │  HTTP/SSE              │
-┌────────────┴───────────────────────┴──────────────┐
+┌────────────────────────────────────────────────────┐
 │                   服务层 (FastAPI)                  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
 │  │ 路由层    │ │ 中间件    │ │ 生命周期           │   │
@@ -30,7 +24,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 │  └──────────┘ └──────────┘ └──────────────────┘   │
 └────────────────────────────────────────────────────┘
              │
-┌────────────┴───────────────────────────────────────┐
+┌────────────┴────────────────────────────────────────┐
 │                   核心层                             │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
 │  │ Agent    │ │ LLM      │ │ 编排              │   │
@@ -50,16 +44,16 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 │  │ 熔断器    │ │ 事件系统  │ │                   │   │
 │  │ 优雅降级  │ │          │ │                   │   │
 │  └──────────┘ └──────────┘ └──────────────────┘   │
-└────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────┘
              │
-┌────────────┴───────────────────────────────────────┐
+┌────────────┴────────────────────────────────────────┐
 │                   基础设施层                          │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
 │  │ Store    │ │ Trace    │ │ Memory            │   │
 │  │ 会话持久化│ │ OTel 导出 │ │ 演化引擎          │   │
 │  │ SQLite   │ │ JSONL    │ │ 上下文压缩         │   │
 │  └──────────┘ └──────────┘ └──────────────────┘   │
-└────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────┘
 ```
 
 ## 领域边界
@@ -127,21 +121,12 @@ Tool Provider 只能执行请求中声明的工具，不能重新启动同一个
 
 ## 关键设计决策
 
-### React SPA 前端
+### API 与客户端边界
 
-Matrix 使用 React SPA 作为唯一前端界面。旧版前端已移除；当前 React
-SPA 同时通过根路径 `/` 和 `/react-app/` 提供访问。
-
-| 维度 | React SPA |
-|------|-----------|
-| 文件 | `static/react-app/` (构建产物) |
-| 服务路径 | `/` 和 `/react-app/` |
-| 定位 | 日常对话交互界面 |
-| 依赖 | React 18 + TypeScript + Vite |
-| 来源 | `src/matrix/web/` 源码构建 |
-| 构建方式 | `cd src/matrix/web && npm run build` |
-
-**重要规则**：React 构建产物输出到 `static/react-app/` 子目录。构建产物不纳入 Git，需要在本地执行前端构建。
+`personal-agent` 当前不内置 Web 管理界面，也不承担客户端页面渲染。
+外部客户端通过 HTTP API 和 SSE 接入，使用登录、聊天、会话、技能、工具、
+Runtime、记忆、Trace 和 MCP 等能力。`/docs`、`/redoc` 和 `/openapi.json`
+仅用于 API 调试与契约查看。
 
 ### 岗位制 Agent
 
@@ -286,7 +271,7 @@ commander_plan → _route_dag_first → [Send("runtime_delegate") × N 并行]
 
 #### 执行进度监控（P2）
 
-通过结构化进度事件实时反馈多步执行状态，前端 SSE 流中接收 `type: "progress"` 事件。
+通过结构化进度事件实时反馈多步执行状态，客户端从 SSE 流中接收 `type: "progress"` 事件。
 
 **事件类型**：
 
@@ -408,7 +393,7 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 - `mcp_browser_click`、`mcp_browser_type`、`mcp_browser_select_option`、`mcp_browser_press_key` — 浏览器交互
 - `mcp_browser_save_state`、`mcp_browser_restore_state` — 浏览器状态操作
 
-HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_request` 事件 → 前端展示确认对话框 → 用户确认/跳过 → 通过 `/chat/confirm` 恢复执行。
+HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_request` 事件 → 客户端展示确认界面 → 用户确认/跳过 → 通过 `/chat/confirm` 恢复执行。
 
 ### DataBus 上下文管理
 
@@ -443,7 +428,6 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
-| `/` | GET | Web UI（React SPA（/react-app 提供同样内容）） |
 | `/healthz` | GET | 健康检查（服务状态、LLM 可用性、provider/model） |
 
 ### 聊天与会话
@@ -538,7 +522,5 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | LLM | Codex CLI, DeepSeek；Agnes 用于图片/视频生成 |
 | 向量检索 | ChromaDB, sentence-transformers, BM25 |
 | 可观测 | OpenTelemetry (OTLP), SQLite Trace |
-| 前端 (主) | React 18 + TypeScript + Vite |
-| 前端 (React) | React 18, TypeScript, Vite 5 |
 | 存储 | SQLite (会话), 本地文件系统 (技能) |
 | MCP | mcp>=1.27.0, Playwright |

@@ -19,16 +19,7 @@ PUBLIC_PATHS = {
     "/docs",
     "/redoc",
     "/",
-    "/react-app",
-    "/react-app/",
 }
-
-# The SPA assets are public; API data, including Trace, still requires JWT.
-PUBLIC_PREFIXES = ("/react-app/",)
-
-# Static file extensions that don't need auth
-PUBLIC_SUFFIXES = {".js", ".css", ".png", ".jpg", ".svg", ".ico", ".woff2", ".map"}
-
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """JWT verification middleware.
@@ -41,14 +32,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         if path in PUBLIC_PATHS:
-            return await call_next(request)
-
-        # Allow public frontend asset prefixes only.
-        if path.startswith(PUBLIC_PREFIXES):
-            return await call_next(request)
-
-        # Allow static files (JS, CSS, images, etc.) without auth
-        if any(path.endswith(suffix) for suffix in PUBLIC_SUFFIXES):
             return await call_next(request)
 
         config = request.app.state.config
@@ -79,8 +62,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.user_id = user_id
             return await call_next(request)
 
-        # Legacy path: raw JWT in query param (kept for backward compatibility,
-        # e.g. older clients; the web frontend now uses one-time tickets).
+        # Legacy path: raw JWT in query param (kept for backward compatibility
+        # with older clients).
         token = request.query_params.get("token", "")
         if not token:
             return JSONResponse(

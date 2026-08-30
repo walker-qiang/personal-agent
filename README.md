@@ -1,6 +1,6 @@
 # Project Matrix — 个人智能协作网络
 
-基于“通用底座 + 领域聚焦”架构的 Agent 应用与 Runtime，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。顶层执行统一进入独立 Runtime；Runtime 负责可恢复 operation、approval、effect 和 session 状态。
+基于“通用底座 + 领域聚焦”架构的 Agent API 与 Runtime 服务，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。顶层执行统一进入独立 Runtime；Runtime 负责可恢复 operation、approval、effect 和 session 状态。
 
 在 `personal-system` 中，`personal-agent` 是通用 Agent Application
 和 Runtime 执行引擎。`personal-os` 拥有用户、Finance、Research、MCP
@@ -30,15 +30,13 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── observability/              # 可观测性（OTel、JSONL Trace）
 │   ├── orchestration/              # LangGraph 编排（图、节点、状态、反幻觉）
 │   ├── rag/                        # 向量检索（ChromaDB + BM25）
-│   ├── server/                     # FastAPI 服务（路由、中间件、静态文件）
+│   ├── server/                     # FastAPI API 服务（路由、中间件）
 │   ├── skills/                     # 技能加载与执行
 │   ├── tools/                      # 工具注册（finance/agnes/code/web/mcp/rag）
-│   ├── web/                        # 前端 React 应用（Vite + TypeScript）
 │   ├── config.py                   # 统一配置
 │   └── store.py                    # 持久化存储（SQLite）
 ├── docs/                           # 项目文档
 │   ├── architecture.md             # 当前系统架构
-│   ├── frontend-spec.md            # 当前前端规格
 │   ├── quality-gate-plan.md        # 当前质量门禁
 │   └── archive/                    # 已完成方案和历史差距记录
 ├── scripts/                        # 运维脚本
@@ -151,6 +149,9 @@ cp .env.example .env
 | `/mcp/servers` | GET/POST | MCP 服务器管理 |
 | `/mcp/servers/{name}` | PUT/DELETE | MCP 服务器更新/删除 |
 | `/mcp/servers/{name}/toggle` | POST | MCP 服务器启用/禁用 |
+
+服务本身不再内置 Web 管理界面。客户端通过 HTTP API 和 SSE 接入；
+`/docs`、`/redoc` 和 `/openapi.json` 仅用于 API 调试与契约查看。
 
 ## 当前执行边界
 

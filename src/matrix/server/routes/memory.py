@@ -1,7 +1,7 @@
 """Memory management API endpoints.
 
 Exposes user memories (preferences/policies), cross-session lessons,
-and memory evolution triggers to the frontend.
+and memory evolution triggers for API clients.
 
 Endpoints:
   GET    /memory/list            — list all memories with metadata

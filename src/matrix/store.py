@@ -221,7 +221,7 @@ class SessionStore:
         to show all sessions.
         """
         # branch_count: number of fork points (parent messages with >1 child)
-        # computed inline so the frontend doesn't need one request per session.
+        # computed inline so clients don't need one request per session.
         branch_subquery = (
             "SELECT COUNT(*) FROM ("
             "  SELECT parent_id FROM messages "

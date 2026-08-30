@@ -12,8 +12,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from .stream_ticket import StreamTicketStore
 
 from ..chat import ChatService
@@ -31,12 +30,6 @@ from .routes import auth, chat, health, memory, provider, runtime, sessions, too
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
-
-_REACT_INDEX_HTML = ""
-_react_index_path = Path(__file__).parent / "static" / "react-app" / "index.html"
-if _react_index_path.exists():
-    _REACT_INDEX_HTML = _react_index_path.read_text(encoding="utf-8")
-
 
 def _build_rag(config: AgentConfig, tools_registry: ToolRegistry) -> tuple[object, object | None]:
     """在工作线程中构建 RAG，避免阻塞 Agent HTTP 服务启动。"""
@@ -378,28 +371,5 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
 
     # Auth middleware — verify JWT on protected routes
     app.add_middleware(AuthMiddleware)
-
-    # Serve React SPA at root (LAST, so API routes take priority)
-    @app.get("/", include_in_schema=False)
-    async def serve_ui():
-        if _REACT_INDEX_HTML:
-            return HTMLResponse(_REACT_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-        return HTMLResponse("<h1>Matrix</h1><p>React SPA not found.</p>", status_code=404)
-
-    # Serve React SPA at /react-app/
-    @app.get("/react-app/", include_in_schema=False)
-    @app.get("/react-app", include_in_schema=False)
-    async def serve_react_app():
-        if _REACT_INDEX_HTML:
-            return HTMLResponse(_REACT_INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-        return HTMLResponse("<h1>Matrix</h1><p>React SPA not found.</p>", status_code=404)
-
-
-    # Mount React SPA static files (assets/) — after all routes
-    # NOTE: StaticFiles at "/" overrides the @app.get("/") route in Starlette.
-    # Mount at a sub-path instead to serve only asset files, not the root index.
-    react_dir = Path(__file__).parent / "static" / "react-app"
-    if react_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(react_dir / "assets"), html=False), name="static")
 
     return app
