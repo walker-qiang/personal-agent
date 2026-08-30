@@ -89,6 +89,13 @@ def _normalize_research_result(
         subject.setdefault("code", code)
         subject.setdefault("name", name)
 
+    decision = normalized.get("decision")
+    if isinstance(decision, dict):
+        review_date = str(decision.get("review_date") or "").strip()
+        if review_date and research_date and review_date[:10] <= research_date[:10]:
+            # A same-day review date is the current run, not a future review plan.
+            decision["review_date"] = ""
+
     metrics = normalized.get("metrics")
     if isinstance(metrics, dict):
         normalized["metrics"] = [
@@ -832,7 +839,7 @@ def _select_latest_official_url(
     if not candidates:
         return None
 
-    def sort_key(item: dict[str, Any]) -> tuple[str, int, int]:
+    def sort_key(item: dict[str, Any]) -> tuple[str, int, int, int]:
         explicit = str(item.get("report_period") or "").strip()
         period = explicit or _infer_report_period_from_text(
             " ".join(str(item.get(key) or "") for key in ("title", "url", "summary"))
@@ -840,6 +847,29 @@ def _select_latest_official_url(
         text = unquote(
             " ".join(str(item.get(key) or "") for key in ("title", "url", "summary"))
         ).lower()
+        report_type = str(item.get("report_type") or "").lower()
+        is_summary = any(
+            token in text
+            for token in ("摘要", "summary", "abstract")
+        )
+        is_main_filing = report_type in {
+            "annual_report", "interim_report", "quarterly_report",
+        } or any(
+            token in text
+            for token in (
+                "年度报告", "年报", "半年度报告", "半年报",
+                "季度报告", "一季度报告", "二季度报告",
+                "三季度报告", "四季度报告",
+                "annual report", "interim report", "quarterly report",
+            )
+        )
+        # CNINFO returns several same-day official PDFs. Prefer the main
+        # financial statement over summaries and related appendices.
+        filing_priority = (
+            2 if is_summary else
+            4 if is_main_filing else
+            1
+        )
         is_document = int(
             ".pdf" in text
             or any(token in text for token in ("annual report", "interim", "业绩", "季报", "中期"))
@@ -848,7 +878,7 @@ def _select_latest_official_url(
         # Keep the requested year as a tie-breaker only; it must not outrank a
         # newer report whose title happens to be generic.
         year_hint = int(bool(research_year and research_year in text))
-        return (period or "0000-00-00", verified + year_hint, is_document)
+        return (period or "0000-00-00", filing_priority, verified + year_hint, is_document)
 
     return max(candidates, key=sort_key).get("url")
 

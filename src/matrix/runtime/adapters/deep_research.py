@@ -525,44 +525,68 @@ class DeepResearchHandle:
                         "url": candidate["source_url"],
                         "tier": candidate.get("source_level", ""),
                     })
-            official_url = self.workflow.select_latest_official_url(
-                sources, self.research_date[:4] or time.strftime("%Y")
-            )
-            if official_url and "personal_os.web_fetch" in agent_tools.tool_names():
-                tool_name = "personal_os.web_fetch"
-                arguments = {"url": official_url}
-                thinking = {"type": "thinking", "content": f"正在调用 {tool_name} 核验官方正文…"}
-                current, event = self.workflow._commit(
-                    current, OperationPhase.EXECUTING_TOOLS,
-                    RuntimeEventType.TOOL_START,
-                    {"tool": tool_name, "arguments": arguments}, thinking,
-                )
-                self._events.append(event)
-                yield event
-                current, event = self.workflow._commit(
-                    current, OperationPhase.EXECUTING_TOOLS,
-                    RuntimeEventType.TOOL_UPDATE,
-                    {"tool": tool_name, "arguments": arguments},
-                    {"type": "tool_call", "name": tool_name, "args": arguments},
-                )
-                self._events.append(event)
-                yield event
-                result, error = self._call_with_retry(tool_name, arguments)
-                if error:
-                    result = {"error": error}
-                evidence.append({"tool": tool_name, "result": result})
-                result_event = {
-                    "type": "tool_result", "name": tool_name, "result": result,
-                    "error": error, "preview": self.workflow.preview_json(result),
-                }
-                current, event = self.workflow._commit(
-                    current, OperationPhase.EXECUTING_TOOLS,
-                    RuntimeEventType.TOOL_END,
-                    {"tool": tool_name, "arguments": arguments, "result": result,
-                     "error": error}, result_event,
-                )
-                self._events.append(event)
-                yield event
+            if "personal_os.web_fetch" in agent_tools.tool_names():
+                remaining_sources = list(sources)
+                for candidate_index in range(3):
+                    official_url = self.workflow.select_latest_official_url(
+                        remaining_sources, self.research_date[:4] or time.strftime("%Y")
+                    )
+                    if not official_url:
+                        break
+
+                    tool_name = "personal_os.web_fetch"
+                    arguments = {"url": official_url}
+                    thinking = {
+                        "type": "thinking",
+                        "content": (
+                            f"正在调用 {tool_name} 核验官方正文"
+                            + (f"（候选 {candidate_index + 1}）…" if candidate_index else "…")
+                        ),
+                    }
+                    current, event = self.workflow._commit(
+                        current, OperationPhase.EXECUTING_TOOLS,
+                        RuntimeEventType.TOOL_START,
+                        {"tool": tool_name, "arguments": arguments}, thinking,
+                    )
+                    self._events.append(event)
+                    yield event
+                    current, event = self.workflow._commit(
+                        current, OperationPhase.EXECUTING_TOOLS,
+                        RuntimeEventType.TOOL_UPDATE,
+                        {"tool": tool_name, "arguments": arguments},
+                        {"type": "tool_call", "name": tool_name, "args": arguments},
+                    )
+                    self._events.append(event)
+                    yield event
+                    result, error = self._call_with_retry(tool_name, arguments)
+                    if error:
+                        result = {"error": error}
+                    evidence.append({"tool": tool_name, "result": result})
+                    result_event = {
+                        "type": "tool_result", "name": tool_name, "result": result,
+                        "error": error, "preview": self.workflow.preview_json(result),
+                    }
+                    current, event = self.workflow._commit(
+                        current, OperationPhase.EXECUTING_TOOLS,
+                        RuntimeEventType.TOOL_END,
+                        {"tool": tool_name, "arguments": arguments, "result": result,
+                         "error": error}, result_event,
+                    )
+                    self._events.append(event)
+                    yield event
+
+                    verified = (
+                        not error
+                        and isinstance(result, dict)
+                        and result.get("source_tier") == "official"
+                        and result.get("verification_status") == "verified"
+                    )
+                    if verified:
+                        break
+                    remaining_sources = [
+                        item for item in remaining_sources
+                        if str(item.get("url") or item.get("source_url") or "").strip() != official_url
+                    ]
 
             model_evidence = _model_evidence(evidence)
             evidence_text = json.dumps(
@@ -932,7 +956,11 @@ class DeepResearchWorkflow:
         return """你是筋斗云的深度投资研究员。
 你只能使用下方 personal-os 工具证据，不得使用记忆补数字，不得编造来源。
 工具可用性摘要中的 available 表示该工具已成功返回；禁止把 available 工具说成“未提供、缺失或不可用”。
-如果工具已返回数据但本次没有使用，必须说“本次未采用该工具结果”，不得说“没有该数据”。
+如果工具已返回数据但本次没有使用，必须说“本次未采用该工具结果”，不得说“没有该数据”；
+这类工具审计说明只能放入 risks 或 sources，summary 只写面向用户的研究结论、
+是否需要关注、动作和置信度，不要在 summary 中描述工具调用过程。
+decision.review_date 只能填写研究日期之后的明确未来复查日期；如果没有明确日期，留空，
+不要把 research_date 作为下次复查日期。
 请输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码围栏。
 必须包含 schema_version=2、type=investment-research、status、object_type、
 subject、research_date、data_date、latest_report_period、
@@ -1027,6 +1055,9 @@ TOOL AVAILABILITY:
             "只输出一个合法 JSON 对象，不要 Markdown，不要解释。\n"
             "这是一次修复调用，不是摘要调用。即使上一版缺少字段，也必须补齐完整结构；"
             "任何数组都不允许省略、设为空或用 null 代替。输出前请逐项检查每个数组的条目数。"
+            "summary 只写面向用户的研究结论、是否需要关注、动作和置信度；工具调用及未采用结果的审计说明只能放入 risks 或 sources。"
+            "decision.review_date 只能填写研究日期之后的明确未来复查日期；如果没有明确日期，留空，"
+            "不要把 research_date 作为下次复查日期。"
             "缺少事实时，只能根据 PERSONAL-OS EVIDENCE 写出具体的“待核实事项”，"
             "不能用“暂无”“待补充”“N/A”等空泛占位语句。\n"
             "必须保留 schema_version=2、type=investment-research、subject、research_date、"
