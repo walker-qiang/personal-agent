@@ -8,6 +8,8 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 和 Runtime 执行引擎，不拥有 `personal-assets` 的事实，也不拥有
 `personal-os` 的用户和业务领域。用户、Finance、Research、durable write
 由 `personal-os` 负责；Agent 通过通用 Tool Provider 协议使用这些能力。
+Application/Adapter 层可从配置的 `personal-assets` 路径只读加载 Skills、RAG
+文档和启动时 Memory projection，但不直接修改 Vault，也不执行 Vault Git。
 
 ## 整体架构
 
@@ -51,7 +53,7 @@ Project Matrix 是一个基于"岗位制"设计的通用 Agent 底座，首个�
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
 │  │ Store    │ │ Trace    │ │ Memory            │   │
 │  │ 会话持久化│ │ OTel 导出 │ │ 演化引擎          │   │
-│  │ SQLite   │ │ JSONL    │ │ 上下文压缩         │   │
+│  │ SQLite   │ │ SQLite   │ │ 上下文压缩         │   │
 │  └──────────┘ └──────────┘ └──────────────────┘   │
 └─────────────────────────────────────────────────────┘
 ```
@@ -89,10 +91,13 @@ Application 层负责：
 
 工具分为三类：
 
-1. 通用工具：web、code、通用 MCP、媒体生成，放在 Agent 或
-   `personal-tools`，不定义个人事实。
-2. 业务工具：Finance、Research、个人资产读取，由 `personal-os`
-   提供。
+1. 通用工具：当前运行时的 web、code、MCP 和媒体生成由
+   `personal-agent` 注册；`personal-tools` 当前提供独立的捕获工具和
+   Codex Skill，不是 Agent 运行时工具注册中心。未来接入其他独立通用工具时，
+   仍不得定义个人事实。
+2. 业务工具：Finance、Research 等产品数据优先由 `personal-os` 提供；
+   Skills、RAG 和启动时 Memory projection 允许通过配置路径只读加载
+   `personal-assets`，属于 Adapter 投影，不转移事实所有权。
 3. durable write 工具：只调用 `personal-os` 的 operation-specific
    API，必须经过 Runtime approval 和 API/AssetStore 校验。
 
@@ -342,7 +347,7 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 | 工作记忆 | `state.working_memory` (pinned + insights) | 当前会话的临时上下文 |
 | 情景记忆 | SQLite `messages` 表 + `get_history()`（返回含 `message_id` 的消息树） | 历史对话消息 |
 | 语义记忆 | RAG (ChromaDB + BM25) | 长期知识检索 |
-| 程序记忆 | Skills (YAML) | 可复用的执行流程 |
+| 程序记忆 | Skills（目录化 `SKILL.md` + YAML frontmatter） | 可复用的执行流程 |
 | 用户画像 | `user_profile` 表 | 用户偏好、策略 |
 
 #### MemoryEvolution 4 阶段管线
@@ -429,6 +434,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | 路径 | 方法 | 功能 |
 |------|------|------|
 | `/healthz` | GET | 健康检查（服务状态、LLM 可用性、provider/model） |
+| `/rag/warmup` | POST | 异步启动 RAG 初始化 |
 
 ### 聊天与会话
 
@@ -452,6 +458,7 @@ HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_re
 | `/sessions/batch-archive` | POST | 批量归档（隐藏）会话 |
 | `/sessions/batch-unarchive` | POST | 批量取消归档 |
 | `/sessions/{id}/branch` | POST | 从指定消息创建会话分支 |
+| `/sessions/{id}/branch-summaries` | GET | 获取已放弃分支的生成摘要 |
 | `/sessions/{id}/branches` | GET | 列出会话的所有分支 |
 | `/sessions/{id}/leaf` | GET | 获取会话当前叶子节点 |
 
@@ -479,6 +486,21 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/api/provider` | GET | 列出可用 LLM/图像/视频提供商 |
 | `/api/provider` | POST | 切换会话的 LLM 提供商/模型 |
 
+### Runtime 与记忆
+
+| 路径 | 方法 | 功能 |
+|------|------|------|
+| `/api/runtime/operations` | GET | 查询当前用户的 Runtime operations |
+| `/api/runtime/approvals` | GET | 查询待处理审批 |
+| `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件 |
+| `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
+| `/memory/list` | GET | 查询用户记忆 |
+| `/memory` | POST | 创建用户记忆 |
+| `/memory/{key}` | DELETE | 删除用户记忆 |
+| `/memory/evolve` | POST | 手动触发记忆演化 |
+| `/memory/lessons` | GET | 查询跨会话经验教训 |
+| `/memory/lessons/{id}` | DELETE | 删除经验教训 |
+
 ### 认证
 
 | 路径 | 方法 | 功能 |
@@ -486,12 +508,13 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/api/auth/register` | POST | 注册新用户 |
 | `/api/auth/login` | POST | 用户登录 |
 | `/api/auth/logout` | POST | 用户登出 |
+| `/api/auth/stream-ticket` | POST | 创建 SSE 流式请求票据 |
 
 ### 文件上传
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
-| `/api/upload` | POST | 上传文件（PNG/JPEG/PDF/TXT/MD/CSV/JSON/YAML，最大 10MB） |
+| `/api/upload` | POST | 上传文件（PNG/JPEG/WebP/GIF/PDF/TXT/MD/CSV/JSON/YAML/YML，最大 10MB） |
 
 ### Trace 追踪
 

@@ -3,9 +3,13 @@
 基于“通用底座 + 领域聚焦”架构的 Agent API 与 Runtime 服务，内置 5 个 Agent（Commander + 4 个 Domain Agent），覆盖编程、投资、知识管理、媒体生成四大领域。顶层执行统一进入独立 Runtime；Runtime 负责可恢复 operation、approval、effect 和 session 状态。
 
 在 `personal-system` 中，`personal-agent` 是通用 Agent Application
-和 Runtime 执行引擎。`personal-os` 拥有用户、Finance、Research、MCP
-配置和 durable write；`personal-agent` 只接收不透明运行上下文和受控
-Tool Provider 能力，不拥有 `personal-assets` 的长期事实。
+和 Runtime 执行引擎。`personal-os` 拥有用户、Finance、Research
+和 durable write；`personal-agent` 负责自身的 MCP 客户端配置与注册，
+其 Runtime Core 只接收不透明运行上下文
+和受控 Tool Provider 能力，整个服务不拥有 `personal-assets` 的长期事实。
+Application/Adapter 层可从配置的 `personal-assets` 路径只读加载 Skills、RAG
+文档和启动时 Memory projection；`personal-agent` 不直接修改 Vault，也不对
+Vault 执行 Git 操作。
 
 ## 架构
 
@@ -27,7 +31,7 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── guardrails/                 # 安全护栏（输入/输出/间接注入/隐私/Tool）
 │   ├── llm/                        # LLM 客户端（Codex / DeepSeek；Agnes 用于媒体生成）
 │   ├── memory/                     # 记忆演化（MemoryEvolution 4 阶段管线）
-│   ├── observability/              # 可观测性（OTel、JSONL Trace）
+│   ├── observability/              # 可观测性（SQLite Trace、OTel）
 │   ├── orchestration/              # LangGraph 编排（图、节点、状态、反幻觉）
 │   ├── rag/                        # 向量检索（ChromaDB + BM25）
 │   ├── server/                     # FastAPI API 服务（路由、中间件）
@@ -161,6 +165,11 @@ cp .env.example .env
 - Memory 和 Skill mutation 调用 `personal-os /api/vault/*`，由 AssetStore 提交和同步。
 - Finance/Research 的 `personal_os.*` 工具属于远程 Tool Provider connector；
   Runtime Core 不直接依赖 `personal-os` 业务对象。
+- 当前运行时的 web、code、MCP 和媒体生成工具由 `personal-agent` 注册；
+  `personal-tools` 当前提供独立的捕获工具和 Codex Skill，不是 Agent
+  运行时工具注册中心。
+- Skills、RAG 和启动时 Memory projection 可只读访问 `personal-assets`；所有
+  durable mutation 仍由 `personal-os` API 和 AssetStore 执行。
 - Runtime SQLite 保存可恢复运行态，不是 finance facts 或 broader knowledge 的事实源。
 
 ## 开发

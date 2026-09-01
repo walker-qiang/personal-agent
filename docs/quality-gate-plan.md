@@ -14,7 +14,7 @@
 | 层级 | 状态 | 实现内容 |
 |------|------|----------|
 | Layer 1 | ✅ 已完成 | pre-push hook + check-skills CLI + install-hooks.sh |
-| Layer 2 | ✅ 已完成 | 20 条评估数据集 + regression CLI + 基线对比逻辑 + 27 个单元测试 |
+| Layer 2 | ✅ 已完成 | 23 条评估数据集 + regression CLI + 基线对比逻辑 + 27 个单元测试 |
 | Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge + 质量基线对比逻辑 |
 | 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
 
@@ -28,7 +28,7 @@
 |------|------|------|
 | 单元测试 | 887 个已收集测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
-| 评估数据集 | eval_dataset.json（20 条 case） | 已扩展，覆盖 6 大场景 |
+| 评估数据集 | eval_dataset.json（23 条 case） | 已扩展，覆盖 7 大场景 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
 | Git hooks | pre-push hook 已安装并启用 | Layer 1 已完成 |
 | 基线管理 | baseline.py + test_baseline.py（27 个测试） | 已完成回归和质量基线对比 |
@@ -37,7 +37,7 @@
 
 1. ~~**无自动触发**~~：✅ pre-push hook 已安装，每次 push 自动运行
 2. ~~**无基线对比**~~：✅ baseline.py 实现回归和质量基线对比
-3. ~~**用例不足**~~：✅ 已扩展到 20 条，覆盖 6 大场景
+3. ~~**用例不足**~~：✅ 已扩展到 23 条，覆盖 7 大场景
 4. ~~**skill 变更无校验**~~：✅ check-skills 命令校验所有 skill 格式
 
 ## 方案设计：三层质量门禁
@@ -106,14 +106,14 @@ personal-agent/
 
 ```bash
 #!/bin/bash
-# pre-push hook: fast quality gate
-# 仅检查将要推送的 commit 涉及的文件变更
+# pre-push hook: Layer 1 fast gate + change detection
 
 set -e
 
-# 1. 单元测试 (fail-fast, 30s 超时)
+# 脚本优先选择 .venv/bin/python，并校验 Python 3.10+。
+# 1. 单元测试 (fail-fast)
 echo "▶ Running unit tests..."
-./.venv/bin/python -m pytest tests/ -x -q --timeout=30 2>&1 | tail -5
+"$PYTHON_BIN" -m pytest tests/ -x -q 2>&1 | tail -5
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "✗ Unit tests failed. Push blocked."
     exit 1
@@ -121,7 +121,7 @@ fi
 
 # 2. Skill 格式校验
 echo "▶ Validating skills..."
-./.venv/bin/python -m matrix.evaluation.cli check-skills 2>&1
+"$PYTHON_BIN" -m matrix.evaluation.cli check-skills 2>&1
 if [ $? -ne 0 ]; then
     echo "✗ Skill validation failed. Push blocked."
     exit 1
@@ -180,7 +180,7 @@ done
 ### 执行内容
 
 ```
-1. 加载评估数据集 (tests/baselines/eval_dataset.json, ~20 条 case)
+1. 加载评估数据集 (tests/baselines/eval_dataset.json, 23 条 case)
 2. 启动 ChatService (需 .env 配置 LLM API key)
 3. 逐条运行 EvalRunner + DeterministicEvaluator
 4. 加载基线 (tests/baselines/regression_baseline.json)
@@ -191,6 +191,9 @@ done
 ### 基线文件格式
 
 `tests/baselines/regression_baseline.json`:
+
+当前 checked-in regression/quality baseline 各覆盖原有 20 条 case；新增的
+3 条 browser case 按“新增 case 无基线”规则记录但不阻断，直到下一次明确更新基线。
 
 ```json
 {
@@ -233,7 +236,7 @@ done
 
 ### 评估数据集设计
 
-已从 5 条扩展到 20 条，按维度覆盖：
+已从 5 条扩展到 23 条，按维度覆盖：
 
 | 维度 | Case 数 | 示例 |
 |------|---------|------|
@@ -243,6 +246,7 @@ done
 | 媒体生成 | 1 | 图片生成 |
 | 多步骤任务 | 2 | 持仓+新闻、组合分析+建议 |
 | 边界场景 | 4 | 无效股票、英文输入、超出范围、乱码输入 |
+| 浏览器任务 | 3 | 动态提取、搜索交互、Browser 与静态 fetch 选择 |
 
 每条 case 配置：
 - `case_id`: 唯一标识
@@ -342,8 +346,6 @@ done
    quality               运行质量评估, 对比基线 (Layer 3)
    update-baseline <type>  更新基线文件 (regression | quality)
    list-cases            列出当前数据集所有 case
-   diff-baseline         对比两次运行结果
-
  Options:
    --dataset <path>      指定数据集文件 (默认 tests/baselines/eval_dataset.json)
    --baseline <path>     指定基线文件
@@ -362,7 +364,7 @@ personal-agent/
 │   └── baseline.py            # 基线加载、对比、更新逻辑
 ├── tests/
 │   └── baselines/
-│       ├── eval_dataset.json  # 评估数据集 (~20 条)
+│       ├── eval_dataset.json  # 评估数据集 (23 条)
 │       ├── regression_baseline.json  # Layer 2 基线
 │       └── quality_baseline.json     # Layer 3 基线
 ├── scripts/
@@ -495,7 +497,7 @@ git push
 
 # 2. 运行回归评估 (Layer 2)
 ./.venv/bin/python -m matrix.evaluation.cli regression
-# → 20 条 case 逐条运行
+# → 23 条 case 逐条运行
 # → 对比基线, 检查有无回归
 # → 无回归 → 可以发布
 
@@ -541,7 +543,7 @@ git push --no-verify
 
 | 步骤 | 文件 | 状态 |
 |------|------|------|
-| 扩展评估数据集到 20 条 | `tests/baselines/eval_dataset.json` | ✅ |
+| 扩展评估数据集到 23 条 | `tests/baselines/eval_dataset.json` | ✅ |
 | 实现 regression 命令 | `src/matrix/evaluation/cli.py` | ✅ |
 | 实现基线对比逻辑 | `src/matrix/evaluation/baseline.py` | ✅ |
 | 添加基线对比单元测试 | `tests/test_baseline.py`（27 个测试） | ✅ |

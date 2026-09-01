@@ -202,6 +202,8 @@ def load_config() -> AgentConfig:
         root / "var" / "cache" / "finance.sqlite",
     )
 
+    # The legacy .jsonl input remains accepted; TraceLogger replaces its
+    # suffix with .db before opening the SQLite store.
     # Trace path: PERSONAL_OS_AGENT_TRACE_PATH > MATRIX_TRACE_PATH > default
     trace_path = _resolve_path(
         [ENV_OS_TRACE_PATH, ENV_TRACE_PATH],

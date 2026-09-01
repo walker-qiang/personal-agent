@@ -2,11 +2,15 @@
 
 - 本仓库是 Project Matrix 的通用 Agent 底座，独立于 `personal-os`。
 - 新增或更新项目文档时默认使用中文；代码标识、API path、env var、文件路径和约定术语可保留英文。
-- 不修改 `personal-os` 代码；与 `personal-os` 的集成通过 HTTP 代理（`agent.go`）和共享 SQLite cache 实现。
+- 不修改 `personal-os` 代码；与 `personal-os` 的集成通过 HTTP 代理（`agent.go`）、
+  远程 Tool Provider 和共享只读 SQLite cache 实现。
 - 不把运行态提交到 Git：`.env`、`var/`、`__pycache__`、`*.pyc`、`dist`、`build` 都必须忽略。
-- `var/` 下的文件只是可重建的本地 cache，不提交。
+- `var/` 保存本地 cache 和可丢弃的运行态，不是 durable fact source，不提交。
+- 配置指向 `personal-assets` 的 Skills、RAG 和 Memory projection 只允许读取；
+  `personal-agent` 不直接修改 Vault，也不对 Vault 执行 Git 操作。
 - 默认 Agent mode 为只读；受控写操作必须通过 `personal-os` API、Runtime approval 和明确 allowlist。
-- 工具调用必须记录审计日志（JSONL trace）。
+- 工具调用必须记录审计日志（SQLite Trace；兼容输入路径可保留历史 `.jsonl`
+  后缀，`TraceLogger` 会将其替换为 `.db` 后写入，不会创建 JSONL 文件）。
 - 代码风格：类型注解、dataclass、Protocol、无隐式全局状态。
 # 工具错误信息规范
 

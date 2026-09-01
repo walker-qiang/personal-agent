@@ -1,4 +1,4 @@
-"""Observability: structured tracing with SQLite storage and web panel.
+"""Observability: structured tracing with SQLite storage and query APIs.
 
 Replaces the old JSONL TraceLogger with SQLite-backed structured storage
 that supports querying by session_id, event type, and time range.
