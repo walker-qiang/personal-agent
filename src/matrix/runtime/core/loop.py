@@ -677,7 +677,11 @@ def _commit_snapshot(
     operation: OperationState,
     state: dict[str, Any],
 ) -> OperationState:
-    next_state = replace(operation, state=dict(state), version=operation.version + 1)
+    # Snapshot updates are patches: preserve the request contract and other
+    # durable fields when a caller only updates one part of the runtime state.
+    merged_state = dict(operation.state)
+    merged_state.update(state)
+    next_state = replace(operation, state=merged_state, version=operation.version + 1)
     store.commit(StateTransition(previous_version=operation.version, new_state=next_state))
     return next_state
 
