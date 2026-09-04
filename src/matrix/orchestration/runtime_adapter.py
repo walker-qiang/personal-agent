@@ -225,6 +225,8 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
     if result.outcome.value == "suspended" and result.suspension is not None:
         action = {
             "approval_id": result.suspension.approval_id,
+            "approval_set_id": result.suspension.approval_set_id,
+            "approval_ids": list(result.suspension.approval_ids),
             "operation_id": handle.operation_id,
             "name": result.suspension.payload.get("tool_name", ""),
             "args": result.suspension.payload.get("arguments", {}),

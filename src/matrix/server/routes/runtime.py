@@ -42,7 +42,12 @@ async def list_approvals(
     )
     return {
         "approvals": [
-            _approval_dict(approval, store.load(_user_id(request), approval.operation_id))
+            _approval_dict(
+                approval,
+                store.load(_user_id(request), approval.operation_id),
+                store.get_approval_set(_user_id(request), approval.approval_set_id)
+                if approval.approval_set_id else None,
+            )
             for approval in approvals
         ]
     }
@@ -142,9 +147,16 @@ def _operation_dict(operation: OperationState) -> dict:
     }
 
 
-def _approval_dict(approval: Approval, operation: OperationState | None) -> dict:
+def _approval_dict(
+    approval: Approval,
+    operation: OperationState | None,
+    approval_set=None,
+) -> dict:
     return {
         "approval_id": approval.approval_id,
+        "approval_set_id": approval.approval_set_id,
+        "approval_set_status": approval_set.status.value if approval_set else None,
+        "approval_set_version": approval_set.version if approval_set else None,
         "operation_id": approval.operation_id,
         "session_id": operation.session_id if operation else "",
         "tool_call_id": approval.tool_call_id,

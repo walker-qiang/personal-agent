@@ -20,6 +20,29 @@ class ApprovalDecision(str, Enum):
     SKIP = "skip"
 
 
+class ApprovalSetStatus(str, Enum):
+    PENDING = "pending"
+    PARTIALLY_DECIDED = "partially_decided"
+    APPROVED = "approved"
+    SKIPPED = "skipped"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class ApprovalSet:
+    """Durable decision boundary for one suspended operation or workflow step."""
+
+    approval_set_id: str
+    owner_id: str
+    operation_id: str
+    orchestration_run_id: str = ""
+    status: ApprovalSetStatus = ApprovalSetStatus.PENDING
+    version: int = 0
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
 @dataclass(frozen=True)
 class Approval:
     approval_id: str
@@ -35,3 +58,9 @@ class Approval:
     version: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    approval_set_id: str = ""
+
+
+# The Runtime uses Approval for the persisted request shape.  Keep the
+# domain name available for callers that prefer the workflow terminology.
+ApprovalRequest = Approval

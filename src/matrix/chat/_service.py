@@ -16,7 +16,6 @@ from typing import Any, Callable, Iterator, Protocol
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphInterrupt
-from langgraph.types import Command
 
 from ..agent import AgentRegistry, resolve_agent_policy
 from ..agent.commander import COMMANDER
@@ -1097,8 +1096,6 @@ class ChatService:
         self._checkpointer = SqliteSaver(self._checkpoint_conn)
         self._compiled_graph = self._graph.compile(checkpointer=self._checkpointer)
 
-        # Store pending confirmations for HITL resume
-        self._pending_confirms: dict[str, dict[str, Any]] = {}
         # Runtime state is authoritative in the same SQLite file as sessions,
         # but uses dedicated runtime_* tables and an independent store API.
         self._runtime_store = SQLiteRuntimeStore(config.store_path)
@@ -1274,7 +1271,8 @@ class ChatService:
             else:
                 reset = self.store.reset(session_id, user_id=user_id)
             if reset:
-                self._runtime_store.delete_session_entries(user_id, session_id)
+                self._prune_checkpoints(session_id, keep_latest=False)
+                self._runtime_store.delete_session_runtime(user_id, session_id)
             return reset
         return True
 
@@ -1565,15 +1563,17 @@ class ChatService:
         session_llm = self._get_llm(sid, user_id=user_id)
         # Top-level execution is Runtime-managed.  The legacy ReAct loop is
         # retained only for nested Agent-as-Tool compatibility in commander.py.
-        runtime_mode = "runtime"
 
         initial_state = AgentState(
             user_message=text, session_id=sid, call_id=call_id,
             reflexion_max=0 if mode == "deep_research" else self.config.reflexion_max_attempts,
             attachments=attachments,
             owner_id=user_id,
-            runtime_mode=runtime_mode,
             orchestration_run_id=call_id,
+        )
+        self._runtime_store.ensure_orchestration_run(
+            call_id, user_id, sid, graph_thread_id=sid,
+            metadata={"mode": mode},
         )
 
         self._backfill_runtime_history(user_id, sid, history)
@@ -1622,7 +1622,7 @@ class ChatService:
                 except GraphInterrupt as gi:
                     interrupted = True
                     yield from self._handle_hitl_interrupt(
-                        gi, sid, graph_config, session_llm, user_id,
+                        gi, sid,
                     )
         except GeneratorExit:
             raise
@@ -1786,80 +1786,29 @@ class ChatService:
             SSE events from the resumed graph execution.
         """
         started = time.perf_counter()
-        pending = self._pending_confirms.get(session_id)
-        runtime_operation = self._runtime_store.find_active(user_id, session_id)
-        if runtime_operation is not None:
-            yield from self._resume_runtime_chat(
-                runtime_operation.operation_id, session_id, decision, user_id,
-            )
-            return
-        if not pending:
-            yield {"type": "error", "message": "no pending confirmation for this session"}
-            yield {"type": "done", "session_id": session_id, "duration_ms": 0}
-            return
-        if pending.get("user_id") != user_id:
-            yield {"type": "error", "message": "session not found or belongs to another user"}
-            yield {"type": "done", "session_id": session_id, "duration_ms": 0}
-            return
-        self._pending_confirms.pop(session_id, None)
-
-        graph_config = pending["config"]
-        # Ensure the resumed graph has an event queue for real-time streaming
-        if "event_queue" not in graph_config.get("configurable", {}):
-            graph_config.setdefault("configurable", {})["event_queue"] = queue.Queue()
-        session_llm = pending["session_llm"]
-        user_id = pending["user_id"]
-
-        logger.info("hitl: resuming session=%s decision=%s", session_id, decision)
-
-        try:
-            final_state = yield from self._stream_graph_events(
-                Command(resume=decision), graph_config, emit_classify=False,
-            )
-
-            # Yield final answer
-            final_answer = final_state.get("final_answer", "")
-            # FINAL SAFETY NET: strip any leaked verification tags (same as normal path)
-            if final_answer:
-                final_answer = _strip_all_verification_tags(final_answer)
-            if not final_answer:
-                # Graceful degradation: no answer produced after resume
-                final_answer = "抱歉，恢复会话后未能生成回复。请重新提问。"
-            yield {"type": "token", "content": final_answer}
-
-        except GraphInterrupt as gi:
-            # Another confirmation needed — update pending confirms so session can recover
-            interrupt_value = gi.args[0] if gi.args else {}
-            pending_actions = interrupt_value.get("actions", [])
-            logger.info(
-                "hitl: second confirm_required session=%s actions=%d",
-                session_id, len(pending_actions),
-            )
-            self._pending_confirms[session_id] = {
-                "config": graph_config,
-                "session_llm": session_llm,
-                "user_id": user_id,
-            }
+        runtime_operations = self._runtime_store.list_waiting_approvals(user_id, session_id)
+        if runtime_operations:
+            for runtime_operation in runtime_operations:
+                yield from self._resume_runtime_chat(
+                    runtime_operation.operation_id, session_id, decision, user_id,
+                    include_done=False,
+                )
             yield {
-                "type": "confirm_required",
-                "actions": pending_actions,
+                "type": "done",
                 "session_id": session_id,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
             }
-        except GeneratorExit:
-            raise
-        except Exception as err:
-            logger.error("resume error: %s\n%s", err, traceback.format_exc())
-            yield {"type": "error", "message": "恢复会话失败，请稍后重试"}
-        finally:
-            self._prune_checkpoints(session_id, keep_latest=False)
+            return
+        yield {"type": "error", "message": "no pending confirmation for this session"}
         yield {
             "type": "done",
             "session_id": session_id,
-            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "duration_ms": 0,
         }
 
     def _resume_runtime_chat(
         self, operation_id: str, session_id: str, decision: str, user_id: str,
+        include_done: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """Resume durable Runtime state after a process restart."""
         started = time.perf_counter()
@@ -1885,11 +1834,21 @@ class ChatService:
                 ),
             )
             pending = operation.state.get("pending_tool_call", {})
+            approval_set_id = str(pending.get("approval_set_id", ""))
+            approval_ids = [
+                str(item) for item in pending.get("approval_ids", [])
+                if str(item)
+            ]
             handle = runtime.resume(
                 user_id, operation_id,
                 ResumeInput(
                     kind="approval", decision=decision,
-                    payload={"approval_id": pending.get("approval_id", "")},
+                    payload={
+                        "approval_id": pending.get("approval_id", ""),
+                        "approval_set_id": approval_set_id,
+                        "approval_ids": approval_ids,
+                        "expected_operation_version": operation.version,
+                    },
                 ),
             )
             events = list(handle.events())
@@ -1909,7 +1868,18 @@ class ChatService:
                 yield {"type": "token", "content": result.final_message}
                 self._remember(session_id, "", result.final_message, user_id=user_id)
             if result.outcome.value == "suspended":
-                yield {"type": "confirm_required", "actions": [result.suspension.payload if result.suspension else {}], "session_id": session_id}
+                suspension = result.suspension
+                yield {
+                    "type": "confirm_required",
+                    "actions": [{
+                        **(suspension.payload if suspension else {}),
+                        "approval_id": suspension.approval_id if suspension else "",
+                        "approval_set_id": suspension.approval_set_id if suspension else "",
+                        "approval_ids": list(suspension.approval_ids) if suspension else [],
+                        "operation_id": operation_id,
+                    }],
+                    "session_id": session_id,
+                }
             elif result.error:
                 yield {"type": "error", "message": result.error}
         except GeneratorExit:
@@ -1917,11 +1887,12 @@ class ChatService:
         except Exception as err:
             logger.error("runtime resume error: %s", err, exc_info=True)
             yield {"type": "error", "message": "恢复 Runtime 操作失败，请稍后重试"}
-        yield {
-            "type": "done",
-            "session_id": session_id,
-            "duration_ms": round((time.perf_counter() - started) * 1000),
-        }
+        if include_done:
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+            }
 
     # ---- Internal ----
 
@@ -2094,7 +2065,7 @@ class ChatService:
         """Stream LangGraph events with common agent/tool/error emission.
 
         Args:
-            graph_input: Initial state (for stream_chat) or Command(resume=...) (for resume_chat).
+            graph_input: Initial state for stream_chat or another graph input.
             graph_config: LangGraph config dict with configurable and thread_id.
             emit_classify: If True, emit a classify event when delegation_plan appears.
 
@@ -2291,21 +2262,15 @@ class ChatService:
             )
 
     def _handle_hitl_interrupt(
-        self, gi: Any, sid: str, graph_config: dict[str, Any],
-        session_llm: LLMClient, user_id: str,
+        self, gi: Any, sid: str,
     ) -> Iterator[dict[str, Any]]:
-        """Handle GraphInterrupt: store pending state and yield HITL events."""
+        """Handle the Runtime-backed GraphInterrupt and yield HITL events."""
         interrupt_value = gi.args[0] if gi.args else {}
         pending_actions = interrupt_value.get("actions", [])
         logger.info(
             "hitl: confirm_required session=%s actions=%d",
             sid, len(pending_actions),
         )
-        self._pending_confirms[sid] = {
-            "config": graph_config,
-            "session_llm": session_llm,
-            "user_id": user_id,
-        }
         self._prune_checkpoints(sid, keep_latest=True)
         yield {
             "type": "confirm_required",

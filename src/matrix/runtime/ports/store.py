@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from ..domain.operations import OperationState, StateTransition
-from ..domain.approvals import Approval, ApprovalDecision
+from ..domain.approvals import Approval, ApprovalDecision, ApprovalSet
 from ..domain.events import RuntimeEvent
 from ..domain.tools import ToolRequest, ToolResult, RecoveryPolicy
 
@@ -64,10 +64,53 @@ class OperationStorePort(Protocol):
     def find_active(self, owner_id: str, session_id: str) -> OperationState | None:
         ...
 
+    def find_waiting_approval(self, owner_id: str, session_id: str) -> OperationState | None:
+        ...
+
+    def list_waiting_approvals(
+        self, owner_id: str, session_id: str, limit: int = 50,
+    ) -> list[OperationState]:
+        ...
+
+    def ensure_orchestration_run(
+        self,
+        run_id: str,
+        owner_id: str,
+        session_id: str,
+        graph_thread_id: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        ...
+
+    def upsert_orchestration_step(
+        self,
+        run_id: str,
+        step_id: str,
+        operation_id: str,
+        status: str,
+        metadata: dict | None = None,
+    ) -> None:
+        ...
+
     def create_approval(self, approval: Approval) -> None:
         ...
 
+    def create_approval_set(self, approval_set: ApprovalSet) -> None:
+        ...
+
     def get_approval(self, owner_id: str, approval_id: str) -> Approval | None:
+        ...
+
+    def get_approval_set(self, owner_id: str, approval_set_id: str) -> ApprovalSet | None:
+        ...
+
+    def list_approval_set(
+        self, owner_id: str, approval_set_id: str,
+    ) -> list[Approval]:
+        ...
+
+    def delete_session_runtime(self, owner_id: str, session_id: str) -> None:
+        """Delete all Runtime/workflow data owned by one chat session."""
         ...
 
     def resolve_approval(

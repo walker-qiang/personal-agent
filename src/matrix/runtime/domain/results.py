@@ -23,6 +23,8 @@ class Suspension:
 
     reason: str
     approval_id: str = ""
+    approval_set_id: str = ""
+    approval_ids: list[str] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict)
 
 

@@ -133,7 +133,6 @@ def base_state():
         defaults = {
             "user_message": "当前持仓情况如何？",
             "session_id": "test",
-            "runtime_mode": "runtime",
         }
         return AgentState(**(defaults | overrides))
     return _make
@@ -246,7 +245,6 @@ def test_runtime_dag_next_batch_carries_completed_results():
         ],
         completed_steps=[1],
         agent_results=[{"step": 1, "result": "dependency-marker"}],
-        runtime_mode="runtime",
     )
 
     routed = _route_after_replan(state)

@@ -6,7 +6,13 @@ from dataclasses import replace
 import time
 import uuid
 
-from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
+from ..domain.approvals import (
+    Approval,
+    ApprovalDecision,
+    ApprovalSet,
+    ApprovalSetStatus,
+    ApprovalStatus,
+)
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 
@@ -19,6 +25,9 @@ class MemoryOperationStore:
         self.operations: dict[str, OperationState] = {}
         self.events: dict[str, list[object]] = {}
         self.approvals: dict[str, Approval] = {}
+        self.approval_sets: dict[str, ApprovalSet] = {}
+        self.orchestration_runs: dict[str, dict] = {}
+        self.orchestration_steps: dict[tuple[str, str], dict] = {}
         self.effects: dict[tuple[str, str], dict] = {}
         self.session_entries: list[dict] = []
 
@@ -183,6 +192,49 @@ class MemoryOperationStore:
                 return operation
         return None
 
+    def find_waiting_approval(self, owner_id: str, session_id: str) -> OperationState | None:
+        values = self.list_waiting_approvals(owner_id, session_id, limit=1)
+        return values[0] if values else None
+
+    def list_waiting_approvals(self, owner_id: str, session_id: str, limit: int = 50):
+        candidates = [
+            operation for operation in self.operations.values()
+            if operation.owner_id == owner_id
+            and operation.session_id == session_id
+            and operation.phase is OperationPhase.WAITING_APPROVAL
+            and any(
+                approval.operation_id == operation.operation_id
+                and approval.status is ApprovalStatus.PENDING
+                for approval in self.approvals.values()
+            )
+        ]
+        candidates.sort(key=lambda operation: operation.updated_at, reverse=True)
+        return candidates[:max(1, min(limit, 200))]
+
+    def ensure_orchestration_run(
+        self, run_id, owner_id, session_id, graph_thread_id="", metadata=None,
+    ):
+        if not run_id:
+            return
+        self.orchestration_runs[run_id] = {
+            "run_id": run_id, "owner_id": owner_id, "session_id": session_id,
+            "graph_thread_id": graph_thread_id, "status": "running",
+            "metadata": dict(metadata or {}),
+        }
+
+    def upsert_orchestration_step(
+        self, run_id, step_id, operation_id, status, metadata=None,
+    ):
+        if not run_id or not step_id:
+            return
+        key = (run_id, step_id)
+        current = self.orchestration_steps.get(key, {"version": -1})
+        self.orchestration_steps[key] = {
+            "run_id": run_id, "step_id": step_id, "operation_id": operation_id,
+            "status": status, "version": current["version"] + 1,
+            "metadata": dict(metadata or {}),
+        }
+
     def event_list(self, operation_id: str) -> list[object]:
         return list(self.events.get(operation_id, []))
 
@@ -197,11 +249,87 @@ class MemoryOperationStore:
             raise OperationConflictError("approval already exists")
         self.approvals[approval.approval_id] = approval
 
+    def create_approval_set(self, approval_set: ApprovalSet) -> None:
+        if approval_set.approval_set_id in self.approval_sets:
+            raise OperationConflictError("approval set already exists")
+        self.approval_sets[approval_set.approval_set_id] = approval_set
+
     def get_approval(self, owner_id: str, approval_id: str) -> Approval | None:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.owner_id != owner_id:
             return None
         return approval
+
+    def get_approval_set(self, owner_id: str, approval_set_id: str) -> ApprovalSet | None:
+        approval_set = self.approval_sets.get(approval_set_id)
+        if approval_set is not None:
+            return approval_set if approval_set.owner_id == owner_id else None
+        approval = self.get_approval(owner_id, approval_set_id)
+        if approval is None:
+            return None
+        return ApprovalSet(
+            approval_set_id=approval.approval_id,
+            owner_id=approval.owner_id,
+            operation_id=approval.operation_id,
+            status=_approval_set_status((approval,)),
+            version=approval.version,
+            created_at=approval.created_at,
+            updated_at=approval.updated_at,
+        )
+
+    def list_approval_set(self, owner_id: str, approval_set_id: str) -> list[Approval]:
+        return [
+            approval for approval in self.approvals.values()
+            if approval.owner_id == owner_id
+            and (
+                approval.approval_set_id == approval_set_id
+                or (
+                    not approval.approval_set_id
+                    and approval.approval_id == approval_set_id
+                )
+            )
+        ]
+
+    def delete_session_runtime(self, owner_id: str, session_id: str) -> None:
+        operation_ids = {
+            operation.operation_id
+            for operation in self.operations.values()
+            if operation.owner_id == owner_id and operation.session_id == session_id
+        }
+        run_ids = {
+            operation.orchestration_run_id
+            for operation in self.operations.values()
+            if operation.operation_id in operation_ids and operation.orchestration_run_id
+        }
+        self.operations = {
+            key: value for key, value in self.operations.items()
+            if key not in operation_ids
+        }
+        self.events = {
+            key: value for key, value in self.events.items()
+            if key not in operation_ids
+        }
+        self.approvals = {
+            key: value for key, value in self.approvals.items()
+            if value.operation_id not in operation_ids
+        }
+        self.approval_sets = {
+            key: value for key, value in self.approval_sets.items()
+            if value.operation_id not in operation_ids
+        }
+        self.effects = {
+            key: value for key, value in self.effects.items()
+            if key[0] not in operation_ids
+        }
+        self.orchestration_steps = {
+            key: value for key, value in self.orchestration_steps.items()
+            if key[0] not in run_ids
+        }
+        self.orchestration_runs = {
+            key: value for key, value in self.orchestration_runs.items()
+            if key not in run_ids
+        }
+        self.delete_session_entries(owner_id, session_id)
 
     def resolve_approval(
         self,
@@ -228,6 +356,8 @@ class MemoryOperationStore:
             )
         if approval.status is ApprovalStatus.EXPIRED:
             return approval
+        if approval.status is not ApprovalStatus.PENDING and approval.decision == decision:
+            return approval
         if approval.status is not ApprovalStatus.PENDING:
             raise OperationConflictError("approval is no longer pending")
         if approval.expires_at is not None and approval.expires_at <= decided_at:
@@ -246,6 +376,16 @@ class MemoryOperationStore:
             version=approval.version + 1,
         )
         self.approvals[approval_id] = updated
+        if approval.approval_set_id:
+            current_set = self.approval_sets.get(approval.approval_set_id)
+            if current_set is not None:
+                members = self.list_approval_set(owner_id, approval.approval_set_id)
+                self.approval_sets[approval.approval_set_id] = replace(
+                    current_set,
+                    status=_approval_set_status(tuple(members)),
+                    version=current_set.version + 1,
+                    updated_at=decided_at,
+                )
         return updated
 
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:
@@ -265,3 +405,21 @@ class MemoryOperationStore:
             "status": "failed" if result.is_error else "settled",
             "result": result.result, "error": result.error,
         })
+
+
+def _approval_set_status(approvals: tuple[Approval, ...]) -> ApprovalSetStatus:
+    if not approvals:
+        return ApprovalSetStatus.PENDING
+    statuses = {item.status for item in approvals}
+    if ApprovalStatus.PENDING in statuses:
+        return (
+            ApprovalSetStatus.PARTIALLY_DECIDED
+            if len(statuses) > 1 else ApprovalSetStatus.PENDING
+        )
+    if ApprovalStatus.EXPIRED in statuses:
+        return ApprovalSetStatus.EXPIRED
+    if ApprovalStatus.CANCELLED in statuses:
+        return ApprovalSetStatus.CANCELLED
+    if all(item.status is ApprovalStatus.APPROVED for item in approvals):
+        return ApprovalSetStatus.APPROVED
+    return ApprovalSetStatus.SKIPPED

@@ -140,10 +140,6 @@ class TestAgentConfig:
 
 
 class TestLoadConfig:
-    def test_runtime_mode_defaults_to_runtime(self, monkeypatch):
-        monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests")
-        assert load_config().runtime_mode == "runtime"
-
     def test_loads_defaults(self, monkeypatch):
         """load_config should work with defaults in the personal-agent repo."""
         monkeypatch.delenv("PERSONAL_OS_CACHE_PATH", raising=False)

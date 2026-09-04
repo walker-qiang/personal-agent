@@ -12,7 +12,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
+from ..domain.approvals import (
+    Approval,
+    ApprovalDecision,
+    ApprovalSet,
+    ApprovalSetStatus,
+    ApprovalStatus,
+)
 from ..domain.errors import OperationConflictError
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.operations import OperationPhase, OperationState, StateTransition
@@ -213,6 +219,102 @@ class SQLiteRuntimeStore:
             ).fetchone()
         return _operation_from_row(row) if row else None
 
+    def find_waiting_approval(self, owner_id: str, session_id: str) -> OperationState | None:
+        """Find any durable approval wait, including DAG step operations."""
+        values = self.list_waiting_approvals(owner_id, session_id, limit=1)
+        return values[0] if values else None
+
+    def list_waiting_approvals(
+        self, owner_id: str, session_id: str, limit: int = 50,
+    ) -> list[OperationState]:
+        """List every durable approval wait for one session, including DAG steps."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                """SELECT o.* FROM runtime_operations o
+                   JOIN runtime_approvals a ON a.operation_id=o.operation_id
+                   WHERE o.owner_id=? AND o.session_id=?
+                     AND o.phase=?
+                     AND a.status=?
+                   GROUP BY o.operation_id
+                   ORDER BY o.updated_at DESC, o.created_at DESC
+                   LIMIT ?""",
+                (
+                    owner_id, session_id, OperationPhase.WAITING_APPROVAL.value,
+                    ApprovalStatus.PENDING.value,
+                    max(1, min(limit, 200)),
+                ),
+            ).fetchall()
+        seen: set[str] = set()
+        values: list[OperationState] = []
+        for row in rows:
+            operation_id = str(row["operation_id"])
+            if operation_id not in seen:
+                seen.add(operation_id)
+                values.append(_operation_from_row(row))
+        return values
+
+    def ensure_orchestration_run(
+        self,
+        run_id: str,
+        owner_id: str,
+        session_id: str,
+        graph_thread_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not run_id:
+            return
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                """INSERT INTO orchestration_runs
+                   (run_id, owner_id, session_id, graph_thread_id, status,
+                    metadata_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                     graph_thread_id=excluded.graph_thread_id,
+                     metadata_json=excluded.metadata_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    run_id, owner_id, session_id, graph_thread_id,
+                    json.dumps(metadata or {}, ensure_ascii=False, default=str),
+                    now, now,
+                ),
+            )
+            conn.commit()
+
+    def upsert_orchestration_step(
+        self,
+        run_id: str,
+        step_id: str,
+        operation_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not run_id or not step_id:
+            return
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                """INSERT INTO orchestration_run_steps
+                   (run_id, step_id, operation_id, status, version,
+                    metadata_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+                   ON CONFLICT(run_id, step_id) DO UPDATE SET
+                     operation_id=excluded.operation_id,
+                     status=excluded.status,
+                     version=orchestration_run_steps.version+1,
+                     metadata_json=excluded.metadata_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    run_id, step_id, operation_id, status,
+                    json.dumps(metadata or {}, ensure_ascii=False, default=str),
+                    now, now,
+                ),
+            )
+            conn.commit()
+
     def events(self, owner_id: str, operation_id: str) -> list[RuntimeEvent]:
         return self.list_events(owner_id, operation_id)
 
@@ -232,17 +334,39 @@ class SQLiteRuntimeStore:
             conn = self._get_conn()
             conn.execute(
                 """INSERT INTO runtime_approvals
-                (approval_id, owner_id, operation_id, tool_call_id, tool_name,
+                (approval_id, approval_set_id, owner_id, operation_id, tool_call_id, tool_name,
                  sanitized_arguments_json, risk, status, decision, expires_at,
                  version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    approval.approval_id, approval.owner_id, approval.operation_id,
+                    approval.approval_id, approval.approval_set_id, approval.owner_id,
+                    approval.operation_id,
                     approval.tool_call_id, approval.tool_name,
                     json.dumps(approval.sanitized_arguments, ensure_ascii=False, default=str),
                     approval.risk, approval.status.value,
                     approval.decision.value if approval.decision else None,
                     approval.expires_at, approval.version, time.time(), time.time(),
+                ),
+            )
+            conn.commit()
+
+    def create_approval_set(self, approval_set: ApprovalSet) -> None:
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                """INSERT INTO runtime_approval_sets
+                (approval_set_id, owner_id, operation_id, orchestration_run_id,
+                 status, version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    approval_set.approval_set_id,
+                    approval_set.owner_id,
+                    approval_set.operation_id,
+                    approval_set.orchestration_run_id,
+                    approval_set.status.value,
+                    approval_set.version,
+                    approval_set.created_at or time.time(),
+                    approval_set.updated_at or time.time(),
                 ),
             )
             conn.commit()
@@ -254,6 +378,115 @@ class SQLiteRuntimeStore:
                 (owner_id, approval_id),
             ).fetchone()
         return _approval_from_row(row) if row else None
+
+    def get_approval_set(self, owner_id: str, approval_set_id: str) -> ApprovalSet | None:
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT * FROM runtime_approval_sets "
+                "WHERE owner_id=? AND approval_set_id=?",
+                (owner_id, approval_set_id),
+            ).fetchone()
+            if row is not None:
+                return _approval_set_from_row(row)
+            # Compatibility for approvals written before approval sets existed.
+            approval = self._get_conn().execute(
+                "SELECT * FROM runtime_approvals "
+                "WHERE owner_id=? AND approval_id=?",
+                (owner_id, approval_set_id),
+            ).fetchone()
+        if approval is None:
+            return None
+        item = _approval_from_row(approval)
+        return ApprovalSet(
+            approval_set_id=item.approval_id,
+            owner_id=item.owner_id,
+            operation_id=item.operation_id,
+            status=_approval_set_status((item,)),
+            version=item.version,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+
+    def list_approval_set(
+        self, owner_id: str, approval_set_id: str,
+    ) -> list[Approval]:
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT * FROM runtime_approvals "
+                "WHERE owner_id=? AND (approval_set_id=? OR "
+                "(approval_set_id='' AND approval_id=?)) "
+                "ORDER BY created_at, approval_id",
+                (owner_id, approval_set_id, approval_set_id),
+            ).fetchall()
+        return [_approval_from_row(row) for row in rows]
+
+    def delete_session_runtime(self, owner_id: str, session_id: str) -> None:
+        """Delete session-scoped Runtime data in one SQLite transaction."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                operation_rows = conn.execute(
+                    "SELECT operation_id FROM runtime_operations "
+                    "WHERE owner_id=? AND session_id=?",
+                    (owner_id, session_id),
+                ).fetchall()
+                operation_ids = [row["operation_id"] for row in operation_rows]
+                operation_run_rows = conn.execute(
+                    "SELECT orchestration_run_id FROM runtime_operations "
+                    "WHERE owner_id=? AND session_id=? AND orchestration_run_id<>''",
+                    (owner_id, session_id),
+                ).fetchall()
+                run_ids = {
+                    row["orchestration_run_id"] for row in operation_run_rows
+                }
+                run_rows = conn.execute(
+                    "SELECT run_id FROM orchestration_runs "
+                    "WHERE owner_id=? AND session_id=?",
+                    (owner_id, session_id),
+                ).fetchall()
+                run_ids.update(row["run_id"] for row in run_rows)
+
+                if operation_ids:
+                    placeholders = ",".join("?" for _ in operation_ids)
+                    conn.execute(
+                        f"DELETE FROM runtime_tool_effects WHERE operation_id IN ({placeholders})",
+                        operation_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM runtime_events WHERE operation_id IN ({placeholders})",
+                        operation_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM runtime_approvals WHERE operation_id IN ({placeholders})",
+                        operation_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM runtime_approval_sets WHERE operation_id IN ({placeholders})",
+                        operation_ids,
+                    )
+                if run_ids:
+                    placeholders = ",".join("?" for _ in run_ids)
+                    conn.execute(
+                        f"DELETE FROM orchestration_run_steps WHERE run_id IN ({placeholders})",
+                        tuple(run_ids),
+                    )
+                conn.execute(
+                    "DELETE FROM runtime_operations WHERE owner_id=? AND session_id=?",
+                    (owner_id, session_id),
+                )
+                conn.execute(
+                    "DELETE FROM orchestration_runs WHERE owner_id=? AND session_id=?",
+                    (owner_id, session_id),
+                )
+                conn.execute(
+                    "DELETE FROM session_entries WHERE owner_id=? AND session_id=?",
+                    (owner_id, session_id),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def list_approvals(
         self,
@@ -300,6 +533,12 @@ class SQLiteRuntimeStore:
                 if row is None:
                     raise KeyError(approval_id)
                 existing = _approval_from_row(row)
+                if (
+                    existing.status is not ApprovalStatus.PENDING
+                    and existing.decision is decision
+                ):
+                    conn.commit()
+                    return existing
                 if row["operation_id"] != transition.new_state.operation_id:
                     raise OperationConflictError("approval operation does not match transition")
                 operation = conn.execute(
@@ -335,6 +574,8 @@ class SQLiteRuntimeStore:
                     )
                     if cur.rowcount != 1:
                         raise OperationConflictError("approval compare-and-swap failed")
+                    if existing.approval_set_id:
+                        _refresh_approval_set(conn, existing.approval_set_id, decided_at)
                     conn.commit()
                     expired = conn.execute(
                         "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
@@ -362,6 +603,8 @@ class SQLiteRuntimeStore:
                 )
                 if cur.rowcount != 1:
                     raise OperationConflictError("approval compare-and-swap failed")
+                if existing.approval_set_id:
+                    _refresh_approval_set(conn, existing.approval_set_id, decided_at)
                 conn.commit()
                 updated = conn.execute(
                     "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
@@ -678,7 +921,51 @@ def _apply_transition(conn: sqlite3.Connection, transition: StateTransition) -> 
                 event.timestamp,
                 json.dumps(event.payload, ensure_ascii=False, default=str),
             ),
+            )
+    if state.orchestration_run_id and state.step_id:
+        now = time.time()
+        conn.execute(
+            """INSERT INTO orchestration_run_steps
+               (run_id, step_id, operation_id, status, version,
+                metadata_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 0, '{}', ?, ?)
+               ON CONFLICT(run_id, step_id) DO UPDATE SET
+                 operation_id=excluded.operation_id,
+                 status=excluded.status,
+                 version=orchestration_run_steps.version+1,
+                 updated_at=excluded.updated_at""",
+            (
+                state.orchestration_run_id, state.step_id, state.operation_id,
+                state.phase.value, now, now,
+            ),
         )
+    if state.orchestration_run_id:
+        terminal = {
+            OperationPhase.COMPLETED.value,
+            OperationPhase.FAILED.value,
+            OperationPhase.ABORTED.value,
+            OperationPhase.RECOVERY_REQUIRED.value,
+        }
+        if state.operation_scope == "top_level" and state.phase.value in terminal:
+            conn.execute(
+                "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
+                (state.phase.value, time.time(), state.orchestration_run_id),
+            )
+        elif state.operation_scope == "dag_step":
+            step_rows = conn.execute(
+                "SELECT status FROM orchestration_run_steps WHERE run_id=?",
+                (state.orchestration_run_id,),
+            ).fetchall()
+            if step_rows and all(row["status"] in terminal for row in step_rows):
+                run_status = (
+                    OperationPhase.COMPLETED.value
+                    if all(row["status"] == OperationPhase.COMPLETED.value for row in step_rows)
+                    else OperationPhase.FAILED.value
+                )
+                conn.execute(
+                    "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
+                    (run_status, time.time(), state.orchestration_run_id),
+                )
 
 
 def _operation_from_row(row: sqlite3.Row) -> OperationState:
@@ -713,4 +1000,66 @@ def _approval_from_row(row: sqlite3.Row) -> Approval:
         decision=ApprovalDecision(row["decision"]) if row["decision"] else None,
         expires_at=row["expires_at"], version=int(row["version"]),
         created_at=float(row["created_at"]), updated_at=float(row["updated_at"]),
+        approval_set_id=row["approval_set_id"] or "",
+    )
+
+
+def _approval_set_from_row(row: sqlite3.Row) -> ApprovalSet:
+    return ApprovalSet(
+        approval_set_id=row["approval_set_id"],
+        owner_id=row["owner_id"],
+        operation_id=row["operation_id"],
+        orchestration_run_id=row["orchestration_run_id"] or "",
+        status=ApprovalSetStatus(row["status"]),
+        version=int(row["version"]),
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def _approval_set_status(approvals: tuple[Approval, ...]) -> ApprovalSetStatus:
+    if not approvals:
+        return ApprovalSetStatus.PENDING
+    statuses = {item.status for item in approvals}
+    if ApprovalStatus.PENDING in statuses:
+        return (
+            ApprovalSetStatus.PARTIALLY_DECIDED
+            if len(statuses) > 1 else ApprovalSetStatus.PENDING
+        )
+    if ApprovalStatus.EXPIRED in statuses:
+        return ApprovalSetStatus.EXPIRED
+    if ApprovalStatus.CANCELLED in statuses:
+        return ApprovalSetStatus.CANCELLED
+    if all(item.status is ApprovalStatus.APPROVED for item in approvals):
+        return ApprovalSetStatus.APPROVED
+    return ApprovalSetStatus.SKIPPED
+
+
+def _refresh_approval_set(
+    conn: sqlite3.Connection, approval_set_id: str, updated_at: float,
+) -> None:
+    rows = conn.execute(
+        "SELECT status, decision FROM runtime_approvals WHERE approval_set_id=?",
+        (approval_set_id,),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = {ApprovalStatus(row["status"]) for row in rows}
+    if ApprovalStatus.PENDING in statuses:
+        status = (
+            ApprovalSetStatus.PARTIALLY_DECIDED.value
+            if len(statuses) > 1 else ApprovalSetStatus.PENDING.value
+        )
+    elif ApprovalStatus.EXPIRED in statuses:
+        status = ApprovalSetStatus.EXPIRED.value
+    elif ApprovalStatus.CANCELLED in statuses:
+        status = ApprovalSetStatus.CANCELLED.value
+    elif all(item is ApprovalStatus.APPROVED for item in statuses):
+        status = ApprovalSetStatus.APPROVED.value
+    else:
+        status = ApprovalSetStatus.SKIPPED.value
+    conn.execute(
+        "UPDATE runtime_approval_sets SET status=?, version=version+1, updated_at=? "
+        "WHERE approval_set_id=?",
+        (status, updated_at, approval_set_id),
     )

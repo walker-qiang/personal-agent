@@ -252,6 +252,10 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 - DebugTrace 默认关闭。开启后只挂在当前 RunHandle 和 SSE 调试事件上，保存模型请求/响应、工具轨迹和策略诊断的脱敏内存副本，不写 Runtime SQLite durable events，也不写 Vault。
 - 进程重启恢复采用 fail-closed：`waiting_approval` 保留并允许用户继续审批；模型请求、工具执行、恢复中的其他中间态统一转为 `recovery_required`，记录 `recovery_required` 事件，不自动重放外部 effect。
 - Runtime effect journal 只用于审计未结算副作用，不作为自动重放授权；需要重试时由上层发起新的操作。
+- Workflow run、DAG step、ApprovalSet、ApprovalRequest 和 operation snapshot 共享 durable 标识链路；
+  审批决定必须同时通过 owner、operation、approval set 和 expected version 校验。
+- 同一 session 的多个 DAG waiting operation 可由一次 `/chat/confirm` 批量恢复；
+  旧的单 `approval_id` 请求仍兼容读取，ApprovalSet 负责聚合审批状态和幂等决定。
 - Agent-as-Tool 的递归深度控制仍属于应用层；每次嵌套委派创建独立的非 top-level Runtime operation，避免与父操作共享可变执行快照。
 - 当前建设阶段 Runtime SQLite 只承载可丢弃的运行态；schema 变化允许重建 Runtime 自有表，不为历史 operation 保留兼容复制逻辑。`personal-assets` 不受影响。
 
@@ -398,7 +402,11 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 - `mcp_browser_click`、`mcp_browser_type`、`mcp_browser_select_option`、`mcp_browser_press_key` — 浏览器交互
 - `mcp_browser_save_state`、`mcp_browser_restore_state` — 浏览器状态操作
 
-HITL 流程：Agent 遇到高风险操作 → SSE 流暂停，发送 `confirm_request` 事件 → 客户端展示确认界面 → 用户确认/跳过 → 通过 `/chat/confirm` 恢复执行。
+HITL 流程：Agent 遇到高风险操作后，Runtime 创建 durable ApprovalSet 和 ApprovalRequest，
+SSE 流暂停并发送 `confirm_request` 事件；客户端展示确认界面，用户确认/跳过后，
+通过 `/chat/confirm` 按 session 查询 waiting operations 并恢复执行。Runtime approval
+不依赖 ChatService 的进程内缓存；进程重启后仍可依据 operation_id、approval_set_id
+和 expected operation version 恢复。
 
 ### DataBus 上下文管理
 

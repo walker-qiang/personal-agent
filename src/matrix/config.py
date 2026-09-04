@@ -162,10 +162,6 @@ class AgentConfig:
     code_sandbox_max_memory_mb: int = 512  # Memory limit
     code_sandbox_max_output_chars: int = 10000  # Output truncation
     code_sandbox_network: bool = False  # Network access in sandbox
-    # Kept as a response compatibility field; top-level execution is fixed
-    # to Runtime and is no longer selected by an environment switch.
-    runtime_mode: str = "runtime"
-
     @property
     def active_api_key(self) -> str:
         return self.deepseek_api_key

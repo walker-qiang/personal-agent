@@ -12,7 +12,13 @@ import uuid
 from typing import Any
 
 from ..domain.events import RuntimeEvent, RuntimeEventType
-from ..domain.approvals import Approval, ApprovalDecision, ApprovalStatus
+from ..domain.approvals import (
+    Approval,
+    ApprovalDecision,
+    ApprovalSet,
+    ApprovalSetStatus,
+    ApprovalStatus,
+)
 from ..domain.messages import Message, ToolCall
 from ..domain.operations import OperationPhase, OperationState, StateTransition
 from ..domain.requests import RunRequest
@@ -249,6 +255,14 @@ def execute_operation(
                     tool_call.name, tool_call.arguments, request.execution_policy,
                 )
                 if requires_approval and not auto_approved:
+                    approval_set_id = uuid.uuid4().hex
+                    store.create_approval_set(ApprovalSet(
+                        approval_set_id=approval_set_id,
+                        owner_id=current.owner_id,
+                        operation_id=current.operation_id,
+                        orchestration_run_id=current.orchestration_run_id,
+                        status=ApprovalSetStatus.PENDING,
+                    ))
                     approval = Approval(
                         approval_id=uuid.uuid4().hex,
                         owner_id=current.owner_id,
@@ -257,6 +271,7 @@ def execute_operation(
                         tool_name=tool_call.name,
                         sanitized_arguments=dict(tool_call.arguments),
                         risk="tool_requires_approval",
+                        approval_set_id=approval_set_id,
                     )
                     store.create_approval(approval)
                     _debug(debug_trace, "approval_required", {
@@ -271,6 +286,8 @@ def execute_operation(
                             "runtime_messages": _messages_to_state(messages),
                             "pending_tool_call": {
                                 "approval_id": approval.approval_id,
+                                "approval_set_id": approval_set_id,
+                                "approval_ids": [approval.approval_id],
                                 "call_id": tool_call.call_id,
                                 "name": tool_call.name,
                                 "arguments": dict(tool_call.arguments),
@@ -281,6 +298,8 @@ def execute_operation(
                         store, current, OperationPhase.WAITING_APPROVAL,
                         _event(current, RuntimeEventType.APPROVAL_REQUIRED, {
                             "approval_id": approval.approval_id,
+                            "approval_set_id": approval_set_id,
+                            "approval_ids": [approval.approval_id],
                             "call_id": tool_call.call_id,
                             "name": tool_call.name,
                             "arguments": dict(tool_call.arguments),
@@ -290,6 +309,7 @@ def execute_operation(
                         store, current,
                         _event(current, RuntimeEventType.RUN_SUSPENDED, {
                             "approval_id": approval.approval_id,
+                            "approval_set_id": approval_set_id,
                         }), events,
                     )
                     return events, RunResult(
@@ -299,10 +319,20 @@ def execute_operation(
                         error="approval required",
                         suspension=Suspension(
                             reason="approval required", approval_id=approval.approval_id,
+                            approval_set_id=approval_set_id,
+                            approval_ids=[approval.approval_id],
                             payload={"tool_name": tool_call.name, "arguments": dict(tool_call.arguments)},
                         ),
                     )
                 if auto_approved:
+                    approval_set_id = uuid.uuid4().hex
+                    store.create_approval_set(ApprovalSet(
+                        approval_set_id=approval_set_id,
+                        owner_id=current.owner_id,
+                        operation_id=current.operation_id,
+                        orchestration_run_id=current.orchestration_run_id,
+                        status=ApprovalSetStatus.APPROVED,
+                    ))
                     approval = Approval(
                         approval_id=uuid.uuid4().hex,
                         owner_id=current.owner_id,
@@ -311,6 +341,7 @@ def execute_operation(
                         tool_name=tool_call.name,
                         sanitized_arguments=dict(tool_call.arguments),
                         risk="auto_allowlist",
+                        approval_set_id=approval_set_id,
                         status=ApprovalStatus.APPROVED,
                         decision=ApprovalDecision.APPROVE,
                     )

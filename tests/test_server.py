@@ -66,7 +66,6 @@ class TestHealthz:
         assert data["model"] == "deepseek-chat"
         assert data["llm_available"] is True
         assert data["llm_error"] == ""
-        assert data["runtime_mode"] == "runtime"
 
     def test_reports_llm_unavailable_when_no_key(self, tmp_cache_path):
         config = AgentConfig(

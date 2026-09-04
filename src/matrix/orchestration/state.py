@@ -15,6 +15,24 @@ from langgraph.graph import add_messages
 from pydantic import BaseModel, Field
 
 
+def _merge_runtime_items(
+    current: list[dict[str, Any]], update: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Accumulate parallel branch items, while [] explicitly clears the batch."""
+    if not update:
+        return []
+    merged = list(current or [])
+    for item in update:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _replace_confirmation(current: bool, update: bool) -> bool:
+    """Treat an explicit False from the confirm node as a durable reset."""
+    return bool(update)
+
+
 class AgentState(BaseModel):
     """State flowing through the multi-agent LangGraph orchestration graph.
 
@@ -41,9 +59,8 @@ class AgentState(BaseModel):
     user_message: str = ""
     session_id: str = ""
     owner_id: str = "default"
-    runtime_mode: str = "runtime"
     orchestration_run_id: str = ""
-    runtime_operation_ids: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
+    runtime_operation_ids: Annotated[list[dict[str, Any]], _merge_runtime_items] = Field(default_factory=list)
     call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
     # Classification
@@ -110,10 +127,10 @@ class AgentState(BaseModel):
 
     # HITL (Human-in-the-Loop)
     # operator.or_: any delegate needs confirmation → whole plan needs confirmation
-    needs_confirmation: Annotated[bool, operator.or_] = False
+    needs_confirmation: Annotated[bool, _replace_confirmation] = False
     confirmed: bool = False
     # operator.add: concatenate pending actions from parallel delegates
-    pending_actions: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
+    pending_actions: Annotated[list[dict[str, Any]], _merge_runtime_items] = Field(default_factory=list)
 
     # Working memory: pinned goal + rolling insights
     working_memory: dict[str, Any] = Field(

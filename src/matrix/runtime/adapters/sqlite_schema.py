@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 
-RUNTIME_SCHEMA_VERSION = 1
+RUNTIME_SCHEMA_VERSION = 2
 
 
 def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
@@ -46,6 +46,19 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_orchestration_runs_owner_session
             ON orchestration_runs(owner_id, session_id, updated_at);
+        CREATE TABLE IF NOT EXISTS orchestration_run_steps (
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(run_id, step_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_orchestration_run_steps_operation
+            ON orchestration_run_steps(operation_id);
         CREATE TABLE IF NOT EXISTS runtime_operations (
             operation_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -89,6 +102,7 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
             ON runtime_events(owner_id, session_id, timestamp);
         CREATE TABLE IF NOT EXISTS runtime_approvals (
             approval_id TEXT PRIMARY KEY,
+            approval_set_id TEXT NOT NULL DEFAULT '',
             owner_id TEXT NOT NULL,
             operation_id TEXT NOT NULL,
             tool_call_id TEXT NOT NULL,
@@ -106,6 +120,20 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
             ON runtime_approvals(owner_id, status, created_at);
         CREATE INDEX IF NOT EXISTS idx_runtime_approvals_operation_status
             ON runtime_approvals(operation_id, status);
+        CREATE TABLE IF NOT EXISTS runtime_approval_sets (
+            approval_set_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            orchestration_run_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_approval_sets_owner_status
+            ON runtime_approval_sets(owner_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_runtime_approval_sets_operation
+            ON runtime_approval_sets(operation_id);
         CREATE TABLE IF NOT EXISTS runtime_tool_effects (
             operation_id TEXT NOT NULL,
             tool_call_id TEXT NOT NULL,
@@ -123,6 +151,17 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_runtime_effects_recovery
             ON runtime_tool_effects(status, updated_at);
         """
+    )
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime_approvals)").fetchall()
+    }
+    if "approval_set_id" not in columns:
+        conn.execute(
+            "ALTER TABLE runtime_approvals ADD COLUMN approval_set_id TEXT NOT NULL DEFAULT ''"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_approvals_set_status "
+        "ON runtime_approvals(approval_set_id, status)"
     )
     row = conn.execute(
         "SELECT version FROM runtime_schema_meta ORDER BY version DESC LIMIT 1"

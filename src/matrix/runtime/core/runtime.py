@@ -174,13 +174,48 @@ class AgentRuntime:
             raise OperationConflictError("operation not found or owner mismatch")
         if operation.phase is not OperationPhase.WAITING_APPROVAL:
             raise OperationConflictError("operation is not waiting for approval")
-        approval_id = str(resume_input.payload.get("approval_id", ""))
+        payload = resume_input.payload
+        approval_set_id = str(payload.get("approval_set_id", ""))
+        raw_approval_ids = payload.get("approval_ids", [])
+        approval_ids = [
+            str(item) for item in raw_approval_ids
+            if str(item)
+        ] if isinstance(raw_approval_ids, (list, tuple)) else []
+        approval_id = str(payload.get("approval_id", ""))
         if not approval_id:
-            approval_id = str(operation.state.get("pending_tool_call", {}).get("approval_id", ""))
+            pending = operation.state.get("pending_tool_call", {})
+            approval_id = str(pending.get("approval_id", ""))
+            approval_set_id = approval_set_id or str(pending.get("approval_set_id", ""))
+            approval_ids = approval_ids or [
+                str(item) for item in pending.get("approval_ids", [])
+                if str(item)
+            ]
+        if not approval_ids and approval_id:
+            approval_ids = [approval_id]
+        if not approval_set_id:
+            approval_set_id = str(operation.state.get("pending_tool_call", {}).get(
+                "approval_set_id", ""
+            ))
         decision = resume_input.decision or str(resume_input.payload.get("decision", "approve"))
+        if not approval_id and approval_set_id:
+            approvals = self.store.list_approval_set(owner_id, approval_set_id)
+            approval_id = approvals[0].approval_id if len(approvals) == 1 else ""
+            approval_ids = approval_ids or [item.approval_id for item in approvals]
+        expected_version = payload.get("expected_operation_version")
+        if expected_version is not None and int(expected_version) != operation.version:
+            raise OperationConflictError(
+                f"operation version conflict: expected {expected_version}, "
+                f"actual {operation.version}"
+            )
         approval = self.store.get_approval(owner_id, approval_id)
         if approval is None:
             raise OperationConflictError("approval not found or owner mismatch")
+        if approval.operation_id != operation_id:
+            raise OperationConflictError("approval does not belong to operation")
+        approval_set_id = approval_set_id or approval.approval_set_id or approval.approval_id
+        approval_set = self.store.get_approval_set(owner_id, approval_set_id)
+        if approval_set is None or approval_set.operation_id != operation_id:
+            raise OperationConflictError("approval set does not belong to operation")
         policy_data = operation.state.get("execution_policy", {})
         policy = ExecutionPolicy(**{
             key: value for key, value in policy_data.items()
@@ -201,8 +236,11 @@ class AgentRuntime:
             owner_id=owner_id,
             operation_id=operation_id,
             approval_id=approval.approval_id,
+            approval_set_id=approval_set_id,
+            approval_ids=approval_ids or [approval.approval_id],
             decision=approval_decision,
             policy=policy,
+            expected_version=operation.version,
         )
         return handle
 
@@ -213,17 +251,28 @@ class AgentRuntime:
         owner_id: str,
         operation_id: str,
         approval_id: str,
+        approval_set_id: str,
+        approval_ids: list[str],
         decision: ApprovalDecision,
         policy: ExecutionPolicy,
+        expected_version: int,
     ) -> tuple[list[RuntimeEvent], RunResult]:
         operation = self.store.load(owner_id, operation_id)
         if operation is None:
             raise OperationConflictError("operation not found or owner mismatch")
         if operation.phase is not OperationPhase.WAITING_APPROVAL:
             raise OperationConflictError("operation is not waiting for approval")
+        if operation.version != expected_version:
+            raise OperationConflictError(
+                f"operation version conflict: expected {expected_version}, "
+                f"actual {operation.version}"
+            )
         pending = operation.state.get("pending_tool_call", {})
         if pending.get("approval_id") != approval_id:
             raise OperationConflictError("approval does not match suspended tool call")
+        pending_set_id = str(pending.get("approval_set_id", ""))
+        if pending_set_id and pending_set_id != approval_set_id:
+            raise OperationConflictError("approval set does not match suspended tool call")
 
         decided_at = time.time()
         resume_event = RuntimeEvent(
@@ -234,7 +283,14 @@ class AgentRuntime:
             sequence=operation.last_event_sequence + 1,
             event_type=RuntimeEventType.RUN_RESUMED,
             timestamp=decided_at,
-            payload={"approval_id": approval_id, "decision": decision.value},
+            payload={
+                "approval_id": approval_id,
+                "approval_set_id": approval_set_id,
+                "approval_ids": approval_ids,
+                "decision": decision.value,
+                "owner_id": owner_id,
+                "expected_operation_version": expected_version,
+            },
         )
         resumed_state = replace(
             with_next_phase(operation, OperationPhase.RESUMING),

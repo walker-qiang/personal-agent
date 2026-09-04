@@ -119,6 +119,8 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     if result.outcome.value == "suspended" and result.suspension is not None:
         action = {
             "approval_id": result.suspension.approval_id,
+            "approval_set_id": result.suspension.approval_set_id,
+            "approval_ids": list(result.suspension.approval_ids),
             "operation_id": handle.operation_id,
             "name": result.suspension.payload.get("tool_name", ""),
             "args": result.suspension.payload.get("arguments", {}),
@@ -167,95 +169,113 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
     approval_decision = (
         "approve" if decision in (True, "approve", "confirmed") else "skip"
     )
-    operation_id = ""
-    approval_id = ""
-    if actions and isinstance(actions[0], dict):
-        operation_id = str(actions[0].get("operation_id", ""))
-        approval_id = str(actions[0].get("approval_id", ""))
-    if not operation_id:
-        operation_ids = state.get("runtime_operation_ids", [])
-        if operation_ids and isinstance(operation_ids[0], dict):
-            operation_id = str(operation_ids[0].get("operation_id", ""))
-    operation = cfg["runtime_store"].load(cfg.get("user_id", "default"), operation_id)
-    if operation is None:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        if isinstance(action, dict) and action.get("operation_id"):
+            grouped.setdefault(str(action["operation_id"]), []).append(action)
+    if not grouped:
+        for item in state.get("runtime_operation_ids", []):
+            if isinstance(item, dict) and item.get("operation_id"):
+                grouped.setdefault(str(item["operation_id"]), []).append(item)
+    if not grouped:
         return {"error": "Runtime operation not found", "confirmed": True}
-    agent_def = cfg["agent_registry"].get(operation.agent_id)
-    if agent_def is None:
-        return {"error": "Agent not found", "confirmed": True}
-    agent_tools = cfg["agent_registry"].build_tool_registry(operation.agent_id, cfg["full_tools"])
-    runtime = AgentRuntime(
-        cfg["runtime_store"], model=MatrixModelAdapter(cfg["llm"]),
-        tools=MatrixToolAdapter(
-            agent_tools, session_id=operation.session_id, owner_id=operation.owner_id,
-            mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
-            allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
-        ),
-        context=cfg.get("runtime_context") or MatrixContextAdapter(),
-    )
-    handle = runtime.resume(
-        cfg.get("user_id", "default"), operation_id,
-        __import__("matrix.runtime.domain.requests", fromlist=["ResumeInput"]).ResumeInput(
-            kind="approval",
-            decision=approval_decision,
-            payload={"approval_id": approval_id},
-        ),
-    )
-    events = list(handle.events())
-    result = handle.result()
-    if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
-        for trace_event in handle.debug_trace():
-            _push_event(cfg, "debug_trace", {
-                "operation_id": handle.operation_id,
-                "event": trace_event,
-            })
-    step_number: int | None = None
-    if operation.step_id:
-        try:
-            step_number = int(operation.step_id)
-        except ValueError:
-            step_number = None
-    if step_number is None:
-        plan = state.get("delegation_plan", [])
-        current_step = state.get("current_step", 0)
-        if 0 <= current_step < len(plan):
-            raw_step = plan[current_step].get("step")
-            if isinstance(raw_step, int):
-                step_number = raw_step
 
-    task = ""
-    if step_number is not None:
-        for item in state.get("delegation_plan", []):
-            if item.get("step") == step_number:
-                task = item.get("task", "")
-                break
-
-    agent_result: dict[str, Any] = {
-        "agent_id": operation.agent_id,
-        "task": task,
-        "result": result.final_message,
-        "operation_id": operation_id,
-    }
-    if step_number is not None:
-        agent_result["step"] = step_number
-    if result.error:
-        agent_result["error"] = result.error
+    agent_results: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
+    runtime_operation_ids: list[dict[str, Any]] = []
+    completed_steps: list[int] = []
+    completed_step_refs: list[str] = []
+    for operation_id, operation_actions in grouped.items():
+        operation = cfg["runtime_store"].load(cfg.get("user_id", "default"), operation_id)
+        if operation is None:
+            return {"error": "Runtime operation not found", "confirmed": True}
+        agent_def = cfg["agent_registry"].get(operation.agent_id)
+        if agent_def is None:
+            return {"error": "Agent not found", "confirmed": True}
+        agent_tools = cfg["agent_registry"].build_tool_registry(operation.agent_id, cfg["full_tools"])
+        runtime = AgentRuntime(
+            cfg["runtime_store"], model=MatrixModelAdapter(cfg["llm"]),
+            tools=MatrixToolAdapter(
+                agent_tools, session_id=operation.session_id, owner_id=operation.owner_id,
+                mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
+                allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+            ),
+            context=cfg.get("runtime_context") or MatrixContextAdapter(),
+        )
+        first = operation_actions[0] if operation_actions else {}
+        approval_id = str(first.get("approval_id", ""))
+        approval_set_id = str(first.get("approval_set_id", ""))
+        approval_ids = list(first.get("approval_ids", []))
+        handle = runtime.resume(
+            cfg.get("user_id", "default"), operation_id,
+            __import__("matrix.runtime.domain.requests", fromlist=["ResumeInput"]).ResumeInput(
+                kind="approval",
+                decision=approval_decision,
+                payload={
+                    "approval_id": approval_id,
+                    "approval_set_id": approval_set_id,
+                    "approval_ids": approval_ids,
+                    "expected_operation_version": operation.version,
+                },
+            ),
+        )
+        events = list(handle.events())
+        result = handle.result()
+        if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
+            for trace_event in handle.debug_trace():
+                _push_event(cfg, "debug_trace", {
+                    "operation_id": handle.operation_id,
+                    "event": trace_event,
+                })
+        step_number: int | None = None
+        if operation.step_id:
+            try:
+                step_number = int(operation.step_id)
+            except ValueError:
+                step_number = None
+        if step_number is None:
+            plan = state.get("delegation_plan", [])
+            current_step = state.get("current_step", 0)
+            if 0 <= current_step < len(plan):
+                raw_step = plan[current_step].get("step")
+                if isinstance(raw_step, int):
+                    step_number = raw_step
+        task = ""
+        if step_number is not None:
+            for item in state.get("delegation_plan", []):
+                if item.get("step") == step_number:
+                    task = item.get("task", "")
+                    break
+        agent_result: dict[str, Any] = {
+            "agent_id": operation.agent_id,
+            "task": task,
+            "result": result.final_message,
+            "operation_id": operation_id,
+        }
+        if step_number is not None:
+            agent_result["step"] = step_number
+        if result.error:
+            agent_result["error"] = result.error
+        agent_results.append(agent_result)
+        tool_results.extend(_tool_result_dict(item) for item in result.tool_results)
+        runtime_operation_ids.append({"step": step_number, "operation_id": operation_id})
+        if step_number is not None and result.outcome is RunOutcome.COMPLETED:
+            completed_steps.append(step_number)
+            completed_step_refs.append(
+                f"{state.get('plan_revision', 0)}:{step_number}"
+            )
 
     result_data: dict[str, Any] = {
         "confirmed": True,
         "needs_confirmation": False,
         "pending_actions": [],
-        "agent_results": [agent_result],
-        "tool_results": [_tool_result_dict(item) for item in result.tool_results],
-        "runtime_operation_ids": [{
-            "step": step_number,
-            "operation_id": operation_id,
-        }] if step_number is not None else [],
+        "agent_results": agent_results,
+        "tool_results": tool_results,
+        "runtime_operation_ids": runtime_operation_ids,
     }
-    if step_number is not None and result.outcome is RunOutcome.COMPLETED:
-        result_data["completed_steps"] = [step_number]
-        result_data["completed_step_refs"] = [
-            f"{state.get('plan_revision', 0)}:{step_number}"
-        ]
+    if completed_steps:
+        result_data["completed_steps"] = completed_steps
+        result_data["completed_step_refs"] = completed_step_refs
     return result_data
 
 
