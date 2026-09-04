@@ -245,6 +245,8 @@ class MemoryOperationStore:
         return list(self.events.get(operation_id, []))[:limit]
 
     def create_approval(self, approval: Approval) -> None:
+        if not approval.approval_set_id:
+            raise OperationConflictError("approval_set_id is required")
         if approval.approval_id in self.approvals:
             raise OperationConflictError("approval already exists")
         self.approvals[approval.approval_id] = approval
@@ -262,32 +264,17 @@ class MemoryOperationStore:
 
     def get_approval_set(self, owner_id: str, approval_set_id: str) -> ApprovalSet | None:
         approval_set = self.approval_sets.get(approval_set_id)
-        if approval_set is not None:
-            return approval_set if approval_set.owner_id == owner_id else None
-        approval = self.get_approval(owner_id, approval_set_id)
-        if approval is None:
-            return None
-        return ApprovalSet(
-            approval_set_id=approval.approval_id,
-            owner_id=approval.owner_id,
-            operation_id=approval.operation_id,
-            status=_approval_set_status((approval,)),
-            version=approval.version,
-            created_at=approval.created_at,
-            updated_at=approval.updated_at,
+        return (
+            approval_set
+            if approval_set is not None and approval_set.owner_id == owner_id
+            else None
         )
 
     def list_approval_set(self, owner_id: str, approval_set_id: str) -> list[Approval]:
         return [
             approval for approval in self.approvals.values()
             if approval.owner_id == owner_id
-            and (
-                approval.approval_set_id == approval_set_id
-                or (
-                    not approval.approval_set_id
-                    and approval.approval_id == approval_set_id
-                )
-            )
+            and approval.approval_set_id == approval_set_id
         ]
 
     def delete_session_runtime(self, owner_id: str, session_id: str) -> None:
@@ -331,62 +318,112 @@ class MemoryOperationStore:
         }
         self.delete_session_entries(owner_id, session_id)
 
-    def resolve_approval(
+    def resolve_approval_set(
         self,
         owner_id: str,
-        approval_id: str,
-        decision: ApprovalDecision,
+        approval_set_id: str,
+        decisions: dict[str, ApprovalDecision],
         decided_at: float,
-        transition: StateTransition,
-    ) -> Approval:
-        approval = self.get_approval(owner_id, approval_id)
-        if approval is None:
-            raise KeyError(approval_id)
-        operation = self.operations.get(approval.operation_id)
+        decided_by: str,
+        decision_source: str,
+        idempotency_key: str,
+        expected_approval_set_version: int | None,
+        transition: StateTransition | None,
+    ) -> tuple[list[Approval], ApprovalSet]:
+        if not decisions:
+            raise OperationConflictError("at least one approval decision is required")
+        approval_set = self.get_approval_set(owner_id, approval_set_id)
+        if approval_set is None:
+            raise KeyError(approval_set_id)
+        if (
+            expected_approval_set_version is not None
+            and approval_set.version != expected_approval_set_version
+        ):
+            raise OperationConflictError(
+                "approval set version conflict: "
+                f"expected {expected_approval_set_version}, actual {approval_set.version}"
+            )
+        members = {
+            approval.approval_id: approval
+            for approval in self.list_approval_set(owner_id, approval_set_id)
+        }
+        if not members or any(item not in members for item in decisions):
+            raise OperationConflictError("approval does not belong to approval set")
+        operation = self.operations.get(approval_set.operation_id)
         if operation is None or operation.owner_id != owner_id:
             raise OperationConflictError("approval operation not found or owner mismatch")
-        if transition.new_state.operation_id != operation.operation_id:
-            raise OperationConflictError("approval operation does not match transition")
         if operation.phase is not OperationPhase.WAITING_APPROVAL:
             raise OperationConflictError("operation is not waiting for approval")
-        if operation.version != transition.previous_version:
+        if transition is not None and operation.version != transition.previous_version:
             raise OperationConflictError(
                 f"operation version conflict: expected {transition.previous_version}, "
                 f"actual {operation.version}"
             )
-        if approval.status is ApprovalStatus.EXPIRED:
-            return approval
-        if approval.status is not ApprovalStatus.PENDING and approval.decision == decision:
-            return approval
-        if approval.status is not ApprovalStatus.PENDING:
-            raise OperationConflictError("approval is no longer pending")
-        if approval.expires_at is not None and approval.expires_at <= decided_at:
-            expired = replace(
-                approval,
-                status=ApprovalStatus.EXPIRED,
-                version=approval.version + 1,
-            )
-            self.approvals[approval_id] = expired
-            return expired
-        self.commit(transition)
-        updated = replace(
-            approval,
-            status=(ApprovalStatus.APPROVED if decision == ApprovalDecision.APPROVE else ApprovalStatus.SKIPPED),
-            decision=decision,
-            version=approval.version + 1,
-        )
-        self.approvals[approval_id] = updated
-        if approval.approval_set_id:
-            current_set = self.approval_sets.get(approval.approval_set_id)
-            if current_set is not None:
-                members = self.list_approval_set(owner_id, approval.approval_set_id)
-                self.approval_sets[approval.approval_set_id] = replace(
-                    current_set,
-                    status=_approval_set_status(tuple(members)),
-                    version=current_set.version + 1,
+        changed = False
+        for approval_id, decision in decisions.items():
+            approval = members[approval_id]
+            if approval.status is not ApprovalStatus.PENDING:
+                if approval.status is ApprovalStatus.EXPIRED:
+                    continue
+                if approval.decision is not decision:
+                    raise OperationConflictError("approval is no longer pending")
+                if (
+                    idempotency_key
+                    and approval.idempotency_key
+                    and approval.idempotency_key != idempotency_key
+                ):
+                    raise OperationConflictError("idempotency key conflicts with prior decision")
+                continue
+            if approval.expires_at is not None and approval.expires_at <= decided_at:
+                updated = replace(
+                    approval,
+                    status=ApprovalStatus.EXPIRED,
+                    version=approval.version + 1,
+                    decided_by=decided_by,
+                    decided_at=decided_at,
+                    decision_source=decision_source,
+                    idempotency_key=idempotency_key,
                     updated_at=decided_at,
                 )
-        return updated
+            else:
+                updated = replace(
+                    approval,
+                    status=(
+                        ApprovalStatus.APPROVED
+                        if decision is ApprovalDecision.APPROVE
+                        else ApprovalStatus.SKIPPED
+                    ),
+                    decision=decision,
+                    version=approval.version + 1,
+                    decided_by=decided_by,
+                    decided_at=decided_at,
+                    decision_source=decision_source,
+                    idempotency_key=idempotency_key,
+                    updated_at=decided_at,
+                )
+            self.approvals[approval_id] = updated
+            changed = True
+        updated_approvals = self.list_approval_set(owner_id, approval_set_id)
+        next_set = replace(
+            approval_set,
+            status=_approval_set_status(tuple(updated_approvals)),
+            **(
+                {
+                    "version": approval_set.version + 1,
+                    "updated_at": decided_at,
+                    "last_idempotency_key": idempotency_key,
+                }
+                if changed
+                else {}
+            ),
+        )
+        if changed:
+            self.approval_sets[approval_set_id] = next_set
+        if transition is not None:
+            if not changed:
+                raise OperationConflictError("approval decision is already applied")
+            self.commit(transition)
+        return updated_approvals, next_set
 
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:
         key = (request.operation_id, request.call_id)

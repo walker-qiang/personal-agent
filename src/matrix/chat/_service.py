@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator, Protocol
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 
 from ..agent import AgentRegistry, resolve_agent_policy
 from ..agent.commander import COMMANDER
@@ -52,6 +53,13 @@ from ._utils import(
     result_count,
     timestamp,
 )
+
+
+def _pending_approval_set_id(operation: Any) -> str:
+    pending = operation.state.get("pending_tool_calls", [])
+    if isinstance(pending, list) and pending:
+        return str(pending[0].get("approval_set_id", ""))
+    return ""
 
 
 class TraceSink(Protocol):
@@ -1774,13 +1782,16 @@ class ChatService:
             yield {"type": "error", "message": result.error or "深度研究汇总失败，请稍后重试"}
 
     def resume_chat(
-        self, session_id: str, decision: str = "approve", user_id: str = "default",
+        self,
+        session_id: str,
+        user_id: str = "default",
+        approval_set_id: str = "",
+        decisions: dict[str, str] | None = None,
+        expected_approval_set_version: int | None = None,
+        expected_operation_version: int | None = None,
+        idempotency_key: str = "",
     ) -> Iterator[dict[str, Any]]:
         """Resume a paused graph after user confirmation.
-
-        Args:
-            session_id: The session ID of the paused graph.
-            decision: User's decision: 'approve' or 'skip'.
 
         Yields:
             SSE events from the resumed graph execution.
@@ -1788,10 +1799,49 @@ class ChatService:
         started = time.perf_counter()
         runtime_operations = self._runtime_store.list_waiting_approvals(user_id, session_id)
         if runtime_operations:
+            dag_operations = [
+                item for item in runtime_operations
+                if item.operation_scope == "dag_step"
+            ]
+            if approval_set_id:
+                dag_operations = [
+                    item for item in dag_operations
+                    if _pending_approval_set_id(item) == approval_set_id
+                ]
+            if dag_operations:
+                yield from self._resume_graph_chat(
+                    session_id=session_id,
+                    user_id=user_id,
+                    operation=dag_operations[0],
+                    approval_set_id=approval_set_id,
+                    decisions=decisions or {},
+                    expected_approval_set_version=expected_approval_set_version,
+                    expected_operation_version=expected_operation_version,
+                    idempotency_key=idempotency_key,
+                )
+                yield {
+                    "type": "done",
+                    "session_id": session_id,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                }
+                return
             for runtime_operation in runtime_operations:
+                pending = runtime_operation.state.get("pending_tool_calls", [])
+                pending_set_id = ""
+                if isinstance(pending, list) and pending:
+                    pending_set_id = str(pending[0].get("approval_set_id", ""))
+                if approval_set_id and pending_set_id != approval_set_id:
+                    continue
                 yield from self._resume_runtime_chat(
-                    runtime_operation.operation_id, session_id, decision, user_id,
+                    runtime_operation.operation_id,
+                    session_id,
+                    user_id,
                     include_done=False,
+                    approval_set_id=approval_set_id or pending_set_id,
+                    decisions=decisions,
+                    expected_approval_set_version=expected_approval_set_version,
+                    expected_operation_version=expected_operation_version,
+                    idempotency_key=idempotency_key,
                 )
             yield {
                 "type": "done",
@@ -1806,9 +1856,70 @@ class ChatService:
             "duration_ms": 0,
         }
 
+    def _resume_graph_chat(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        operation: Any,
+        approval_set_id: str,
+        decisions: dict[str, str],
+        expected_approval_set_version: int | None,
+        expected_operation_version: int | None,
+        idempotency_key: str,
+    ) -> Iterator[dict[str, Any]]:
+        """Resume the parent LangGraph checkpoint after Runtime approvals."""
+        policy_data = operation.state.get("execution_policy", {})
+        policy = ExecutionPolicy(**{
+            key: value for key, value in policy_data.items()
+            if key in {
+                "mode", "preset", "allow_external_effects", "require_approval",
+                "approval_mode", "auto_approve_operations", "debug_trace", "output_style",
+            }
+        })
+        history = self._get_history(session_id, user_id)
+        llm = self._get_llm(session_id, user_id=user_id)
+        graph_config = self._build_graph_config(
+            session_id, llm, history, "", user_id, [],
+            agent_policy=policy,
+        )
+        resume_payload: dict[str, Any] = {
+            "decisions": decisions,
+            "approval_set_id": approval_set_id,
+            "idempotency_key": idempotency_key,
+        }
+        if expected_approval_set_version is not None:
+            resume_payload["expected_approval_set_version"] = expected_approval_set_version
+        if expected_operation_version is not None:
+            resume_payload["expected_operation_version"] = expected_operation_version
+        try:
+            final_state = yield from self._stream_graph_events(
+                Command(resume=resume_payload),
+                graph_config,
+                emit_classify=False,
+            )
+            if final_state:
+                yield from self._finalize_stream(
+                    final_state, session_id, "", llm, history, user_id,
+                )
+            self._prune_checkpoints(session_id, keep_latest=False)
+        except GraphInterrupt as gi:
+            yield from self._handle_hitl_interrupt(gi, session_id)
+        except Exception as err:
+            logger.error("graph resume error: %s", err, exc_info=True)
+            yield {"type": "error", "message": "恢复编排流程失败，请稍后重试"}
+
     def _resume_runtime_chat(
-        self, operation_id: str, session_id: str, decision: str, user_id: str,
+        self,
+        operation_id: str,
+        session_id: str,
+        user_id: str,
         include_done: bool = True,
+        approval_set_id: str = "",
+        decisions: dict[str, str] | None = None,
+        expected_approval_set_version: int | None = None,
+        expected_operation_version: int | None = None,
+        idempotency_key: str = "",
     ) -> Iterator[dict[str, Any]]:
         """Resume durable Runtime state after a process restart."""
         started = time.perf_counter()
@@ -1833,22 +1944,41 @@ class ChatService:
                     allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
                 ),
             )
-            pending = operation.state.get("pending_tool_call", {})
-            approval_set_id = str(pending.get("approval_set_id", ""))
+            pending_items = operation.state.get("pending_tool_calls", [])
+            if not isinstance(pending_items, list) or not pending_items:
+                yield {"type": "error", "message": "operation has no pending approval requests"}
+                if include_done:
+                    yield {"type": "done", "session_id": session_id, "duration_ms": 0}
+                return
+            if not approval_set_id:
+                yield {"type": "error", "message": "approval_set_id is required"}
+                if include_done:
+                    yield {"type": "done", "session_id": session_id, "duration_ms": 0}
+                return
             approval_ids = [
-                str(item) for item in pending.get("approval_ids", [])
-                if str(item)
+                str(item.get("approval_id", ""))
+                for item in pending_items
+                if isinstance(item, dict) and item.get("approval_id")
             ]
+            payload = {
+                "approval_set_id": approval_set_id,
+                "approval_ids": approval_ids,
+                "expected_operation_version": (
+                    operation.version
+                    if expected_operation_version is None
+                    else expected_operation_version
+                ),
+                "idempotency_key": idempotency_key,
+            }
+            if decisions:
+                payload["decisions"] = decisions
+            if expected_approval_set_version is not None:
+                payload["expected_approval_set_version"] = expected_approval_set_version
             handle = runtime.resume(
                 user_id, operation_id,
                 ResumeInput(
-                    kind="approval", decision=decision,
-                    payload={
-                        "approval_id": pending.get("approval_id", ""),
-                        "approval_set_id": approval_set_id,
-                        "approval_ids": approval_ids,
-                        "expected_operation_version": operation.version,
-                    },
+                    kind="approval",
+                    payload=payload,
                 ),
             )
             events = list(handle.events())
@@ -1869,15 +1999,35 @@ class ChatService:
                 self._remember(session_id, "", result.final_message, user_id=user_id)
             if result.outcome.value == "suspended":
                 suspension = result.suspension
+                actions = (
+                    suspension.payload.get("actions", [])
+                    if suspension is not None else []
+                )
+                set_version = (
+                    suspension.payload.get("approval_set_version")
+                    if suspension is not None else None
+                )
+                if set_version is not None:
+                    actions = [
+                        {**item, "approval_set_version": item.get(
+                            "approval_set_version", set_version,
+                        )}
+                        for item in actions
+                    ]
+                if not actions and suspension is not None:
+                    actions = [{
+                        **(suspension.payload if suspension else {}),
+                        "approval_id": suspension.approval_id,
+                        "approval_set_id": suspension.approval_set_id,
+                        "approval_ids": list(suspension.approval_ids),
+                        "operation_id": operation_id,
+                    }]
                 yield {
                     "type": "confirm_required",
-                    "actions": [{
-                        **(suspension.payload if suspension else {}),
-                        "approval_id": suspension.approval_id if suspension else "",
-                        "approval_set_id": suspension.approval_set_id if suspension else "",
-                        "approval_ids": list(suspension.approval_ids) if suspension else [],
-                        "operation_id": operation_id,
-                    }],
+                    "actions": [
+                        {**item, "operation_id": operation_id}
+                        for item in actions
+                    ],
                     "session_id": session_id,
                 }
             elif result.error:

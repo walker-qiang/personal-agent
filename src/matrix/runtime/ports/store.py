@@ -113,15 +113,19 @@ class OperationStorePort(Protocol):
         """Delete all Runtime/workflow data owned by one chat session."""
         ...
 
-    def resolve_approval(
+    def resolve_approval_set(
         self,
         owner_id: str,
-        approval_id: str,
-        decision: ApprovalDecision,
+        approval_set_id: str,
+        decisions: dict[str, ApprovalDecision],
         decided_at: float,
-        transition: StateTransition,
-    ) -> Approval:
-        """Consume a pending approval and commit the resume transition atomically."""
+        decided_by: str,
+        decision_source: str,
+        idempotency_key: str,
+        expected_approval_set_version: int | None,
+        transition: StateTransition | None,
+    ) -> tuple[list[Approval], ApprovalSet]:
+        """Resolve one or more approvals and optionally commit an operation transition atomically."""
         ...
 
     def begin_tool_effect(self, request: ToolRequest, policy: RecoveryPolicy) -> None:

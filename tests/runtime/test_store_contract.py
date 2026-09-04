@@ -131,7 +131,8 @@ def _suspend_sqlite(store: SQLiteRuntimeStore) -> tuple[str, str]:
     ))
     assert handle.result().outcome is RunOutcome.SUSPENDED
     operation = store.load("owner-a", handle.operation_id)
-    return handle.operation_id, operation.state["pending_tool_call"]["approval_id"]
+    approval_id = operation.state["pending_tool_calls"][0]["approval_id"]
+    return handle.operation_id, approval_id
 
 
 def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> None:
@@ -145,7 +146,13 @@ def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> No
         AgentRuntime(store, FakeModel(), FakeToolExecutor()).resume(
             "owner-b",
             operation_id,
-            ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+            ResumeInput(
+                kind="approval",
+                payload={
+                    "approval_set_id": store.get_approval("owner-a", approval_id).approval_set_id,
+                    "decisions": {approval_id: "approve"},
+                },
+            ),
         )
     tools = FakeToolExecutor({"write": lambda args: {"ok": True}})
     result = AgentRuntime(
@@ -155,7 +162,13 @@ def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> No
     ).resume(
         "owner-a",
         operation_id,
-        ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+        ResumeInput(
+            kind="approval",
+            payload={
+                "approval_set_id": store.get_approval("owner-a", approval_id).approval_set_id,
+                "decisions": {approval_id: "approve"},
+            },
+        ),
     ).result()
 
     effect = store._get_conn().execute(
@@ -171,7 +184,13 @@ def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> No
         AgentRuntime(store, FakeModel(), FakeToolExecutor()).resume(
             "owner-a",
             operation_id,
-            ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+            ResumeInput(
+                kind="approval",
+                payload={
+                    "approval_set_id": store.get_approval("owner-a", approval_id).approval_set_id,
+                    "decisions": {approval_id: "approve"},
+                },
+            ),
         )
     store.close()
 
@@ -193,7 +212,13 @@ def test_sqlite_expired_approval_never_executes_effect(tmp_path) -> None:
     ).resume(
         "owner-a",
         operation_id,
-        ResumeInput(kind="approval", decision="approve", payload={"approval_id": approval_id}),
+        ResumeInput(
+            kind="approval",
+            payload={
+                "approval_set_id": store.get_approval("owner-a", approval_id).approval_set_id,
+                "decisions": {approval_id: "approve"},
+            },
+        ),
     ).result()
 
     effect_count = store._get_conn().execute(

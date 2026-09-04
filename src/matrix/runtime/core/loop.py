@@ -43,6 +43,7 @@ def execute_operation(
     context: ContextPort | None = None,
     resume_approval_id: str = "",
     resume_decision: str = "",
+    resume_decisions: dict[str, str] | None = None,
     committed_events: tuple[RuntimeEvent, ...] = (),
     debug_trace: EphemeralDebugTrace | None = None,
 ) -> tuple[list[RuntimeEvent], RunResult]:
@@ -52,63 +53,86 @@ def execute_operation(
     events: list[RuntimeEvent] = list(committed_events)
     messages = _messages_from_state(operation.state) or list(request.messages)
     tool_results: list[ToolResult] = []
-    total_tool_calls = 0
+    total_tool_calls = int(operation.state.get("runtime_tool_call_count", 0))
     usage: dict[str, Any] = {}
     started_at = time.monotonic()
 
     if resume_approval_id:
         if current.phase is not OperationPhase.RESUMING:
             raise ValueError("resumed operation must already be in resuming phase")
-        pending = current.state.get("pending_tool_call", {})
-        if pending.get("approval_id") != resume_approval_id:
-            raise ValueError("approval does not match suspended tool call")
-        pending_call = ToolCall(
-            call_id=pending["call_id"], name=pending["name"],
-            arguments=dict(pending.get("arguments", {})),
-        )
-        if resume_decision == "approve":
-            current = _commit_phase(store, current, OperationPhase.EXECUTING_TOOLS, None, events)
-            current = _commit_state(
-                store,
-                current,
-                _event(current, RuntimeEventType.TOOL_START, {
-                    "call_id": pending_call.call_id,
-                    "name": pending_call.name,
-                }),
-                events,
+        pending_items = _pending_tool_items(current.state)
+        if not pending_items:
+            raise ValueError("resumed operation has no pending tool calls")
+        decisions = dict(resume_decisions or {})
+        if resume_approval_id and resume_approval_id not in decisions:
+            decisions[resume_approval_id] = resume_decision
+        current = _commit_phase(store, current, OperationPhase.EXECUTING_TOOLS, None, events)
+        for pending in pending_items:
+            pending_call = ToolCall(
+                call_id=pending["call_id"], name=pending["name"],
+                arguments=dict(pending.get("arguments", {})),
             )
-            tool_request = ToolRequest(
-                operation_id=current.operation_id, call_id=pending_call.call_id,
-                name=pending_call.name, arguments=pending_call.arguments,
-            )
+            approval_id = str(pending.get("approval_id", ""))
+            decision = decisions.get(approval_id, "approve") if approval_id else "approve"
             tool_spec = next(
                 (spec for spec in request.tools if spec.name == pending_call.name), None
             )
-            result = _execute_tool_effect(
+            if decision == "skip":
+                result = ToolResult(
+                    call_id=pending_call.call_id, name=pending_call.name,
+                    error="tool call skipped by user", is_error=True,
+                )
+            elif tool_spec is not None and tool_spec.side_effect and not request.execution_policy.allow_external_effects:
+                result = ToolResult(
+                    call_id=pending_call.call_id,
+                    name=pending_call.name,
+                    error=(
+                        f"tool {pending_call.name} is blocked by agent mode "
+                        f"{request.execution_policy.mode}; use an approved writeback operation"
+                    ),
+                    is_error=True,
+                )
+            else:
+                current = _commit_state(
+                    store,
+                    current,
+                    _event(current, RuntimeEventType.TOOL_START, {
+                        "call_id": pending_call.call_id,
+                        "name": pending_call.name,
+                    }),
+                    events,
+                )
+                tool_request = ToolRequest(
+                    operation_id=current.operation_id, call_id=pending_call.call_id,
+                    name=pending_call.name, arguments=pending_call.arguments,
+                )
+                result = _execute_tool_effect(
+                    store,
+                    tools,
+                    tool_request,
+                    tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+                )
+                _check_timeout(started_at, request.execution_options.timeout_seconds)
+                _debug(debug_trace, "tool_result", {
+                    "name": pending_call.name, "call_id": pending_call.call_id,
+                    "result": result.result, "error": result.error,
+                })
+            tool_results.append(result)
+            total_tool_calls += 1
+            messages.append(Message(role="tool", content=_tool_content(result), tool_call_id=result.call_id))
+            current = _commit_state(
                 store,
-                tools,
-                tool_request,
-                tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+                replace(current, state={
+                    **current.state,
+                    "runtime_messages": _messages_to_state(messages),
+                    "pending_tool_calls": [],
+                    "runtime_tool_call_count": total_tool_calls,
+                }),
+                _event(current, RuntimeEventType.TOOL_END, {
+                    "call_id": result.call_id, "name": result.name,
+                    "is_error": result.is_error, "error": result.error,
+                }), events,
             )
-            _check_timeout(started_at, request.execution_options.timeout_seconds)
-            _debug(debug_trace, "tool_result", {
-                "name": pending_call.name, "call_id": pending_call.call_id,
-                "result": result.result, "error": result.error,
-            })
-        else:
-            result = ToolResult(
-                call_id=pending_call.call_id, name=pending_call.name,
-                error="tool call skipped by user", is_error=True,
-            )
-        tool_results.append(result)
-        messages.append(Message(role="tool", content=_tool_content(result), tool_call_id=result.call_id))
-        current = _commit_state(
-            store, replace(current, state={**current.state, "runtime_messages": _messages_to_state(messages), "pending_tool_call": {}}),
-            _event(current, RuntimeEventType.TOOL_END, {
-                "call_id": result.call_id, "name": result.name,
-                "is_error": result.is_error, "error": result.error,
-            }), events,
-        )
         current = _commit_phase(store, current, OperationPhase.PREPARING_NEXT_TURN, None, events)
     else:
         current = _commit_phase(
@@ -164,7 +188,10 @@ def execute_operation(
             messages.append(assistant)
             current = _commit_snapshot(
                 store, current,
-                {"runtime_messages": _messages_to_state(messages)},
+                {
+                    "runtime_messages": _messages_to_state(messages),
+                    "runtime_tool_call_count": total_tool_calls,
+                },
             )
 
             if not response.tool_calls:
@@ -202,6 +229,115 @@ def execute_operation(
                 )
 
             current = _commit_phase(store, current, OperationPhase.EXECUTING_TOOLS, None, events)
+            manual_tool_calls = [
+                (tool_call, next(
+                    (spec for spec in request.tools if spec.name == tool_call.name), None,
+                ))
+                for tool_call in response.tool_calls
+                if (
+                    (next(
+                        (spec for spec in request.tools if spec.name == tool_call.name), None,
+                    ) is not None)
+                    and (
+                        next(
+                            (spec for spec in request.tools if spec.name == tool_call.name), None,
+                        ).requires_approval
+                        or (
+                            next(
+                                (spec for spec in request.tools if spec.name == tool_call.name), None,
+                            ).side_effect and request.execution_policy.require_approval
+                        )
+                    )
+                    and not _can_auto_approve(
+                        tool_call.name, tool_call.arguments, request.execution_policy,
+                    )
+                )
+            ]
+            if manual_tool_calls:
+                approval_set_id = uuid.uuid4().hex
+                approval_created_at = time.time()
+                store.create_approval_set(ApprovalSet(
+                    approval_set_id=approval_set_id,
+                    owner_id=current.owner_id,
+                    operation_id=current.operation_id,
+                    orchestration_run_id=current.orchestration_run_id,
+                    status=ApprovalSetStatus.PENDING,
+                    created_at=approval_created_at,
+                    updated_at=approval_created_at,
+                ))
+                approvals_by_call: dict[str, Approval] = {}
+                for pending_call, _ in manual_tool_calls:
+                    approval = Approval(
+                        approval_id=uuid.uuid4().hex,
+                        owner_id=current.owner_id,
+                        operation_id=current.operation_id,
+                        tool_call_id=pending_call.call_id,
+                        tool_name=pending_call.name,
+                        sanitized_arguments=dict(pending_call.arguments),
+                        risk="tool_requires_approval",
+                        approval_set_id=approval_set_id,
+                    )
+                    store.create_approval(approval)
+                    approvals_by_call[pending_call.call_id] = approval
+                pending_items = [
+                    {
+                        "approval_id": (
+                            approvals_by_call[tool_call.call_id].approval_id
+                            if tool_call.call_id in approvals_by_call else ""
+                        ),
+                        "approval_set_id": approval_set_id,
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.name,
+                        "arguments": dict(tool_call.arguments),
+                    }
+                    for tool_call in response.tool_calls
+                ]
+                approval_items = [
+                    _approval_payload(approval)
+                    for approval in approvals_by_call.values()
+                ]
+                current = replace(
+                    current,
+                    state={
+                        **current.state,
+                        "runtime_messages": _messages_to_state(messages),
+                        "pending_tool_calls": pending_items,
+                    },
+                )
+                current = _commit_phase(
+                    store, current, OperationPhase.WAITING_APPROVAL,
+                    _event(current, RuntimeEventType.APPROVAL_REQUIRED, {
+                        "approval_set_id": approval_set_id,
+                        "approval_ids": [item["approval_id"] for item in approval_items],
+                        "actions": approval_items,
+                    }), events,
+                )
+                current = _commit_state(
+                    store, current,
+                    _event(current, RuntimeEventType.RUN_SUSPENDED, {
+                        "approval_set_id": approval_set_id,
+                        "approval_ids": [item["approval_id"] for item in approval_items],
+                    }), events,
+                )
+                first = approval_items[0]
+                return events, RunResult(
+                    outcome=RunOutcome.SUSPENDED,
+                    operation_id=current.operation_id,
+                    tool_results=list(tool_results),
+                    error="approval required",
+                    suspension=Suspension(
+                        reason="approval required",
+                        approval_id=first["approval_id"],
+                        approval_set_id=approval_set_id,
+                        approval_ids=[item["approval_id"] for item in approval_items],
+                        payload={
+                            "actions": approval_items,
+                            "approval_set_version": 0,
+                            "tool_name": first["tool_name"],
+                            "arguments": first["arguments"],
+                        },
+                    ),
+                )
             for tool_call in response.tool_calls:
                 if handle._cancel_requested:
                     return _finish(
@@ -284,14 +420,13 @@ def execute_operation(
                         state={
                             **current.state,
                             "runtime_messages": _messages_to_state(messages),
-                            "pending_tool_call": {
+                            "pending_tool_calls": [{
                                 "approval_id": approval.approval_id,
                                 "approval_set_id": approval_set_id,
-                                "approval_ids": [approval.approval_id],
                                 "call_id": tool_call.call_id,
                                 "name": tool_call.name,
                                 "arguments": dict(tool_call.arguments),
-                            },
+                            }],
                         },
                     )
                     current = _commit_phase(
@@ -326,12 +461,15 @@ def execute_operation(
                     )
                 if auto_approved:
                     approval_set_id = uuid.uuid4().hex
+                    approval_created_at = time.time()
                     store.create_approval_set(ApprovalSet(
                         approval_set_id=approval_set_id,
                         owner_id=current.owner_id,
                         operation_id=current.operation_id,
                         orchestration_run_id=current.orchestration_run_id,
                         status=ApprovalSetStatus.APPROVED,
+                        created_at=approval_created_at,
+                        updated_at=approval_created_at,
                     ))
                     approval = Approval(
                         approval_id=uuid.uuid4().hex,
@@ -545,6 +683,24 @@ def _approval_operation(tool_name: str, arguments: dict[str, Any]) -> str:
         if isinstance(plan, dict):
             return str(plan.get("operation", ""))
     return tool_name
+
+
+def _approval_payload(approval: Approval) -> dict[str, Any]:
+    return {
+        "approval_id": approval.approval_id,
+        "approval_set_id": approval.approval_set_id,
+        "tool_call_id": approval.tool_call_id,
+        "tool_name": approval.tool_name,
+        "name": approval.tool_name,
+        "arguments": dict(approval.sanitized_arguments),
+        "args": dict(approval.sanitized_arguments),
+        "risk": approval.risk,
+    }
+
+
+def _pending_tool_items(state: dict[str, Any]) -> list[dict[str, Any]]:
+    items = state.get("pending_tool_calls", [])
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
 def _check_timeout(started_at: float, timeout_seconds: float) -> None:

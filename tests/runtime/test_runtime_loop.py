@@ -169,7 +169,8 @@ def _suspend_for_approval(store: MemoryOperationStore):
     ))
     result = handle.result()
     operation = store.load("user-a", handle.operation_id)
-    return handle.operation_id, operation.state["pending_tool_call"]["approval_id"], result
+    approval_id = operation.state["pending_tool_calls"][0]["approval_id"]
+    return handle.operation_id, approval_id, result
 
 
 def test_approved_resume_uses_effect_journal() -> None:
@@ -187,8 +188,10 @@ def test_approved_resume_uses_effect_journal() -> None:
         operation_id,
         ResumeInput(
             kind="approval",
-            decision="approve",
-            payload={"approval_id": approval_id},
+            payload={
+                "approval_set_id": store.approvals[approval_id].approval_set_id,
+                "decisions": {approval_id: "approve"},
+            },
         ),
     )
     events = list(handle.events())
@@ -217,8 +220,10 @@ def test_skipped_resume_does_not_create_effect() -> None:
         operation_id,
         ResumeInput(
             kind="approval",
-            decision="skip",
-            payload={"approval_id": approval_id},
+            payload={
+                "approval_set_id": store.approvals[approval_id].approval_set_id,
+                "decisions": {approval_id: "skip"},
+            },
         ),
     ).result()
 
@@ -245,8 +250,10 @@ def test_expired_approval_aborts_without_executing_tool() -> None:
         operation_id,
         ResumeInput(
             kind="approval",
-            decision="approve",
-            payload={"approval_id": approval_id},
+            payload={
+                "approval_set_id": store.approvals[approval_id].approval_set_id,
+                "decisions": {approval_id: "approve"},
+            },
         ),
     ).result()
 

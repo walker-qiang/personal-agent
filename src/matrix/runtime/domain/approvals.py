@@ -41,6 +41,7 @@ class ApprovalSet:
     version: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    last_idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,10 @@ class Approval:
     created_at: float = 0.0
     updated_at: float = 0.0
     approval_set_id: str = ""
+    decided_by: str = ""
+    decided_at: float | None = None
+    decision_source: str = ""
+    idempotency_key: str = ""
 
 
 # The Runtime uses Approval for the persisted request shape.  Keep the

@@ -223,18 +223,34 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
                     "args": {},
                 }))
     if result.outcome.value == "suspended" and result.suspension is not None:
-        action = {
-            "approval_id": result.suspension.approval_id,
-            "approval_set_id": result.suspension.approval_set_id,
-            "approval_ids": list(result.suspension.approval_ids),
-            "operation_id": handle.operation_id,
-            "name": result.suspension.payload.get("tool_name", ""),
-            "args": result.suspension.payload.get("arguments", {}),
-            "risk": "runtime approval required",
-        }
+        action_values = result.suspension.payload.get("actions", [])
+        actions = [
+            {
+                **item,
+                "operation_id": handle.operation_id,
+                "approval_set_version": result.suspension.payload.get(
+                    "approval_set_version", 0,
+                ),
+            }
+            for item in action_values
+            if isinstance(item, dict)
+        ]
+        if not actions:
+            actions = [{
+                "approval_id": result.suspension.approval_id,
+                "approval_set_id": result.suspension.approval_set_id,
+                "approval_ids": list(result.suspension.approval_ids),
+                "approval_set_version": result.suspension.payload.get(
+                    "approval_set_version", 0,
+                ),
+                "operation_id": handle.operation_id,
+                "name": result.suspension.payload.get("tool_name", ""),
+                "args": result.suspension.payload.get("arguments", {}),
+                "risk": "runtime approval required",
+            }]
         return {
             "needs_confirmation": True,
-            "pending_actions": [action],
+            "pending_actions": actions,
             "runtime_operation_ids": [{
                 "step": step.get("step"),
                 "operation_id": handle.operation_id,

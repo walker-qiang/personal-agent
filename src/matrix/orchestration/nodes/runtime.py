@@ -12,6 +12,7 @@ from ...runtime.adapters.tools import MatrixToolAdapter, tool_specs
 from ...runtime.adapters.context import MatrixContextAdapter
 from ...runtime.domain.messages import Message
 from ...runtime.domain.results import RunOutcome
+from ...runtime.domain.requests import ResumeInput
 from ...runtime.domain.tools import ToolResult
 from ...runtime.testing.memory_store import MemoryOperationStore
 from ._helpers import (
@@ -117,21 +118,37 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
             })
 
     if result.outcome.value == "suspended" and result.suspension is not None:
-        action = {
-            "approval_id": result.suspension.approval_id,
-            "approval_set_id": result.suspension.approval_set_id,
-            "approval_ids": list(result.suspension.approval_ids),
-            "operation_id": handle.operation_id,
-            "name": result.suspension.payload.get("tool_name", ""),
-            "args": result.suspension.payload.get("arguments", {}),
-            "risk": "runtime approval required",
-        }
+        action_values = result.suspension.payload.get("actions", [])
+        actions = [
+            {
+                **item,
+                "operation_id": handle.operation_id,
+                "approval_set_version": result.suspension.payload.get(
+                    "approval_set_version", 0,
+                ),
+            }
+            for item in action_values
+            if isinstance(item, dict)
+        ]
+        if not actions:
+            actions = [{
+                "approval_id": result.suspension.approval_id,
+                "approval_set_id": result.suspension.approval_set_id,
+                "approval_ids": list(result.suspension.approval_ids),
+                "approval_set_version": result.suspension.payload.get(
+                    "approval_set_version", 0,
+                ),
+                "operation_id": handle.operation_id,
+                "name": result.suspension.payload.get("tool_name", ""),
+                "args": result.suspension.payload.get("arguments", {}),
+                "risk": "runtime approval required",
+            }]
         _push_event(cfg, "confirm_required", {
-            "actions": [action], "session_id": state.get("session_id", ""),
+            "actions": actions, "session_id": state.get("session_id", ""),
         })
         return {
             "needs_confirmation": True,
-            "pending_actions": [action],
+            "pending_actions": actions,
             "runtime_operation_ids": [{
                 "step": step.get("step", current_step + 1),
                 "operation_id": handle.operation_id,
@@ -166,9 +183,13 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
     cfg = _get_configurable(config)
     actions = state.get("pending_actions", [])
     decision = interrupt({"type": "confirm", "actions": actions})
-    approval_decision = (
-        "approve" if decision in (True, "approve", "confirmed") else "skip"
-    )
+    if not isinstance(decision, dict):
+        return {"error": "approval decisions must be provided as a map", "confirmed": True}
+    decision_payload = decision
+    selected_decisions = decision_payload.get("decisions", {})
+    if not isinstance(selected_decisions, dict):
+        selected_decisions = {}
+    pending_actions: list[dict[str, Any]] = []
     grouped: dict[str, list[dict[str, Any]]] = {}
     for action in actions:
         if isinstance(action, dict) and action.get("operation_id"):
@@ -203,19 +224,36 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
             context=cfg.get("runtime_context") or MatrixContextAdapter(),
         )
         first = operation_actions[0] if operation_actions else {}
-        approval_id = str(first.get("approval_id", ""))
         approval_set_id = str(first.get("approval_set_id", ""))
-        approval_ids = list(first.get("approval_ids", []))
+        target_set_id = str(decision_payload.get("approval_set_id", ""))
+        if target_set_id and approval_set_id != target_set_id:
+            pending_actions.extend(operation_actions)
+            runtime_operation_ids.append({"step": operation.step_id, "operation_id": operation_id})
+            continue
+        operation_decisions = {
+            str(item.get("approval_id")): str(selected_decisions.get(str(item.get("approval_id"))))
+            for item in operation_actions
+            if isinstance(item, dict)
+            and item.get("approval_id")
+            and str(item.get("approval_id")) in selected_decisions
+            and str(selected_decisions.get(str(item.get("approval_id")))) in {"approve", "skip"}
+        }
+        if not operation_decisions:
+            pending_actions = [*pending_actions, *operation_actions]
+            runtime_operation_ids.append({"step": operation.step_id, "operation_id": operation_id})
+            continue
+        approval_ids = list(operation_decisions)
+        expected_set_version = first.get("approval_set_version")
         handle = runtime.resume(
             cfg.get("user_id", "default"), operation_id,
-            __import__("matrix.runtime.domain.requests", fromlist=["ResumeInput"]).ResumeInput(
+            ResumeInput(
                 kind="approval",
-                decision=approval_decision,
                 payload={
-                    "approval_id": approval_id,
                     "approval_set_id": approval_set_id,
                     "approval_ids": approval_ids,
                     "expected_operation_version": operation.version,
+                    "expected_approval_set_version": expected_set_version,
+                    "decisions": operation_decisions,
                 },
             ),
         )
@@ -259,6 +297,20 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
         agent_results.append(agent_result)
         tool_results.extend(_tool_result_dict(item) for item in result.tool_results)
         runtime_operation_ids.append({"step": step_number, "operation_id": operation_id})
+        if result.outcome is RunOutcome.SUSPENDED and result.suspension is not None:
+            remaining = result.suspension.payload.get("actions", [])
+            pending_actions.extend(
+                {
+                    **item,
+                    "operation_id": operation_id,
+                    "approval_set_version": result.suspension.payload.get(
+                        "approval_set_version",
+                        item.get("approval_set_version", 0),
+                    ),
+                }
+                for item in remaining
+                if isinstance(item, dict)
+            )
         if step_number is not None and result.outcome is RunOutcome.COMPLETED:
             completed_steps.append(step_number)
             completed_step_refs.append(
@@ -267,8 +319,8 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
 
     result_data: dict[str, Any] = {
         "confirmed": True,
-        "needs_confirmation": False,
-        "pending_actions": [],
+        "needs_confirmation": bool(pending_actions),
+        "pending_actions": pending_actions,
         "agent_results": agent_results,
         "tool_results": tool_results,
         "runtime_operation_ids": runtime_operation_ids,

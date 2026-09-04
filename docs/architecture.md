@@ -255,7 +255,7 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 - Workflow run、DAG step、ApprovalSet、ApprovalRequest 和 operation snapshot 共享 durable 标识链路；
   审批决定必须同时通过 owner、operation、approval set 和 expected version 校验。
 - 同一 session 的多个 DAG waiting operation 可由一次 `/chat/confirm` 批量恢复；
-  旧的单 `approval_id` 请求仍兼容读取，ApprovalSet 负责聚合审批状态和幂等决定。
+  请求必须显式携带 `approval_set_id` 和逐条 `decisions`，ApprovalSet 负责聚合审批状态和幂等决定。
 - Agent-as-Tool 的递归深度控制仍属于应用层；每次嵌套委派创建独立的非 top-level Runtime operation，避免与父操作共享可变执行快照。
 - 当前建设阶段 Runtime SQLite 只承载可丢弃的运行态；schema 变化允许重建 Runtime 自有表，不为历史 operation 保留兼容复制逻辑。`personal-assets` 不受影响。
 
@@ -395,7 +395,6 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/chat/confirm` | POST | 确认或跳过高风险操作，恢复对话 |
-| `/chat/confirm` | GET | GET 版本，兼容 EventSource |
 
 **高风险操作类型**：
 - `code.run_python` — 代码执行
@@ -404,7 +403,7 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 
 HITL 流程：Agent 遇到高风险操作后，Runtime 创建 durable ApprovalSet 和 ApprovalRequest，
 SSE 流暂停并发送 `confirm_request` 事件；客户端展示确认界面，用户确认/跳过后，
-通过 `/chat/confirm` 按 session 查询 waiting operations 并恢复执行。Runtime approval
+通过 POST `/chat/confirm` 携带 `approval_set_id` 和逐条 `decisions` 恢复执行。Runtime approval
 不依赖 ChatService 的进程内缓存；进程重启后仍可依据 operation_id、approval_set_id
 和 expected operation version 恢复。
 

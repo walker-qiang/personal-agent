@@ -53,6 +53,32 @@ async def list_approvals(
     }
 
 
+@router.get("/approval-sets/{approval_set_id}")
+async def approval_set_detail(request: Request, approval_set_id: str):
+    """Return one approval set with its member decisions and CAS version."""
+    store = _store(request)
+    owner_id = _user_id(request)
+    approval_set = store.get_approval_set(owner_id, approval_set_id)
+    if approval_set is None:
+        raise HTTPException(status_code=404, detail="runtime approval set not found")
+    operation = store.load(owner_id, approval_set.operation_id)
+    return {
+        "approval_set": {
+            "approval_set_id": approval_set.approval_set_id,
+            "operation_id": approval_set.operation_id,
+            "orchestration_run_id": approval_set.orchestration_run_id,
+            "status": approval_set.status.value,
+            "version": approval_set.version,
+            "created_at": approval_set.created_at,
+            "updated_at": approval_set.updated_at,
+        },
+        "approvals": [
+            _approval_dict(item, operation, approval_set)
+            for item in store.list_approval_set(owner_id, approval_set_id)
+        ],
+    }
+
+
 @router.get("/operations/{operation_id}/events")
 async def operation_events(
     request: Request,
@@ -169,4 +195,8 @@ def _approval_dict(
         "version": approval.version,
         "created_at": approval.created_at,
         "updated_at": approval.updated_at,
+        "decided_by": approval.decided_by,
+        "decided_at": approval.decided_at,
+        "decision_source": approval.decision_source,
+        "idempotency_key": approval.idempotency_key,
     }

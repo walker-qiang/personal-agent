@@ -98,7 +98,6 @@ class ResumeInput:
     """Explicit input used to continue a suspended operation."""
 
     kind: str
-    decision: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

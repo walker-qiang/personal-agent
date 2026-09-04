@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -330,14 +330,17 @@ class SQLiteRuntimeStore:
         return [_event_from_row(row) for row in rows]
 
     def create_approval(self, approval: Approval) -> None:
+        if not approval.approval_set_id:
+            raise OperationConflictError("approval_set_id is required")
         with self._lock:
             conn = self._get_conn()
             conn.execute(
                 """INSERT INTO runtime_approvals
                 (approval_id, approval_set_id, owner_id, operation_id, tool_call_id, tool_name,
-                 sanitized_arguments_json, risk, status, decision, expires_at,
-                 version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sanitized_arguments_json, risk, status, decision, expires_at,
+                version, created_at, updated_at, decided_by, decided_at,
+                decision_source, idempotency_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     approval.approval_id, approval.approval_set_id, approval.owner_id,
                     approval.operation_id,
@@ -345,7 +348,10 @@ class SQLiteRuntimeStore:
                     json.dumps(approval.sanitized_arguments, ensure_ascii=False, default=str),
                     approval.risk, approval.status.value,
                     approval.decision.value if approval.decision else None,
-                    approval.expires_at, approval.version, time.time(), time.time(),
+                    approval.expires_at, approval.version,
+                    approval.created_at or time.time(), approval.updated_at or time.time(),
+                    approval.decided_by, approval.decided_at,
+                    approval.decision_source, approval.idempotency_key,
                 ),
             )
             conn.commit()
@@ -356,8 +362,8 @@ class SQLiteRuntimeStore:
             conn.execute(
                 """INSERT INTO runtime_approval_sets
                 (approval_set_id, owner_id, operation_id, orchestration_run_id,
-                 status, version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                status, version, created_at, updated_at, last_idempotency_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     approval_set.approval_set_id,
                     approval_set.owner_id,
@@ -367,6 +373,7 @@ class SQLiteRuntimeStore:
                     approval_set.version,
                     approval_set.created_at or time.time(),
                     approval_set.updated_at or time.time(),
+                    approval_set.last_idempotency_key,
                 ),
             )
             conn.commit()
@@ -386,26 +393,7 @@ class SQLiteRuntimeStore:
                 "WHERE owner_id=? AND approval_set_id=?",
                 (owner_id, approval_set_id),
             ).fetchone()
-            if row is not None:
-                return _approval_set_from_row(row)
-            # Compatibility for approvals written before approval sets existed.
-            approval = self._get_conn().execute(
-                "SELECT * FROM runtime_approvals "
-                "WHERE owner_id=? AND approval_id=?",
-                (owner_id, approval_set_id),
-            ).fetchone()
-        if approval is None:
-            return None
-        item = _approval_from_row(approval)
-        return ApprovalSet(
-            approval_set_id=item.approval_id,
-            owner_id=item.owner_id,
-            operation_id=item.operation_id,
-            status=_approval_set_status((item,)),
-            version=item.version,
-            created_at=item.created_at,
-            updated_at=item.updated_at,
-        )
+        return _approval_set_from_row(row) if row is not None else None
 
     def list_approval_set(
         self, owner_id: str, approval_set_id: str,
@@ -413,10 +401,9 @@ class SQLiteRuntimeStore:
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT * FROM runtime_approvals "
-                "WHERE owner_id=? AND (approval_set_id=? OR "
-                "(approval_set_id='' AND approval_id=?)) "
+                "WHERE owner_id=? AND approval_set_id=? "
                 "ORDER BY created_at, approval_id",
-                (owner_id, approval_set_id, approval_set_id),
+                (owner_id, approval_set_id),
             ).fetchall()
         return [_approval_from_row(row) for row in rows]
 
@@ -514,58 +501,104 @@ class SQLiteRuntimeStore:
             ).fetchall()
         return [_approval_from_row(row) for row in rows]
 
-    def resolve_approval(
+    def resolve_approval_set(
         self,
         owner_id: str,
-        approval_id: str,
-        decision: ApprovalDecision,
+        approval_set_id: str,
+        decisions: dict[str, ApprovalDecision],
         decided_at: float,
-        transition: StateTransition,
-    ) -> Approval:
+        decided_by: str,
+        decision_source: str,
+        idempotency_key: str,
+        expected_approval_set_version: int | None,
+        transition: StateTransition | None,
+    ) -> tuple[list[Approval], ApprovalSet]:
+        if not decisions:
+            raise OperationConflictError("at least one approval decision is required")
         with self._lock:
             conn = self._get_conn()
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT * FROM runtime_approvals WHERE owner_id=? AND approval_id=?",
-                    (owner_id, approval_id),
+                set_row = conn.execute(
+                    "SELECT * FROM runtime_approval_sets "
+                    "WHERE owner_id=? AND approval_set_id=?",
+                    (owner_id, approval_set_id),
                 ).fetchone()
-                if row is None:
-                    raise KeyError(approval_id)
-                existing = _approval_from_row(row)
-                if (
-                    existing.status is not ApprovalStatus.PENDING
-                    and existing.decision is decision
+                if set_row is None:
+                    raise KeyError(approval_set_id)
+                approval_set = _approval_set_from_row(set_row)
+                if expected_approval_set_version is not None and (
+                    approval_set.version != expected_approval_set_version
                 ):
-                    conn.commit()
-                    return existing
-                if row["operation_id"] != transition.new_state.operation_id:
-                    raise OperationConflictError("approval operation does not match transition")
+                    raise OperationConflictError(
+                        "approval set version conflict: "
+                        f"expected {expected_approval_set_version}, actual {approval_set.version}"
+                    )
+                rows = conn.execute(
+                    "SELECT * FROM runtime_approvals WHERE owner_id=? AND "
+                    "approval_set_id=? "
+                    "ORDER BY created_at, approval_id",
+                    (owner_id, approval_set_id),
+                ).fetchall()
+                current_approvals = {
+                    item.approval_id: item for item in
+                    [_approval_from_row(row) for row in rows]
+                }
+                if not current_approvals:
+                    raise OperationConflictError("approval set has no approval requests")
+                if any(item not in current_approvals for item in decisions):
+                    raise OperationConflictError("approval does not belong to approval set")
                 operation = conn.execute(
                     "SELECT owner_id, phase, version FROM runtime_operations WHERE operation_id=?",
-                    (row["operation_id"],),
+                    (approval_set.operation_id,),
                 ).fetchone()
                 if operation is None or operation["owner_id"] != owner_id:
                     raise OperationConflictError("approval operation not found or owner mismatch")
                 if operation["phase"] != OperationPhase.WAITING_APPROVAL.value:
                     raise OperationConflictError("operation is not waiting for approval")
-                if int(operation["version"]) != transition.previous_version:
+                if transition is not None and int(operation["version"]) != transition.previous_version:
                     raise OperationConflictError(
                         f"operation version conflict: expected {transition.previous_version}, "
                         f"actual {operation['version']}"
                     )
-                if existing.status is ApprovalStatus.EXPIRED:
-                    conn.commit()
-                    return existing
-                if existing.status is not ApprovalStatus.PENDING:
-                    raise OperationConflictError("approval is no longer pending")
-                if existing.expires_at is not None and existing.expires_at <= decided_at:
+
+                changed = False
+                for approval_id, decision in decisions.items():
+                    existing = current_approvals[approval_id]
+                    if existing.status is not ApprovalStatus.PENDING:
+                        if existing.status is ApprovalStatus.EXPIRED:
+                            continue
+                        if existing.decision is not decision:
+                            raise OperationConflictError("approval is no longer pending")
+                        if (
+                            idempotency_key
+                            and existing.idempotency_key
+                            and existing.idempotency_key != idempotency_key
+                        ):
+                            raise OperationConflictError("idempotency key conflicts with prior decision")
+                        continue
+                    if existing.expires_at is not None and existing.expires_at <= decided_at:
+                        status = ApprovalStatus.EXPIRED
+                        decision_value = None
+                    else:
+                        status = (
+                            ApprovalStatus.APPROVED
+                            if decision is ApprovalDecision.APPROVE
+                            else ApprovalStatus.SKIPPED
+                        )
+                        decision_value = decision.value
                     cur = conn.execute(
-                        "UPDATE runtime_approvals SET status=?, decision=NULL, version=version+1, updated_at=? "
+                        "UPDATE runtime_approvals SET status=?, decision=?, version=version+1, "
+                        "updated_at=?, decided_by=?, decided_at=?, decision_source=?, idempotency_key=? "
                         "WHERE approval_id=? AND owner_id=? AND status=? AND version=?",
                         (
-                            ApprovalStatus.EXPIRED.value,
+                            status.value,
+                            decision_value,
                             decided_at,
+                            decided_by,
+                            decided_at,
+                            decision_source,
+                            idempotency_key,
                             approval_id,
                             owner_id,
                             ApprovalStatus.PENDING.value,
@@ -574,42 +607,47 @@ class SQLiteRuntimeStore:
                     )
                     if cur.rowcount != 1:
                         raise OperationConflictError("approval compare-and-swap failed")
-                    if existing.approval_set_id:
-                        _refresh_approval_set(conn, existing.approval_set_id, decided_at)
-                    conn.commit()
-                    expired = conn.execute(
-                        "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
-                    ).fetchone()
-                    return _approval_from_row(expired)
+                    changed = True
 
-                _apply_transition(conn, transition)
-                status = (
-                    ApprovalStatus.APPROVED
-                    if decision is ApprovalDecision.APPROVE
-                    else ApprovalStatus.SKIPPED
-                )
-                cur = conn.execute(
-                    "UPDATE runtime_approvals SET status=?, decision=?, version=version+1, updated_at=? "
-                    "WHERE approval_id=? AND owner_id=? AND status=? AND version=?",
-                    (
-                        status.value,
-                        decision.value,
-                        decided_at,
-                        approval_id,
-                        owner_id,
-                        ApprovalStatus.PENDING.value,
-                        existing.version,
-                    ),
-                )
-                if cur.rowcount != 1:
-                    raise OperationConflictError("approval compare-and-swap failed")
-                if existing.approval_set_id:
-                    _refresh_approval_set(conn, existing.approval_set_id, decided_at)
+                updated_rows = conn.execute(
+                    "SELECT * FROM runtime_approvals WHERE owner_id=? AND "
+                    "approval_set_id=? "
+                    "ORDER BY created_at, approval_id",
+                    (owner_id, approval_set_id),
+                ).fetchall()
+                updated_approvals = [_approval_from_row(row) for row in updated_rows]
+                next_status = _approval_set_status(tuple(updated_approvals))
+                if changed:
+                    cur = conn.execute(
+                        "UPDATE runtime_approval_sets SET status=?, version=version+1, "
+                        "updated_at=?, last_idempotency_key=? "
+                        "WHERE owner_id=? AND approval_set_id=? AND version=?",
+                        (
+                            next_status.value,
+                            decided_at,
+                            idempotency_key,
+                            owner_id,
+                            approval_set_id,
+                            approval_set.version,
+                        ),
+                    )
+                    if cur.rowcount != 1:
+                        raise OperationConflictError("approval set compare-and-swap failed")
+                    approval_set = replace(
+                        approval_set,
+                        status=next_status,
+                        version=approval_set.version + 1,
+                        updated_at=decided_at,
+                        last_idempotency_key=idempotency_key,
+                    )
+                else:
+                    approval_set = replace(approval_set, status=next_status)
+                if transition is not None:
+                    if not changed:
+                        raise OperationConflictError("approval decision is already applied")
+                    _apply_transition(conn, transition)
                 conn.commit()
-                updated = conn.execute(
-                    "SELECT * FROM runtime_approvals WHERE approval_id=?", (approval_id,)
-                ).fetchone()
-                return _approval_from_row(updated)
+                return updated_approvals, approval_set
             except sqlite3.IntegrityError as exc:
                 conn.rollback()
                 raise OperationConflictError(str(exc)) from exc
@@ -1001,6 +1039,10 @@ def _approval_from_row(row: sqlite3.Row) -> Approval:
         expires_at=row["expires_at"], version=int(row["version"]),
         created_at=float(row["created_at"]), updated_at=float(row["updated_at"]),
         approval_set_id=row["approval_set_id"] or "",
+        decided_by=row["decided_by"] or "",
+        decided_at=row["decided_at"],
+        decision_source=row["decision_source"] or "",
+        idempotency_key=row["idempotency_key"] or "",
     )
 
 

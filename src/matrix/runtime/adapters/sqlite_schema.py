@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 
-RUNTIME_SCHEMA_VERSION = 2
+RUNTIME_SCHEMA_VERSION = 3
 
 
 def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
@@ -128,7 +128,8 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             version INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            last_idempotency_key TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_runtime_approval_sets_owner_status
             ON runtime_approval_sets(owner_id, status, updated_at);
@@ -158,6 +159,25 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
     if "approval_set_id" not in columns:
         conn.execute(
             "ALTER TABLE runtime_approvals ADD COLUMN approval_set_id TEXT NOT NULL DEFAULT ''"
+        )
+    approval_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime_approvals)").fetchall()
+    }
+    for name, definition in (
+        ("decided_by", "TEXT NOT NULL DEFAULT ''"),
+        ("decided_at", "REAL"),
+        ("decision_source", "TEXT NOT NULL DEFAULT ''"),
+        ("idempotency_key", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in approval_columns:
+            conn.execute(f"ALTER TABLE runtime_approvals ADD COLUMN {name} {definition}")
+    approval_set_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime_approval_sets)").fetchall()
+    }
+    if "last_idempotency_key" not in approval_set_columns:
+        conn.execute(
+            "ALTER TABLE runtime_approval_sets ADD COLUMN "
+            "last_idempotency_key TEXT NOT NULL DEFAULT ''"
         )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_runtime_approvals_set_status "

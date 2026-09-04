@@ -142,40 +142,39 @@ async def chat_confirm(request: Request):
             return JSONResponse(
                 {"error": "session_id is required"}, status_code=400
             )
-        decision = str(payload.get("decision", "approve")).strip()
-        if decision not in ("approve", "skip"):
-            decision = "approve"
+        raw_decisions = payload.get("decisions", {})
+        decisions = (
+            {
+                str(key): str(value)
+                for key, value in raw_decisions.items()
+                if str(key) and str(value) in ("approve", "skip")
+            }
+            if isinstance(raw_decisions, dict) else {}
+        )
+        approval_set_id = str(payload.get("approval_set_id", "")).strip()
+        if not approval_set_id or not decisions:
+            return JSONResponse(
+                {"error": "approval_set_id and decisions are required"},
+                status_code=400,
+            )
+        expected_approval_set_version = payload.get("expected_approval_set_version")
+        expected_operation_version = payload.get("expected_operation_version")
+        idempotency_key = str(payload.get("idempotency_key", "")).strip()
     except (FinanceToolError, json.JSONDecodeError) as err:
         return JSONResponse(
             {"error": f"invalid confirm request: {err}"}, status_code=400
         )
 
     def iter_events():
-        for event in chat_service.resume_chat(session_id, decision, user_id=_get_user_id(request)):
-            event_type = str(event.get("type", "message"))
-            payload_data = {key: value for key, value in event.items() if key != "type"}
-            yield sse_event(event_type, payload_data)
-
-    return sse_response(iter_events())
-
-
-@router.get("/chat/confirm")
-async def chat_confirm_get(
-    request: Request,
-    session_id: str = Query(..., description="Session ID"),
-    decision: str = Query(default="approve", description="approve or skip"),
-):
-    """GET version of confirm for EventSource clients."""
-    chat_service: ChatService = request.app.state.chat
-    session_id = session_id.strip()
-    if not session_id:
-        return JSONResponse({"error": "session_id is required"}, status_code=400)
-    decision = decision.strip()
-    if decision not in ("approve", "skip"):
-        decision = "approve"
-
-    def iter_events():
-        for event in chat_service.resume_chat(session_id, decision, user_id=_get_user_id(request)):
+        for event in chat_service.resume_chat(
+            session_id,
+            user_id=_get_user_id(request),
+            approval_set_id=approval_set_id,
+            decisions=decisions,
+            expected_approval_set_version=expected_approval_set_version,
+            expected_operation_version=expected_operation_version,
+            idempotency_key=idempotency_key,
+        ):
             event_type = str(event.get("type", "message"))
             payload_data = {key: value for key, value in event.items() if key != "type"}
             yield sse_event(event_type, payload_data)

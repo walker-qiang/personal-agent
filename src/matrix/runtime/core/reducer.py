@@ -37,11 +37,16 @@ _ALLOWED_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
         OperationPhase.ABORTED,
         OperationPhase.RECOVERY_REQUIRED,
     }),
-    OperationPhase.WAITING_APPROVAL: frozenset({OperationPhase.RESUMING, OperationPhase.ABORTED}),
+    OperationPhase.WAITING_APPROVAL: frozenset({
+        OperationPhase.WAITING_APPROVAL,
+        OperationPhase.RESUMING,
+        OperationPhase.ABORTED,
+    }),
     OperationPhase.RESUMING: frozenset({
         OperationPhase.EXECUTING_TOOLS,
         OperationPhase.PREPARING_NEXT_TURN,
         OperationPhase.FAILED,
+        OperationPhase.ABORTED,
         OperationPhase.RECOVERY_REQUIRED,
     }),
     OperationPhase.COMPLETED: frozenset(),

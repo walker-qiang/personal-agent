@@ -78,11 +78,19 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "runtime_confirm",
         lambda state: (
-            "replan_node"
-            if len(state.get("delegation_plan", [])) > 1
-            else "aggregate"
+            "runtime_confirm"
+            if state.get("needs_confirmation")
+            else (
+                "replan_node"
+                if len(state.get("delegation_plan", [])) > 1
+                else "aggregate"
+            )
         ),
-        {"replan_node": "replan_node", "aggregate": "aggregate"},
+        {
+            "runtime_confirm": "runtime_confirm",
+            "replan_node": "replan_node",
+            "aggregate": "aggregate",
+        },
     )
     graph.add_conditional_edges(
         "runtime_delegate",

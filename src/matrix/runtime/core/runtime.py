@@ -19,7 +19,7 @@ from ..domain.operations import OperationPhase, OperationState, StateTransition
 from ..domain.requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
 from ..domain.messages import Message
 from ..domain.tools import RecoveryPolicy, ToolSpec
-from ..domain.results import RunOutcome, RunResult
+from ..domain.results import RunOutcome, RunResult, Suspension
 from ..ports.model import ModelPort
 from ..ports.context import ContextPort
 from ..ports.store import OperationStorePort
@@ -181,38 +181,30 @@ class AgentRuntime:
             str(item) for item in raw_approval_ids
             if str(item)
         ] if isinstance(raw_approval_ids, (list, tuple)) else []
-        approval_id = str(payload.get("approval_id", ""))
-        if not approval_id:
-            pending = operation.state.get("pending_tool_call", {})
-            approval_id = str(pending.get("approval_id", ""))
-            approval_set_id = approval_set_id or str(pending.get("approval_set_id", ""))
-            approval_ids = approval_ids or [
-                str(item) for item in pending.get("approval_ids", [])
-                if str(item)
-            ]
-        if not approval_ids and approval_id:
-            approval_ids = [approval_id]
         if not approval_set_id:
-            approval_set_id = str(operation.state.get("pending_tool_call", {}).get(
-                "approval_set_id", ""
-            ))
-        decision = resume_input.decision or str(resume_input.payload.get("decision", "approve"))
-        if not approval_id and approval_set_id:
-            approvals = self.store.list_approval_set(owner_id, approval_set_id)
-            approval_id = approvals[0].approval_id if len(approvals) == 1 else ""
-            approval_ids = approval_ids or [item.approval_id for item in approvals]
+            raise OperationConflictError("approval_set_id is required")
+        approvals = self.store.list_approval_set(owner_id, approval_set_id)
+        if not approvals:
+            raise OperationConflictError("approval set has no approval requests")
+        approval_ids = approval_ids or [item.approval_id for item in approvals]
+        decisions_payload = payload.get("decisions")
+        decisions: dict[str, str] = {}
+        if isinstance(decisions_payload, dict):
+            decisions = {
+                str(key): str(value)
+                for key, value in decisions_payload.items()
+                if str(key) and str(value) in {"approve", "skip"}
+            }
+        if not decisions:
+            raise OperationConflictError("decisions are required")
+        if any(item not in {approval.approval_id for approval in approvals} for item in decisions):
+            raise OperationConflictError("approval does not belong to approval set")
         expected_version = payload.get("expected_operation_version")
         if expected_version is not None and int(expected_version) != operation.version:
             raise OperationConflictError(
                 f"operation version conflict: expected {expected_version}, "
                 f"actual {operation.version}"
             )
-        approval = self.store.get_approval(owner_id, approval_id)
-        if approval is None:
-            raise OperationConflictError("approval not found or owner mismatch")
-        if approval.operation_id != operation_id:
-            raise OperationConflictError("approval does not belong to operation")
-        approval_set_id = approval_set_id or approval.approval_set_id or approval.approval_id
         approval_set = self.store.get_approval_set(owner_id, approval_set_id)
         if approval_set is None or approval_set.operation_id != operation_id:
             raise OperationConflictError("approval set does not belong to operation")
@@ -228,19 +220,23 @@ class AgentRuntime:
             operation_id=operation_id,
             _debug=EphemeralDebugTrace() if policy.debug_trace else None,
         )
-        approval_decision = (
-            ApprovalDecision.APPROVE if decision == "approve" else ApprovalDecision.SKIP
-        )
         handle._run = lambda current_handle: self._resume_operation(
             current_handle,
             owner_id=owner_id,
             operation_id=operation_id,
-            approval_id=approval.approval_id,
             approval_set_id=approval_set_id,
-            approval_ids=approval_ids or [approval.approval_id],
-            decision=approval_decision,
+            approval_ids=approval_ids or [item.approval_id for item in approvals],
+            decisions=decisions,
             policy=policy,
             expected_version=operation.version,
+            expected_approval_set_version=(
+                approval_set.version
+                if payload.get("expected_approval_set_version") is None
+                else int(payload["expected_approval_set_version"])
+            ),
+            decided_by=owner_id,
+            decision_source=str(payload.get("decision_source", "chat")) or "chat",
+            idempotency_key=str(payload.get("idempotency_key", "")),
         )
         return handle
 
@@ -250,12 +246,15 @@ class AgentRuntime:
         *,
         owner_id: str,
         operation_id: str,
-        approval_id: str,
         approval_set_id: str,
         approval_ids: list[str],
-        decision: ApprovalDecision,
+        decisions: dict[str, str],
         policy: ExecutionPolicy,
         expected_version: int,
+        expected_approval_set_version: int,
+        decided_by: str,
+        decision_source: str,
+        idempotency_key: str,
     ) -> tuple[list[RuntimeEvent], RunResult]:
         operation = self.store.load(owner_id, operation_id)
         if operation is None:
@@ -267,67 +266,147 @@ class AgentRuntime:
                 f"operation version conflict: expected {expected_version}, "
                 f"actual {operation.version}"
             )
-        pending = operation.state.get("pending_tool_call", {})
-        if pending.get("approval_id") != approval_id:
-            raise OperationConflictError("approval does not match suspended tool call")
-        pending_set_id = str(pending.get("approval_set_id", ""))
+        pending_items = _pending_tool_items(operation.state)
+        pending_set_id = str(
+            pending_items[0].get("approval_set_id", "") if pending_items else ""
+        )
         if pending_set_id and pending_set_id != approval_set_id:
             raise OperationConflictError("approval set does not match suspended tool call")
-
         decided_at = time.time()
+        approvals = self.store.list_approval_set(owner_id, approval_set_id)
+        if not approvals:
+            raise OperationConflictError("approval set has no approval requests")
+        pending_approval_ids = {
+            item.approval_id for item in approvals
+            if item.status is ApprovalStatus.PENDING
+        }
+        if not pending_approval_ids.intersection(decisions):
+            replayed = all(
+                item.approval_id in decisions
+                and item.decision is not None
+                and item.decision.value == decisions[item.approval_id]
+                and (
+                    not idempotency_key
+                    or item.idempotency_key == idempotency_key
+                )
+                for item in approvals
+                if item.approval_id in decisions
+            )
+            if replayed:
+                pending = [
+                    _approval_payload(item)
+                    for item in approvals
+                    if item.status is ApprovalStatus.PENDING
+                ]
+                return [], RunResult(
+                    outcome=RunOutcome.SUSPENDED,
+                    operation_id=operation_id,
+                    error="approval required",
+                    suspension=Suspension(
+                        reason="approval required",
+                        approval_id=pending[0]["approval_id"] if pending else "",
+                        approval_set_id=approval_set_id,
+                        approval_ids=[item["approval_id"] for item in pending],
+                        payload={
+                            "actions": pending,
+                            "approval_set_version": (
+                                self.store.get_approval_set(
+                                    owner_id, approval_set_id
+                                ).version
+                            ),
+                        },
+                    ),
+                )
+            raise OperationConflictError("no pending approval was selected")
+        decision_values = {
+            key: ApprovalDecision.APPROVE if value == "approve" else ApprovalDecision.SKIP
+            for key, value in decisions.items()
+        }
+        decided_at = time.time()
+        all_decided = pending_approval_ids.issubset(decision_values)
+        event_type = (
+            RuntimeEventType.RUN_RESUMED if all_decided
+            else RuntimeEventType.APPROVAL_DECIDED
+        )
         resume_event = RuntimeEvent(
             event_id=uuid.uuid4().hex,
             owner_id=operation.owner_id,
             operation_id=operation.operation_id,
             session_id=operation.session_id,
             sequence=operation.last_event_sequence + 1,
-            event_type=RuntimeEventType.RUN_RESUMED,
+            event_type=event_type,
             timestamp=decided_at,
             payload={
-                "approval_id": approval_id,
                 "approval_set_id": approval_set_id,
-                "approval_ids": approval_ids,
-                "decision": decision.value,
+                "approval_ids": list(decisions),
+                "decisions": decisions,
                 "owner_id": owner_id,
                 "expected_operation_version": expected_version,
+                "expected_approval_set_version": expected_approval_set_version,
             },
         )
+        target_phase = OperationPhase.RESUMING if all_decided else OperationPhase.WAITING_APPROVAL
         resumed_state = replace(
-            with_next_phase(operation, OperationPhase.RESUMING),
+            operation,
+            phase=target_phase,
+            version=operation.version + 1,
             last_event_sequence=resume_event.sequence,
         )
-        resolved = self.store.resolve_approval(
-            owner_id,
-            approval_id,
-            decision,
-            decided_at,
-            StateTransition(
+        resolved, resolved_set = self.store.resolve_approval_set(
+            owner_id=owner_id,
+            approval_set_id=approval_set_id,
+            decisions=decision_values,
+            decided_at=decided_at,
+            decided_by=decided_by,
+            decision_source=decision_source,
+            idempotency_key=idempotency_key,
+            expected_approval_set_version=expected_approval_set_version,
+            transition=StateTransition(
                 previous_version=operation.version,
                 new_state=resumed_state,
                 events=(resume_event,),
             ),
         )
-        if resolved.status is ApprovalStatus.EXPIRED:
+        if not all_decided:
+            pending = [
+                _approval_payload(item)
+                for item in resolved
+                if item.status is ApprovalStatus.PENDING
+            ]
+            return [resume_event], RunResult(
+                outcome=RunOutcome.SUSPENDED,
+                operation_id=operation_id,
+                error="approval required",
+                suspension=Suspension(
+                    reason="approval required",
+                    approval_id=pending[0]["approval_id"] if pending else "",
+                    approval_set_id=approval_set_id,
+                    approval_ids=[item["approval_id"] for item in pending],
+                    payload={"actions": pending, "approval_set_version": resolved_set.version},
+                ),
+            )
+        if any(item.status is ApprovalStatus.EXPIRED for item in resolved):
+            latest = self.store.load(owner_id, operation_id) or resumed_state
             abort_event = RuntimeEvent(
                 event_id=uuid.uuid4().hex,
                 owner_id=operation.owner_id,
                 operation_id=operation.operation_id,
                 session_id=operation.session_id,
-                sequence=operation.last_event_sequence + 1,
+                sequence=latest.last_event_sequence + 1,
                 event_type=RuntimeEventType.RUN_ABORTED,
                 timestamp=time.time(),
                 payload={"outcome": RunOutcome.ABORTED.value, "error": "approval expired"},
             )
             aborted_state = replace(
-                with_next_phase(operation, OperationPhase.ABORTED),
+                with_next_phase(latest, OperationPhase.ABORTED),
                 last_event_sequence=abort_event.sequence,
             )
             self.store.commit(StateTransition(
-                previous_version=operation.version,
+                previous_version=latest.version,
                 new_state=aborted_state,
                 events=(abort_event,),
             ))
-            return [abort_event], RunResult(
+            return [resume_event, abort_event], RunResult(
                 outcome=RunOutcome.ABORTED,
                 operation_id=operation.operation_id,
                 error="approval expired",
@@ -367,7 +446,34 @@ class AgentRuntime:
             tools=self.tools,
             context=self.context,
             debug_trace=handle._debug,
-            resume_approval_id=resolved.approval_id,
-            resume_decision=resolved.decision.value if resolved.decision else decision.value,
+            resume_approval_id=next(
+                item.approval_id for item in resolved
+                if item.status is not ApprovalStatus.EXPIRED
+            ),
+            resume_decision="approve",
+            resume_decisions={
+                item.approval_id: item.decision.value
+                for item in resolved
+                if item.decision is not None
+            },
             committed_events=(resume_event,),
         )
+
+
+def _pending_tool_items(state: dict) -> list[dict]:
+    items = state.get("pending_tool_calls", [])
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _approval_payload(approval) -> dict:
+    return {
+        "approval_id": approval.approval_id,
+        "approval_set_id": approval.approval_set_id,
+        "tool_call_id": approval.tool_call_id,
+        "tool_name": approval.tool_name,
+        "name": approval.tool_name,
+        "arguments": dict(approval.sanitized_arguments),
+        "args": dict(approval.sanitized_arguments),
+        "risk": approval.risk,
+        "status": approval.status.value,
+    }
