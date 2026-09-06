@@ -28,6 +28,7 @@ from langgraph.types import RunnableConfig
 from ...llm import LLMError, LLMClient, FunctionCallResult
 from ...tools import FinanceToolError, ToolRegistry
 from ..events import make_event
+from ...runtime.domain.events import RuntimeEvent
 
 # ── Re-exports from split modules ────────────────────────────────────────────
 
@@ -770,6 +771,16 @@ def _push_event(cfg: dict[str, Any], evt_type: str, payload: dict[str, Any]) -> 
             q.put_nowait(make_event(evt_type, payload))
         except queue.Full:
             logger.warning("event_queue full: dropping %s event", evt_type)
+
+
+def _push_runtime_event(cfg: dict[str, Any], event: RuntimeEvent) -> None:
+    """Publish a canonical Runtime event to the orchestration stream."""
+    q = cfg.get("event_queue")
+    if q is not None:
+        try:
+            q.put_nowait(event)
+        except queue.Full:
+            logger.warning("event_queue full: dropping Runtime event %s", event.event_type.value)
 
 
 # ── High-risk tool detection ──────────────────────────────────────────────────

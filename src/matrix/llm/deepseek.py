@@ -23,7 +23,7 @@ from typing import Any, Iterator
 
 from .errors import LLMError
 from .http import post_json_stream_events, post_json_with_retry
-from .protocol import FunctionCallResult, ToolCall, parse_json_response
+from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
 
@@ -300,6 +300,109 @@ class DeepSeekClient:
             delta = chunk.get("delta", "")
             if delta:
                 yield delta
+
+    def stream_function_call(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str = "auto",
+        temperature: float | None = None,
+    ) -> Iterator[LLMStreamEvent]:
+        """Stream text and function-call deltas from the Responses API."""
+        name_map: dict[str, str] = {}
+        api_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            original = str(tool["name"])
+            sanitized = original.replace(".", "_")
+            name_map[sanitized] = original
+            api_tools.append({
+                "type": "function",
+                "name": sanitized,
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {}),
+            })
+
+        url = self.base_url.rstrip("/") + "/responses"
+        payload = self._build_payload(
+            system,
+            messages,
+            tools=api_tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+        )
+        payload["stream"] = True
+        finish_reason = "stop"
+        usage: dict[str, Any] = {}
+
+        for event_type, raw in post_json_stream_events(
+            url, payload, self._headers(), self.timeout_sec
+        ):
+            try:
+                chunk = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "stream_function_call: skipped unparseable SSE chunk: %s",
+                    raw[:100],
+                )
+                continue
+            kind = str(event_type or chunk.get("type", ""))
+            if kind.endswith("output_text.delta"):
+                delta = str(chunk.get("delta", ""))
+                if delta:
+                    yield LLMStreamEvent(kind="message_delta", content=delta)
+                continue
+            if kind.endswith("function_call_arguments.delta"):
+                item = chunk.get("item", {})
+                if not isinstance(item, dict):
+                    item = {}
+                call_id = str(
+                    chunk.get("call_id")
+                    or item.get("call_id")
+                    or chunk.get("output_index")
+                    or "tool-0"
+                )
+                raw_name = str(chunk.get("name") or item.get("name") or "")
+                yield LLMStreamEvent(
+                    kind="tool_call_delta",
+                    metadata={
+                        "call_id": call_id,
+                        "name": name_map.get(raw_name, raw_name),
+                        "arguments_delta": str(chunk.get("delta", "")),
+                    },
+                )
+                finish_reason = "tool_calls"
+                continue
+            if kind.endswith("output_item.added"):
+                item = chunk.get("item", {})
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    raw_name = str(item.get("name", ""))
+                    yield LLMStreamEvent(
+                        kind="tool_call_delta",
+                        metadata={
+                            "call_id": str(item.get("call_id", "")),
+                            "index": chunk.get("output_index", 0),
+                            "name": name_map.get(raw_name, raw_name),
+                            "arguments_delta": "",
+                        },
+                    )
+                    finish_reason = "tool_calls"
+                continue
+            if kind in {"response.completed", "response.incomplete", "response.failed"}:
+                response_data = chunk.get("response", {})
+                if isinstance(response_data, dict):
+                    raw_usage = response_data.get("usage")
+                    if isinstance(raw_usage, dict):
+                        usage = dict(raw_usage)
+                if kind == "response.incomplete":
+                    finish_reason = "length"
+                elif kind == "response.failed":
+                    finish_reason = "error"
+
+        yield LLMStreamEvent(
+            kind="message_end",
+            metadata={"finish_reason": finish_reason, "usage": usage},
+        )
 
     def function_call(
         self,

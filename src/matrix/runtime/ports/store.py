@@ -55,6 +55,7 @@ class OperationStorePort(Protocol):
         owner_id: str,
         operation_id: str,
         limit: int = 200,
+        after_sequence: int = 0,
     ) -> list[RuntimeEvent]:
         ...
 

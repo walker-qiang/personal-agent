@@ -22,6 +22,7 @@ from ._helpers import (
     _inject_lessons,
     _inject_working_memory,
     _push_event,
+    _push_runtime_event,
     _today_cn,
     DOMAIN_AGENT_REACT_SYSTEM,
     _get_configurable,
@@ -95,7 +96,10 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     )
     handle = runtime.start(request)
     _push_event(cfg, "progress", {"message": "独立 Runtime 正在执行 Agent 任务...", "operation_id": handle.operation_id})
-    events = list(handle.events())
+    events = []
+    for event in handle.events():
+        events.append(event)
+        _push_runtime_event(cfg, event)
     result = handle.result()
     if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
         for trace_event in handle.debug_trace():
@@ -103,20 +107,6 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
                 "operation_id": handle.operation_id,
                 "event": trace_event,
             })
-    for event in events:
-        if event.event_type.value == "tool_start":
-            _push_event(cfg, "tool_call", {
-                "name": event.payload.get("name", ""),
-                "args": {},
-                "operation_id": handle.operation_id,
-            })
-        elif event.event_type.value == "tool_end":
-            _push_event(cfg, "tool_result", {
-                "name": event.payload.get("name", ""),
-                "error": event.payload.get("error", ""),
-                "operation_id": handle.operation_id,
-            })
-
     if result.outcome.value == "suspended" and result.suspension is not None:
         action_values = result.suspension.payload.get("actions", [])
         actions = [

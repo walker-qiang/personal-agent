@@ -36,6 +36,52 @@ class MatrixModelAdapter(ModelPort):
         )
 
     def stream(self, request: ModelRequest) -> Iterator[ModelEvent]:
+        native_tool_stream = getattr(self.client, "stream_function_call", None)
+        if request.tools and callable(native_tool_stream):
+            for event in native_tool_stream(
+                request.system_prompt,
+                [_message_to_dict(message) for message in request.messages],
+                [_tool_to_dict(tool) for tool in request.tools],
+            ):
+                yield ModelEvent(
+                    kind=event.kind,
+                    content=event.content,
+                    tool_calls=tuple(
+                        ToolCall(
+                            call_id=tool.id,
+                            name=tool.name,
+                            arguments=tool.arguments,
+                        )
+                        for tool in event.tool_calls
+                    ),
+                    metadata=dict(event.metadata),
+                )
+            return
+        if request.tools:
+            # Providers without native tool streaming still enter Runtime
+            # through the same event contract; only the provider call itself
+            # is buffered until it returns a complete tool decision.
+            result = self.client.function_call(
+                request.system_prompt,
+                [_message_to_dict(message) for message in request.messages],
+                [_tool_to_dict(tool) for tool in request.tools],
+            )
+            if result.content:
+                yield ModelEvent(kind="message_delta", content=result.content)
+            if result.tool_calls:
+                yield ModelEvent(kind="tool_calls", tool_calls=tuple(
+                    ToolCall(
+                        call_id=tool.id,
+                        name=tool.name,
+                        arguments=tool.arguments,
+                    )
+                    for tool in result.tool_calls
+                ))
+            yield ModelEvent(
+                kind="message_end",
+                metadata={"finish_reason": result.finish_reason},
+            )
+            return
         for content in self.client.stream_complete(
             request.system_prompt,
             [_message_to_dict(message) for message in request.messages],

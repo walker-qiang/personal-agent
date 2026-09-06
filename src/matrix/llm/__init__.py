@@ -9,7 +9,13 @@ from __future__ import annotations
 from .deepseek import DeepSeekClient
 from .codex_cli import CodexCLIClient
 from .errors import LLMAuthError, LLMError, LLMTransientError, LLMRateLimitError
-from .protocol import FunctionCallResult, LLMClient, ToolCall, parse_json_response
+from .protocol import (
+    FunctionCallResult,
+    LLMClient,
+    LLMStreamEvent,
+    ToolCall,
+    parse_json_response,
+)
 
 
 def build_llm_client(
@@ -54,6 +60,7 @@ __all__ = [
     "CodexCLIClient",
     "FunctionCallResult",
     "LLMClient",
+    "LLMStreamEvent",
     "LLMError",
     "LLMTransientError",
     "LLMAuthError",

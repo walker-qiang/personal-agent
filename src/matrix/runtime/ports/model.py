@@ -35,7 +35,7 @@ class ModelResponse:
 
 
 class ModelPort(Protocol):
-    """The minimum model interface required by the future loop."""
+    """The model interface consumed incrementally by Runtime Core."""
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         ...

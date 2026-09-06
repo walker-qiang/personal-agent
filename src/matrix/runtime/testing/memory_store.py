@@ -238,11 +238,20 @@ class MemoryOperationStore:
     def event_list(self, operation_id: str) -> list[object]:
         return list(self.events.get(operation_id, []))
 
-    def list_events(self, owner_id: str, operation_id: str, limit: int = 200) -> list[object]:
+    def list_events(
+        self,
+        owner_id: str,
+        operation_id: str,
+        limit: int = 200,
+        after_sequence: int = 0,
+    ) -> list[object]:
         operation = self.operations.get(operation_id)
         if operation is None or operation.owner_id != owner_id:
             return []
-        return list(self.events.get(operation_id, []))[:limit]
+        return [
+            event for event in self.events.get(operation_id, [])
+            if getattr(event, "sequence", 0) > after_sequence
+        ][:limit]
 
     def create_approval(self, approval: Approval) -> None:
         if not approval.approval_set_id:

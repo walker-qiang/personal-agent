@@ -259,6 +259,26 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 - Agent-as-Tool 的递归深度控制仍属于应用层；每次嵌套委派创建独立的非 top-level Runtime operation，避免与父操作共享可变执行快照。
 - 当前建设阶段 Runtime SQLite 只承载可丢弃的运行态；schema 变化允许重建 Runtime 自有表，不为历史 operation 保留兼容复制逻辑。`personal-assets` 不受影响。
 
+#### Runtime 真流式事件链路
+
+Runtime 的模型执行采用增量事件消费，不再等待一次完整 `complete()` 结果后再生成事件：
+
+```text
+Provider SSE / CLI stream
+    -> ModelPort.stream()
+    -> RuntimeEvent
+    -> durable operation journal
+    -> bounded RunHandle event channel
+    -> LangGraph event queue / HTTP SSE
+```
+
+- `RuntimeEvent` 是 Runtime 内部唯一事件信封，按 operation 的 `sequence` 有序提交。
+- `message_delta`、`tool_update`、`message_end` 等事件在模型流到达时立即提交并转发；工具参数 delta 在 Runtime Core 内组装为完整 `ToolCall` 后才执行。
+- DeepSeek Responses API 和 Anthropic Messages API 使用原生文本/工具流；其他 provider 仍通过同一个 `ModelPort.stream()` 契约进入 Runtime，未提供原生工具流的 provider 只在工具决策处降级为一次性 provider 调用。
+- LangGraph 在后台线程推进，前台持续排空结构化事件队列，因此图节点未结束时 token、工具状态和审批事件也可以抵达 SSE。
+- 客户端重连使用 `/api/runtime/operations/{id}/events?after_sequence=N` 补拉 durable 事件；`N` 应保存为客户端已处理的最大 sequence。
+- 事件先完成 durable commit，再进入实时通道。事件通道关闭只取消当前消费，不会自动重放未确认的外部 effect。
+
 HTTP /api/chat 可选接收 agent_mode 与 preset；未提供时保持现有默认行为。
 
 ### 编排系统
@@ -292,7 +312,9 @@ commander_plan → _route_dag_first → [Send("runtime_delegate") × N 并行]
 | `step_error` | `runtime_delegate_node` / Runtime | `{type, step, error, message}` |
 | `replan` | `replan_node` | `{type, reason, attempt, message}` |
 
-**传输机制**：通过 `configurable.event_queue`（`queue.Queue`）传递，无 event_queue 时静默丢弃，不崩溃。仅在多步计划（`len(delegation_plan) > 1`）时发出事件。
+**传输机制**：编排事件和 `RuntimeEvent` 通过 `configurable.event_queue`（`queue.Queue`）
+传递，SSE 适配层统一映射为产品事件。无 event_queue 时静默丢弃，不崩溃。
+LangGraph 执行与队列排空并行，避免节点完成前阻塞实时输出。
 
 ### 弹性机制
 
@@ -499,7 +521,7 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 |------|------|------|
 | `/api/runtime/operations` | GET | 查询当前用户的 Runtime operations |
 | `/api/runtime/approvals` | GET | 查询待处理审批 |
-| `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件 |
+| `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件，支持 `after_sequence` 增量补拉 |
 | `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
 | `/memory/list` | GET | 查询用户记忆 |
 | `/memory` | POST | 创建用户记忆 |

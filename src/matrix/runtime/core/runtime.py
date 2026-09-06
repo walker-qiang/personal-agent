@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import time
 import uuid
+import queue
+import threading
 from typing import Callable, Iterator
 
 from ..domain.errors import OperationConflictError, RuntimeNotImplementedError
@@ -29,6 +31,9 @@ from .debug import EphemeralDebugTrace
 from .reducer import with_next_phase
 
 
+_STREAM_END = object()
+
+
 @dataclass
 class RunHandle:
     """Handle shape returned by start/resume in the completed Runtime."""
@@ -40,21 +45,43 @@ class RunHandle:
     _events: list[RuntimeEvent] = field(default_factory=list, repr=False)
     _result: RunResult | None = field(default=None, repr=False)
     _started: bool = field(default=False, repr=False)
+    _completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    _event_queue: queue.Queue[object] | None = field(default=None, repr=False)
+    _worker: threading.Thread | None = field(default=None, repr=False)
+    _worker_error: BaseException | None = field(default=None, repr=False)
+    _stream_closed: bool = field(default=False, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
     _debug: EphemeralDebugTrace | None = field(default=None, repr=False)
 
     def events(self) -> Iterator[RuntimeEvent]:
         if not self._started:
-            self._started = True
-            if self._run is None:
-                raise RuntimeNotImplementedError("Runtime execution is not configured")
-            self._events, self._result = self._run(self)
-        yield from self._events
+            self._start_worker()
+        if self._completed.is_set():
+            yield from self._events
+            return
+        event_queue = self._event_queue
+        if event_queue is None:
+            raise RuntimeNotImplementedError("Runtime event stream is not configured")
+        try:
+            while True:
+                item = event_queue.get()
+                if item is _STREAM_END:
+                    break
+                if isinstance(item, RuntimeEvent):
+                    yield item
+        finally:
+            if not self._completed.is_set():
+                self.cancel("event stream closed")
+            self._stream_closed = True
 
     def result(self) -> RunResult:
         if not self._started:
             list(self.events())
+        elif not self._completed.is_set():
+            list(self.events())
         if self._result is None:
+            if self._worker_error is not None:
+                raise self._worker_error
             raise RuntimeNotImplementedError("Runtime did not produce a result")
         return self._result
 
@@ -72,6 +99,40 @@ class RunHandle:
         """Release diagnostic payloads held by this handle."""
         if self._debug is not None:
             self._debug.clear()
+
+    def _start_worker(self) -> None:
+        self._started = True
+        if self._run is None:
+            raise RuntimeNotImplementedError("Runtime execution is not configured")
+        self._event_queue = queue.Queue(maxsize=256)
+        self._worker = threading.Thread(
+            target=self._run_worker,
+            name=f"runtime-{self.operation_id[:8]}",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _run_worker(self) -> None:
+        try:
+            events, result = self._run(self)  # type: ignore[misc]
+            self._events = list(events)
+            self._result = result
+        except BaseException as exc:
+            self._worker_error = exc
+        finally:
+            self._completed.set()
+            self._publish(_STREAM_END)
+
+    def _publish(self, item: object) -> None:
+        event_queue = self._event_queue
+        if event_queue is None or self._stream_closed:
+            return
+        while not self._stream_closed:
+            try:
+                event_queue.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
 
 
 class AgentRuntime:
@@ -158,6 +219,7 @@ class AgentRuntime:
             tools=self.tools,
             context=self.context,
             debug_trace=current_handle._debug,
+            event_sink=current_handle._publish,
         )
         return handle
 
@@ -367,6 +429,7 @@ class AgentRuntime:
                 events=(resume_event,),
             ),
         )
+        handle._publish(resume_event)
         if not all_decided:
             pending = [
                 _approval_payload(item)
@@ -406,6 +469,7 @@ class AgentRuntime:
                 new_state=aborted_state,
                 events=(abort_event,),
             ))
+            handle._publish(abort_event)
             return [resume_event, abort_event], RunResult(
                 outcome=RunOutcome.ABORTED,
                 operation_id=operation.operation_id,
@@ -446,6 +510,7 @@ class AgentRuntime:
             tools=self.tools,
             context=self.context,
             debug_trace=handle._debug,
+            event_sink=handle._publish,
             resume_approval_id=next(
                 item.approval_id for item in resolved
                 if item.status is not ApprovalStatus.EXPIRED

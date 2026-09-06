@@ -41,7 +41,6 @@ DEEP_RESEARCH_RESULT_SCHEMA: dict[str, Any] = {
         "subject",
         "research_date",
         "data_date",
-        "latest_report_period",
         "information_completeness",
         "decision",
         "summary",
@@ -434,7 +433,7 @@ class DeepResearchHandle:
 
             evidence: list[dict[str, Any]] = []
             agent_tools = self.workflow.agent_tools
-            calls = self._tool_calls(code)
+            calls = self._tool_calls(code, object_type)
             for tool_name, arguments in calls:
                 if tool_name not in agent_tools.tool_names():
                     result = {"error": "tool unavailable"}
@@ -601,7 +600,9 @@ class DeepResearchHandle:
             self._events.append(event)
             yield event
             result = self.workflow.llm.complete_json(
-                self.workflow.synthesis_prompt(evidence_text, evidence),
+                self.workflow.synthesis_prompt(
+                    evidence_text, evidence, object_type=object_type,
+                ),
                 [{
                     "role": "user",
                     "content": _build_multimodal_content(self.question, self.attachments),
@@ -651,6 +652,7 @@ class DeepResearchHandle:
                 repaired = self.workflow.llm.complete_json(
                     self.workflow.repair_prompt(
                         evidence_text, result, issues, evidence,
+                        object_type=object_type,
                     ),
                     [{
                         "role": "user",
@@ -746,8 +748,22 @@ class DeepResearchHandle:
         object_type = "fund" if "对象类型：fund" in self.question else "stock"
         return code, object_type
 
-    def _tool_calls(self, code: str) -> list[tuple[str, dict[str, Any]]]:
+    def _tool_calls(
+        self, code: str, object_type: str,
+    ) -> list[tuple[str, dict[str, Any]]]:
         year = self.research_date[:4] or time.strftime("%Y")
+        common_calls = [
+            ("personal_os.market_quote", {"code": code}),
+            ("personal_os.profile", {"code": code}),
+            ("personal_os.research_context", {"code": code, "name": self.name}),
+            ("personal_os.announcements", {"code": code, "limit": 10}),
+            ("personal_os.information_search", {
+                "query": f"{self.name} {code} {year} 最新季报 二季度 业绩公告 年报 经营风险",
+                "limit": 12,
+            }),
+        ]
+        if object_type == "fund":
+            return common_calls
         return [
             ("personal_os.market_quote", {"code": code}),
             ("personal_os.financials", {"code": code, "periods": 8}),
@@ -755,12 +771,7 @@ class DeepResearchHandle:
             ("personal_os.dividend", {"code": code, "years": 5}),
             ("personal_os.valuation", {"code": code}),
             ("personal_os.peers", {"code": code}),
-            ("personal_os.research_context", {"code": code, "name": self.name}),
-            ("personal_os.announcements", {"code": code, "limit": 10}),
-            ("personal_os.information_search", {
-                "query": f"{self.name} {code} {year} 最新季报 二季度 业绩公告 年报 经营风险",
-                "limit": 12,
-            }),
+            *common_calls[2:],
         ]
 
     def _call_with_retry(self, name: str, arguments: dict[str, Any]) -> tuple[Any, str]:
@@ -937,6 +948,7 @@ class DeepResearchWorkflow:
 
     def synthesis_prompt(
         self, evidence_text: str, evidence: list[dict[str, Any]] | None = None,
+        *, object_type: str = "stock",
     ) -> str:
         availability: list[dict[str, str]] = []
         for entry in evidence or []:
@@ -953,20 +965,33 @@ class DeepResearchWorkflow:
             })
         availability_text = json.dumps(availability, ensure_ascii=False)
         fact_summary = _fact_check_summary(evidence or [])
+        is_fund = object_type == "fund"
+        object_rules = (
+            "本次是基金/ETF产品研究。不得因为没有上市公司多期财务报表而降低完整度；"
+            "重点核实产品类型、费率、规模、流动性、跟踪误差、折溢价、指数规则、"
+            "跨境额度、主要持仓和组合角色。personal_os.financials、"
+            "personal_os.dividend、personal_os.valuation、personal_os.peers "
+            "不是本次必需工具。latest_report_period 只有在证据中存在可靠的基金定期报告期时填写，"
+            "没有可靠基金报告期可以留空。只要核心产品证据和来源充分，"
+            "information_completeness 使用 standard，不要因缺少公司财报设为 low。"
+        ) if is_fund else (
+            "本次是股票研究。必须核实行情、多期财务、估值、分红、同业和官方正文，"
+            "latest_report_period 必须填写可核验的最新财务报告期。"
+        )
         return """你是筋斗云的深度投资研究员。
 你只能使用下方 personal-os 工具证据，不得使用记忆补数字，不得编造来源。
 工具可用性摘要中的 available 表示该工具已成功返回；禁止把 available 工具说成“未提供、缺失或不可用”。
-如果工具已返回数据但本次没有使用，必须说“本次未采用该工具结果”，不得说“没有该数据”；
+        如果工具已返回数据但本次没有使用，必须说“本次未采用该工具结果”，不得说“没有该数据”；
 这类工具审计说明只能放入 risks 或 sources，summary 只写面向用户的研究结论、
 是否需要关注、动作和置信度，不要在 summary 中描述工具调用过程。
 decision.review_date 只能填写研究日期之后的明确未来复查日期；如果没有明确日期，留空，
 不要把 research_date 作为下次复查日期。
-请输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码围栏。
+        请输出一个合法 JSON 对象，不要 Markdown，不要解释，不要代码围栏。
 必须包含 schema_version=2、type=investment-research、status、object_type、
 subject、research_date、data_date、latest_report_period、
 information_completeness、decision、summary、highlights、thesis、antithesis、
 risks、metrics、triggers、sources、tags。
-只有硬性证据缺失时才将 information_completeness 设为 low：例如没有可靠行情、
+        只有硬性证据缺失时才将 information_completeness 设为 low：例如没有可靠行情、
 没有多期财务报告、财务数据过期，或没有官方正文/对账证据。核心数据齐全但缺少
 PB、资本开支、资产负债表细节或同业组时，使用 standard，并在 risks/triggers 中
 明确列出缺口；不要把可选字段缺失夸大为 low。只有行情、核心财务、估值、分红、
@@ -985,7 +1010,7 @@ metrics；正文如需提及，必须明确标注“第三方结构化数据，�
 valuation 返回 estimated=true 时，PE/PB 必须标记为 Calculated/Estimated，
 并在 metric name 或 source 中明确写“估算”，不得冒充官方披露指标。
 如果 personal_os.peers 返回 status=not_configured，必须说明同业组未配置，不得输出为系统故障，也不得自行猜测同业名单；这本身不是将核心研究降为 low 的理由。
-如果 personal_os.peers 返回 status=ok 或 partial 且 companies 中有成功数据，必须使用其中真实的公司名称和估值字段进行至少一条同业比较；
+        如果 personal_os.peers 返回 status=ok 或 partial 且 companies 中有成功数据，必须使用其中真实的公司名称和估值字段进行至少一条同业比较；
 不得说“同业数据未显示”或“无法比较”。对缺失的单项 PE/PB 要明确标记为不可计算，不得补猜。
 如果官方公告正文包含比 personal_os.financials 更新的报告期，必须使用官方公告
 报告期作为 latest_report_period，并在指标或风险中区分“聚合财报最新期”和“官方公告最新期”。
@@ -994,23 +1019,31 @@ metrics 必须是对象数组，每项至少包含 name 和 value；禁止把 Py
 sources 必须是对象数组，每项包含 title、url、date、source_type；url 和 date
 只能填写证据中真实出现的内容，找不到就留空。
 
-TOOL AVAILABILITY:
-        """ + availability_text + "\n\nDETERMINISTIC FACT CHECKS:\n" + fact_summary + "\n\nPERSONAL-OS EVIDENCE:\n" + evidence_text
+        TOOL AVAILABILITY:
+        """ + object_rules + "\n\n" + availability_text + (
+            "\n\nDETERMINISTIC FACT CHECKS:\n" + fact_summary
+            + "\n\nPERSONAL-OS EVIDENCE:\n" + evidence_text
+        )
 
     def repair_prompt(
         self, evidence_text: str, previous: dict[str, Any], issues: list[str],
         evidence: list[dict[str, Any]] | None = None,
+        *, object_type: str = "stock",
     ) -> str:
         minimums = json.dumps(RESEARCH_MINIMUM_ITEMS, ensure_ascii=False)
+        is_fund = object_type == "fund"
         template = {
             "schema_version": 2,
             "type": "investment-research",
             "status": "complete",
-            "object_type": "stock",
+            "object_type": object_type,
             "subject": {"code": "从上一版保留", "name": "从上一版保留"},
             "research_date": "从上一版保留",
             "data_date": "证据数据日期，YYYY-MM-DD",
-            "latest_report_period": "证据中的最新报告期，YYYY-MM-DD",
+            "latest_report_period": (
+                "证据中的最新基金定期报告期，YYYY-MM-DD；无可靠证据可留空"
+                if is_fund else "证据中的最新报告期，YYYY-MM-DD"
+            ),
             "information_completeness": "standard 或 deep",
             "decision": {
                 "quality": "基于证据填写",
@@ -1048,8 +1081,17 @@ TOOL AVAILABILITY:
                     "source_type": "supplementary",
                 },
             ],
-            "tags": ["investment-research", "stock"],
+            "tags": ["investment-research", object_type],
         }
+        evidence_rules = (
+            "这是基金/ETF研究修复。不要因为没有上市公司多期财务报告而失败；"
+            "latest_report_period 没有可靠基金定期报告证据时可以留空。"
+            "修复重点是产品类型、费率、规模、流动性、跟踪误差、折溢价、指数规则、"
+            "主要持仓、跨境风险和组合角色。"
+            if is_fund else
+            "这是股票研究修复。financials 报告只有 source.verification_status/"
+            "reconciliation.status 为 verified 或 reconciled 才能进入 metrics。"
+        )
         return (
             "你正在完整重写一份未通过质量校验的投资研究 JSON。"
             "只输出一个合法 JSON 对象，不要 Markdown，不要解释。\n"
@@ -1058,6 +1100,7 @@ TOOL AVAILABILITY:
             "summary 只写面向用户的研究结论、是否需要关注、动作和置信度；工具调用及未采用结果的审计说明只能放入 risks 或 sources。"
             "decision.review_date 只能填写研究日期之后的明确未来复查日期；如果没有明确日期，留空，"
             "不要把 research_date 作为下次复查日期。"
+            + evidence_rules +
             "缺少事实时，只能根据 PERSONAL-OS EVIDENCE 写出具体的“待核实事项”，"
             "不能用“暂无”“待补充”“N/A”等空泛占位语句。\n"
             "必须保留 schema_version=2、type=investment-research、subject、research_date、"
@@ -1067,8 +1110,7 @@ TOOL AVAILABILITY:
             "triggers 使用包含 type/condition 的对象数组；sources 使用包含 title/url/date/source_type 的对象数组。"
             "禁止复制上一版中的空数组，禁止使用占位符、map[...]、整段工具对象或虚构 URL。"
             "只能根据 PERSONAL-OS EVIDENCE 填写；缺少的事实要写成具体的待核实事项，不得编造数字。"
-            "financials 报告只有 source.verification_status/reconciliation.status 为 verified 或 reconciled"
-            "才能进入 metrics。unverified 报告必须从 metrics 删除；正文如提及必须明确标注"
+            "unverified 报告必须从 metrics 删除；正文如提及必须明确标注"
             "第三方结构化数据尚未官方对账。estimated=true 的 PE/PB 必须在 name 或 source 标注估算。"
             "如果校验问题指出某个 highlights、summary、thesis、antithesis 或 risks 引用了"
             "尚未官方对账的报告期，必须删除或改写整条断言，改用已对账报告期的证据或明确的数据缺口；"

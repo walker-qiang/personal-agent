@@ -13,7 +13,6 @@ from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..runtime.adapters.context import MatrixContextAdapter
 from ..runtime import AgentRuntime
-from .events import make_event
 
 
 def run_nested_agent_runtime(
@@ -212,16 +211,16 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
         context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
     handle = runtime.start(request)
-    events = list(handle.events())
+    events = []
+    event_queue = cfg.get("event_queue")
+    for event in handle.events():
+        events.append(event)
+        if event_queue:
+            try:
+                event_queue.put_nowait(event)
+            except Exception:
+                pass
     result = handle.result()
-    for event in events:
-        if event.event_type.value == "tool_start":
-            event_queue = cfg.get("event_queue")
-            if event_queue:
-                event_queue.put(make_event("tool_call", {
-                    "name": event.payload.get("name", ""),
-                    "args": {},
-                }))
     if result.outcome.value == "suspended" and result.suspension is not None:
         action_values = result.suspension.payload.get("actions", [])
         actions = [

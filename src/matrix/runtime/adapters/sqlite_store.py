@@ -319,13 +319,17 @@ class SQLiteRuntimeStore:
         return self.list_events(owner_id, operation_id)
 
     def list_events(
-        self, owner_id: str, operation_id: str, limit: int = 200,
+        self,
+        owner_id: str,
+        operation_id: str,
+        limit: int = 200,
+        after_sequence: int = 0,
     ) -> list[RuntimeEvent]:
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT * FROM runtime_events WHERE owner_id=? AND operation_id=? "
-                "ORDER BY sequence LIMIT ?",
-                (owner_id, operation_id, max(1, min(limit, 1000))),
+                "AND sequence>? ORDER BY sequence LIMIT ?",
+                (owner_id, operation_id, after_sequence, max(1, min(limit, 1000))),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 

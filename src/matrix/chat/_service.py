@@ -33,7 +33,6 @@ from ..rate_limiter import TokenBucketRateLimiter
 from ..store import SessionStore
 from ..tools import FinanceToolError, ToolRegistry, ToolDefinition
 from ..runtime.adapters.sqlite_store import SQLiteRuntimeStore
-from ..runtime.adapters.external_agent import ExternalAgentAdapter
 from ..runtime.adapters.deep_research import (
     RESEARCH_MINIMUM_ITEMS,
     DeepResearchWorkflow,
@@ -133,6 +132,14 @@ def _normalize_research_result(
         for item in sources
         if isinstance(item, dict)
     }
+
+    def source_with_url(url: str) -> dict[str, Any] | None:
+        normalized_url = url.lower()
+        for source in sources:
+            if str(source.get("url") or "").strip().lower() == normalized_url:
+                return source
+        return None
+
     announcement_items: list[dict[str, Any]] = []
     info_items: list[dict[str, Any]] = []
     for entry in evidence:
@@ -149,12 +156,21 @@ def _normalize_research_result(
         title = str(item.get("title") or item.get("source_name") or "").strip()
         url = str(item.get("url") or "").strip()
         key = (url or title).lower()
-        if not key or key in seen:
+        if not key:
             continue
-        source_type = str(
-            item.get("source_type")
-            or ("official" if item.get("tier") == "official" else "supplementary")
+        source_type = str(item.get("source_type") or "").strip().lower()
+        is_official = (
+            source_type in {"official", "web_fetch", "cninfo", "hkexnews"}
+            or str(item.get("tier") or "").lower() == "official"
+            or str(item.get("source_level") or "").lower() == "official"
         )
+        source_type = "official" if is_official else (source_type or "supplementary")
+        if key in seen:
+            existing = source_with_url(url) if url else None
+            if existing is not None and is_official:
+                existing["source_type"] = "official"
+                existing["title"] = title or existing.get("title") or url
+            continue
         date = _clean_source_date(
             item.get("date")
             or item.get("published_at")
@@ -175,9 +191,17 @@ def _normalize_research_result(
         if not isinstance(payload, dict) or not payload.get("url"):
             continue
         url = str(payload.get("url") or "").strip()
-        if not url or url.lower() in seen:
+        if not url:
             continue
         title = str(payload.get("source_name") or url).strip()
+        existing = source_with_url(url)
+        if existing is not None:
+            existing["source_type"] = "web_fetch"
+            existing["verification_status"] = payload.get("verification_status") or "fetched"
+            report_period = _clean_source_date(payload.get("report_period"))
+            if report_period:
+                existing["report_period"] = report_period
+            continue
         source = {
             "title": title,
             "url": url,
@@ -363,6 +387,8 @@ def _enforce_research_quality(
     normalized: dict[str, Any], evidence: list[dict[str, Any]]
 ) -> None:
     """Apply deterministic safety gates after model synthesis."""
+    object_type = str(normalized.get("object_type") or "stock").strip().lower()
+    is_fund = object_type == "fund"
     results = {
         str(entry.get("tool")): entry.get("result")
         for entry in evidence
@@ -392,16 +418,17 @@ def _enforce_research_quality(
         )
         or ""
     )
-    if not isinstance(reports, list) or not reports:
-        blockers.append("没有可用的多期财务报告")
-    if not metadata.get("latest_report_period") and not reports:
-        blockers.append("无法确认最新财务报告期")
-    if isinstance(reports, list) and reports:
-        latest_report = reports[0] if isinstance(reports[0], dict) else {}
-        if not latest_report.get("currency"):
-            blockers.append("财务报告缺少币种")
-        if not latest_report.get("unit"):
-            blockers.append("财务报告缺少金额单位")
+    if not is_fund:
+        if not isinstance(reports, list) or not reports:
+            blockers.append("没有可用的多期财务报告")
+        if not metadata.get("latest_report_period") and not reports:
+            blockers.append("无法确认最新财务报告期")
+        if isinstance(reports, list) and reports:
+            latest_report = reports[0] if isinstance(reports[0], dict) else {}
+            if not latest_report.get("currency"):
+                blockers.append("财务报告缺少币种")
+            if not latest_report.get("unit"):
+                blockers.append("财务报告缺少金额单位")
 
     verified_official = any(
         isinstance(entry.get("result"), dict)
@@ -415,6 +442,24 @@ def _enforce_research_quality(
         and metadata.get("provenance_ready") is True
     )
     official_evidence_ready = verified_official or reconciled_financials
+    official_product_source_ready = any(
+        isinstance(item, dict)
+        and (
+            str(item.get("tier") or "").lower() == "official"
+            or str(item.get("source_type") or "").lower() in {
+                "official", "web_fetch", "hkexnews", "cninfo",
+            }
+        )
+        for entry in evidence
+        if entry.get("tool") in {
+            "personal_os.announcements", "personal_os.information_search",
+        }
+        for item in (
+            entry.get("result", {}).get("items", [])
+            if isinstance(entry.get("result"), dict)
+            else []
+        )
+    )
     verified_official_periods = [
         str(entry["result"].get("report_period") or "")
         for entry in evidence
@@ -435,10 +480,12 @@ def _enforce_research_quality(
             or latest_official_period > structured_report_period
         )
     )
-    if stale_structured_data and not stale_covered_by_official:
+    if not is_fund and stale_structured_data and not stale_covered_by_official:
         blockers.append("最新财务报告已过期")
-    if normalized.get("object_type", "stock") == "stock" and not official_evidence_ready:
+    if not is_fund and not official_evidence_ready:
         blockers.append("没有通过正文核验的官方公告或财报")
+    if is_fund and not official_product_source_ready and not verified_official:
+        blockers.append("没有可核验的官方基金产品资料")
 
     quality = normalized.get("data_quality")
     if not isinstance(quality, dict):
@@ -448,8 +495,12 @@ def _enforce_research_quality(
     warnings = quality.get("warnings")
     if not isinstance(warnings, list):
         warnings = []
-    if not official_evidence_ready:
+    if not is_fund and not official_evidence_ready:
         warning = "尚无通过正文报告期核验的官方文档"
+        if warning not in warnings:
+            warnings.append(warning)
+    if is_fund and not verified_official and official_product_source_ready:
+        warning = "官方基金产品资料已发现，但尚未抓取正文进行二次核验"
         if warning not in warnings:
             warnings.append(warning)
     if stale_covered_by_official:
@@ -500,10 +551,14 @@ def _research_result_issues(
     date, evidence, or structural checks by changing wording.
     """
     issues: list[str] = []
-    required = (
+    object_type = str(result.get("object_type") or "stock").strip().lower()
+    is_fund = object_type == "fund"
+    required = [
         "schema_version", "type", "subject", "research_date", "data_date",
-        "latest_report_period", "summary", "decision",
-    )
+        "summary", "decision",
+    ]
+    if not is_fund:
+        required.append("latest_report_period")
     for field in required:
         if result.get(field) in (None, "", []):
             issues.append(f"缺少 {field}")
@@ -528,7 +583,10 @@ def _research_result_issues(
     if upper is None:
         issues.append("研究日期无效")
     else:
-        for field in ("research_date", "data_date", "latest_report_period"):
+        date_fields = ["research_date", "data_date"]
+        if not is_fund or result.get("latest_report_period"):
+            date_fields.append("latest_report_period")
+        for field in date_fields:
             parsed = parse_date(result.get(field))
             if parsed is None:
                 issues.append(f"{field} 不是有效日期")
@@ -553,7 +611,7 @@ def _research_result_issues(
     latest_period, latest_period_type = _latest_report_period_type_from_evidence(
         evidence, research_date,
     )
-    if latest_period_type == "Q2":
+    if not is_fund and latest_period_type == "Q2":
         wrong_period_tokens = ("h1", "上半年", "中期", "半年")
         mislabeled: list[str] = []
         narrative = [str(result.get("summary") or "")]
@@ -595,7 +653,7 @@ def _research_result_issues(
     )
     verified_period_text = "、".join(verified_periods) or "无"
     metrics = result.get("metrics")
-    if isinstance(metrics, list):
+    if not is_fund and isinstance(metrics, list):
         for index, metric in enumerate(metrics):
             if not isinstance(metric, dict):
                 continue
@@ -624,6 +682,10 @@ def _research_result_issues(
     for field in narrative_fields:
         raw = result.get(field)
         values = raw if isinstance(raw, list) else [raw]
+        if is_fund:
+            # Fund research does not collect company financial reports, so
+            # report-period claim checks do not apply to product narratives.
+            continue
         for index, value in enumerate(values):
             text = str(value or "")
             lowered = text.lower()
@@ -650,7 +712,7 @@ def _research_result_issues(
         ),
         {},
     )
-    if isinstance(valuation, dict) and valuation.get("estimated") is True:
+    if not is_fund and isinstance(valuation, dict) and valuation.get("estimated") is True:
         estimate_labels = ("估算", "估计", "approx", "estimated")
         if isinstance(metrics, list):
             for index, metric in enumerate(metrics):
@@ -1610,10 +1672,6 @@ class ChatService:
                 yield from self._stream_deep_research_runtime(
                     session_llm, sid, text, history, user_id, attachments,
                 )
-            elif getattr(session_llm, "provider", "") == "codex":
-                yield from self._stream_codex_direct_runtime(
-                    session_llm, sid, text, history, user_id, attachments,
-                )
             else:
                 graph_config = self._build_graph_config(
                     sid, session_llm, history, text, user_id, attachments,
@@ -1651,57 +1709,6 @@ class ChatService:
             "session_id": sid,
             "duration_ms": round((time.perf_counter() - started) * 1000),
         }
-
-    def _stream_codex_direct_runtime(
-        self,
-        llm: LLMClient,
-        session_id: str,
-        question: str,
-        history: list[dict[str, str]],
-        user_id: str,
-        attachments: list[dict[str, Any]] | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        """Durably map Codex's own agent loop into Runtime events."""
-        system = (
-            "你是筋斗云的本地 Codex 助理。请直接回答用户问题。"
-            "可以读取个人系统工作区中的文件来获取上下文，但当前是只读沙箱，"
-            "不要修改文件或执行破坏性操作。回答使用中文，事实不确定时明确说明。"
-        )
-        messages = history[-8:] + [{
-            "role": "user",
-            "content": build_multimodal_content(question, attachments),
-        }]
-        adapter = ExternalAgentAdapter(self._runtime_store, llm)
-        handle = adapter.start(
-            owner_id=user_id,
-            session_id=session_id,
-            agent_id="codex-direct",
-            system=system,
-            messages=messages,
-            metadata={"provider": "codex", "mode": "direct"},
-        )
-        first = True
-        emitted_error = False
-        for event in handle.events():
-            ui_event = dict(event.ui_event)
-            if first:
-                first = False
-                yield ui_event
-                yield {"type": "progress", "message": "本地 Codex 正在处理…"}
-                continue
-            if ui_event.get("type") not in {"done"}:
-                if ui_event.get("type") == "message":
-                    ui_event = {"type": "token", "content": ui_event.get("content", "")}
-                emitted_error = emitted_error or ui_event.get("type") == "error"
-                yield ui_event
-        result = handle.result()
-        if result.outcome.value == "completed" and result.final_message:
-            self._remember(
-                session_id, question, result.final_message,
-                user_id=user_id, runtime_user_entry_written=True,
-            )
-        elif result.outcome.value != "completed" and not emitted_error:
-            yield {"type": "error", "message": "本地 Codex 响应失败，请稍后重试"}
 
     def _stream_deep_research_runtime(
         self,
@@ -2228,10 +2235,40 @@ class ChatService:
         _queue_emitted: set[tuple[str, str]] = set()
         final_state: dict[str, Any] = {}
 
-        for event in self._compiled_graph.stream(
-            graph_input, stream_mode="values", config=graph_config,
-        ):
-            yield from _drain_queue(graph_config["configurable"]["event_queue"], _queue_emitted)
+        graph_outputs: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+        def run_graph() -> None:
+            try:
+                for graph_event in self._compiled_graph.stream(
+                    graph_input, stream_mode="values", config=graph_config,
+                ):
+                    graph_outputs.put(("state", graph_event))
+            except BaseException as exc:
+                graph_outputs.put(("error", exc))
+            finally:
+                graph_outputs.put(("done", None))
+
+        worker = threading.Thread(
+            target=run_graph,
+            name=f"graph-stream-{graph_config.get('thread_id', 'unknown')}",
+            daemon=True,
+        )
+        worker.start()
+        graph_done = False
+        while not graph_done:
+            yield from _drain_queue(
+                graph_config["configurable"]["event_queue"], _queue_emitted,
+            )
+            try:
+                output_type, output = graph_outputs.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if output_type == "done":
+                graph_done = True
+                continue
+            if output_type == "error":
+                raise output
+            event = output
             if not isinstance(event, dict):
                 continue
             final_state = event
@@ -2264,6 +2301,10 @@ class ChatService:
             error = event.get("error", "")
             if error:
                 yield {"type": "error", "message": error}
+
+        yield from _drain_queue(
+            graph_config["configurable"]["event_queue"], _queue_emitted,
+        )
 
         return final_state
 

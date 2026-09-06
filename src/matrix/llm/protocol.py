@@ -89,6 +89,16 @@ class FunctionCallResult:
     finish_reason: str = "stop"  # "stop" | "tool_calls" | "length"
 
 
+@dataclass(frozen=True)
+class LLMStreamEvent:
+    """Provider-neutral incremental event emitted by a native stream."""
+
+    kind: str
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 # ---- JSON response parsing utilities ----
 
 _MD_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL | re.IGNORECASE)

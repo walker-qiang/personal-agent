@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.approvals import (
@@ -46,11 +46,12 @@ def execute_operation(
     resume_decisions: dict[str, str] | None = None,
     committed_events: tuple[RuntimeEvent, ...] = (),
     debug_trace: EphemeralDebugTrace | None = None,
+    event_sink: Callable[[object], None] | None = None,
 ) -> tuple[list[RuntimeEvent], RunResult]:
     """Execute one operation and return committed events plus its result."""
 
     current = operation
-    events: list[RuntimeEvent] = list(committed_events)
+    events: list[RuntimeEvent] = _EventBuffer(committed_events, event_sink)
     messages = _messages_from_state(operation.state) or list(request.messages)
     tool_results: list[ToolResult] = []
     total_tool_calls = int(operation.state.get("runtime_tool_call_count", 0))
@@ -130,6 +131,7 @@ def execute_operation(
                 }),
                 _event(current, RuntimeEventType.TOOL_END, {
                     "call_id": result.call_id, "name": result.name,
+                    "result": result.result,
                     "is_error": result.is_error, "error": result.error,
                 }), events,
             )
@@ -195,22 +197,6 @@ def execute_operation(
             )
 
             if not response.tool_calls:
-                current = _commit_state(
-                    store, current,
-                    _event(current, RuntimeEventType.MESSAGE_START, {"turn": turn_index}),
-                    events,
-                )
-                if response.content:
-                    current = _commit_state(
-                        store, current,
-                        _event(current, RuntimeEventType.MESSAGE_DELTA, {"content": response.content}),
-                        events,
-                    )
-                current = _commit_state(
-                    store, current,
-                    _event(current, RuntimeEventType.MESSAGE_END, {"finish_reason": response.finish_reason}),
-                    events,
-                )
                 current = _commit_state(
                     store, current,
                     _event(current, RuntimeEventType.TURN_END, {"turn": turn_index}),
@@ -379,6 +365,7 @@ def execute_operation(
                         store, current,
                         _event(current, RuntimeEventType.TOOL_END, {
                             "call_id": result.call_id, "name": result.name,
+                            "result": result.result,
                             "is_error": True, "error": result.error,
                         }), events,
                     )
@@ -539,6 +526,7 @@ def execute_operation(
                     _event(current, RuntimeEventType.TOOL_END, {
                         "call_id": result.call_id,
                         "name": result.name,
+                        "result": result.result,
                         "is_error": result.is_error,
                         "error": result.error,
                     }),
@@ -551,6 +539,11 @@ def execute_operation(
             store, current, events, RunOutcome.FAILED,
             "maximum turns exceeded", tool_results,
             RuntimeEventType.RUN_FAILED, usage,
+        )
+    except _ModelStreamCancelled:
+        return _finish(
+            store, current, events, RunOutcome.ABORTED,
+            "operation cancelled", tool_results, RuntimeEventType.RUN_ABORTED, usage,
         )
     except TimeoutError as exc:
         latest = store.load(operation.owner_id, operation.operation_id)
@@ -622,7 +615,15 @@ def _complete_with_retry(
                 "metadata": model_request.metadata,
                 "attempt": attempt,
             })
-            response = model.complete(model_request)
+            response, operation = _stream_model(
+                model,
+                model_request,
+                operation,
+                store,
+                events,
+                handle,
+                turn_index=operation.turn_index,
+            )
             if started_at is not None:
                 _check_timeout(started_at, timeout_seconds)
             _debug(debug_trace, "model_response", {
@@ -639,6 +640,9 @@ def _complete_with_retry(
             _debug(debug_trace, "model_error", {
                 "attempt": attempt, "error": f"{type(exc).__name__}: {exc}",
             })
+            latest = store.load(operation.owner_id, operation.operation_id)
+            if latest is not None:
+                operation = latest
             if attempt + 1 >= attempts:
                 raise
             operation = _commit_state(
@@ -649,6 +653,152 @@ def _complete_with_retry(
                 }),
                 events,
             )
+
+
+def _stream_model(
+    model: ModelPort,
+    request: ModelRequest,
+    operation: OperationState,
+    store: OperationStorePort,
+    events: list[RuntimeEvent],
+    handle: Any,
+    *,
+    turn_index: int,
+) -> tuple[ModelResponse, OperationState]:
+    """Consume model events incrementally and assemble one tool-capable response."""
+    operation = _commit_state(
+        store,
+        operation,
+        _event(operation, RuntimeEventType.MESSAGE_START, {"turn": turn_index}),
+        events,
+    )
+    content_parts: list[str] = []
+    tool_calls: dict[str, dict[str, Any]] = {}
+    tool_call_indices: dict[str, str] = {}
+    finish_reason = "stop"
+    usage: dict[str, Any] = {}
+
+    for model_event in model.stream(request):
+        if handle._cancel_requested:
+            raise _ModelStreamCancelled()
+        kind = model_event.kind
+        if kind == "message_delta":
+            if model_event.content:
+                content_parts.append(model_event.content)
+                operation = _commit_state(
+                    store,
+                    operation,
+                    _event(operation, RuntimeEventType.MESSAGE_DELTA, {
+                        "turn": turn_index,
+                        "content": model_event.content,
+                    }),
+                    events,
+                )
+        elif kind in {"tool_calls", "tool_call"}:
+            for call in model_event.tool_calls:
+                tool_calls[call.call_id] = {
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": dict(call.arguments),
+                }
+                operation = _commit_state(
+                    store,
+                    operation,
+                    _event(operation, RuntimeEventType.TOOL_UPDATE, {
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": dict(call.arguments),
+                    }),
+                    events,
+                )
+        elif kind == "tool_call_delta":
+            metadata = model_event.metadata
+            raw_call_id = str(metadata.get("call_id") or "")
+            raw_index = str(metadata.get("index") or "")
+            call_id = raw_call_id or tool_call_indices.get(raw_index, "")
+            if not call_id:
+                call_id = raw_index or "tool-0"
+            if raw_index:
+                tool_call_indices[raw_index] = call_id
+            current_call = tool_calls.setdefault(
+                call_id,
+                {"call_id": call_id, "name": "", "arguments_text": ""},
+            )
+            current_call["name"] = str(metadata.get("name") or current_call["name"])
+            current_call["arguments_text"] += str(
+                metadata.get("arguments_delta") or model_event.content or ""
+            )
+            operation = _commit_state(
+                store,
+                operation,
+                _event(operation, RuntimeEventType.TOOL_UPDATE, {
+                    "call_id": call_id,
+                    "name": current_call["name"],
+                    "arguments_delta": str(
+                        metadata.get("arguments_delta") or model_event.content or ""
+                    ),
+                }),
+                events,
+            )
+        elif kind == "message_end":
+            finish_reason = str(model_event.metadata.get("finish_reason") or finish_reason)
+            raw_usage = model_event.metadata.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = dict(raw_usage)
+
+    assembled_calls: list[ToolCall] = []
+    for value in tool_calls.values():
+        arguments = value.get("arguments")
+        if not isinstance(arguments, dict):
+            try:
+                import json
+                arguments = json.loads(str(value.get("arguments_text", "{}")) or "{}")
+            except (ValueError, TypeError):
+                arguments = {}
+        assembled_calls.append(ToolCall(
+            call_id=str(value.get("call_id", "")),
+            name=str(value.get("name", "")),
+            arguments=arguments if isinstance(arguments, dict) else {},
+        ))
+
+    response = ModelResponse(
+        content="".join(content_parts),
+        tool_calls=tuple(call for call in assembled_calls if call.name),
+        finish_reason=finish_reason,
+        usage=usage,
+    )
+    operation = _commit_state(
+        store,
+        operation,
+        _event(operation, RuntimeEventType.MESSAGE_END, {
+            "turn": turn_index,
+            "finish_reason": response.finish_reason,
+            "tool_call_count": len(response.tool_calls),
+        }),
+        events,
+    )
+    return response, operation
+
+
+class _ModelStreamCancelled(Exception):
+    """Internal control flow for a user-cancelled model stream."""
+
+
+class _EventBuffer(list[RuntimeEvent]):
+    """List-compatible event collector that publishes committed events live."""
+
+    def __init__(
+        self,
+        initial: tuple[RuntimeEvent, ...],
+        sink: Callable[[object], None] | None,
+    ) -> None:
+        super().__init__(initial)
+        self._sink = sink
+
+    def append(self, event: RuntimeEvent) -> None:
+        super().append(event)
+        if self._sink is not None:
+            self._sink(event)
 
 
 def _execute_tool_effect(

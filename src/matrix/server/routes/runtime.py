@@ -84,8 +84,9 @@ async def operation_events(
     request: Request,
     operation_id: str,
     limit: int = Query(200, ge=1, le=1000),
+    after_sequence: int = Query(0, ge=0),
 ):
-    """Return ordered durable events for one user-owned operation."""
+    """Return ordered durable events after a client-held sequence cursor."""
     store = _store(request)
     operation = store.load(_user_id(request), operation_id)
     if operation is None:
@@ -94,8 +95,12 @@ async def operation_events(
         "operation_id": operation_id,
         "events": [
             {key: value for key, value in event.to_dict().items() if key != "owner_id"}
-            for event in store.list_events(_user_id(request), operation_id, limit=limit)
+            for event in store.list_events(
+                _user_id(request), operation_id, limit=limit,
+                after_sequence=after_sequence,
+            )
         ],
+        "after_sequence": after_sequence,
     }
 
 

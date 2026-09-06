@@ -7,6 +7,8 @@ import queue
 import time
 from typing import Any, Iterator
 
+from ..runtime.domain.events import RuntimeEvent, RuntimeEventType
+
 MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，以 JSON 格式返回。
 -只提取明确陈述的事实，不要推测。
 -每个记忆条目需要标注类型：
@@ -31,7 +33,7 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) -> Iterator[dict[str, Any]]:
     """Drain all pending events from the queue and yield SSE events.
 
-    Handles both structured AgentEvent dataclasses and legacy (str, dict) tuples.
+    Handles structured orchestration events and canonical Runtime events.
     If tracked is provided, tool_call keys are added to prevent double emission
     from the state-based path.
     """
@@ -40,15 +42,15 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
         try:
             item = q.get_nowait()
 
-            # Normalize: dataclass -> (evt_type, evt_data) tuple
+            if isinstance(item, RuntimeEvent):
+                yield from _runtime_event_to_ui(item, tracked)
+                continue
             if hasattr(item, "to_dict") and hasattr(item, "type"):
                 d = item.to_dict()
                 evt_type = d.pop("type", "message")
                 # Remove timestamp from SSE payload
                 d.pop("timestamp", None)
                 evt_data = d
-            elif isinstance(item, tuple) and len(item) == 2:
-                evt_type, evt_data = item
             else:
                 continue
 
@@ -133,6 +135,65 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
                 }
         except queue.Empty:
             break
+
+
+def _runtime_event_to_ui(
+    event: RuntimeEvent,
+    tracked: set[tuple[str, str]] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Map canonical Runtime events to the chat event vocabulary."""
+    payload = event.payload
+    operation_id = event.operation_id
+    if event.event_type is RuntimeEventType.MESSAGE_DELTA:
+        content = str(payload.get("content", ""))
+        if content:
+            yield {"type": "token", "content": content, "operation_id": operation_id}
+    elif event.event_type is RuntimeEventType.TOOL_START:
+        name = str(payload.get("name", ""))
+        args = payload.get("arguments", payload.get("args", {}))
+        if not isinstance(args, dict):
+            args = {}
+        if tracked is not None:
+            tracked.add((name, json.dumps(args, sort_keys=True)))
+        yield {
+            "type": "tool_call",
+            "name": name,
+            "args": args,
+            "operation_id": operation_id,
+        }
+    elif event.event_type is RuntimeEventType.TOOL_END:
+        raw_result = payload.get("result")
+        raw_error = payload.get("error")
+        yield {
+            "type": "tool_result",
+            "name": str(payload.get("name", "")),
+            "result": raw_result,
+            "error": raw_error,
+            "operation_id": operation_id,
+            "preview": preview_json(
+                raw_result if raw_result is not None else (raw_error or ""),
+                limit=2000,
+            ),
+        }
+    elif event.event_type is RuntimeEventType.APPROVAL_REQUIRED:
+        yield {
+            "type": "confirm_required",
+            "operation_id": operation_id,
+            "actions": payload.get("actions", []),
+            "approval_set_id": payload.get("approval_set_id", ""),
+        }
+    elif event.event_type is RuntimeEventType.RUN_FAILED:
+        yield {
+            "type": "error",
+            "message": str(payload.get("error") or "Runtime execution failed"),
+            "operation_id": operation_id,
+        }
+    elif event.event_type is RuntimeEventType.RUN_ABORTED:
+        yield {
+            "type": "error",
+            "message": str(payload.get("error") or "operation cancelled"),
+            "operation_id": operation_id,
+        }
 
 
 def preview_json(value: Any, limit: int = 1200) -> str:

@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 from .errors import LLMError
 from .http import post_json_stream, post_json_with_retry
-from .protocol import FunctionCallResult, ToolCall, parse_json_response
+from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
 
@@ -165,6 +165,101 @@ class AnthropicClient:
                         yield text
             elif event.get("type") == "message_stop":
                 return
+
+    def stream_function_call(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str = "auto",
+        temperature: float | None = None,
+    ) -> Iterator[LLMStreamEvent]:
+        """Stream text and native Anthropic tool-use deltas."""
+        anthropic_tools = [
+            {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "input_schema": tool.get("input_schema", {}),
+            }
+            for tool in tools
+        ]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": self._to_anthropic_messages(messages),
+            "tools": anthropic_tools,
+            "stream": True,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if tool_choice == "auto":
+            payload["tool_choice"] = {"type": "auto"}
+        elif tool_choice == "any":
+            payload["tool_choice"] = {"type": "any"}
+
+        finish_reason = "stop"
+        usage: dict[str, Any] = {}
+        for raw in post_json_stream(
+            "https://api.anthropic.com/v1/messages",
+            payload,
+            self._headers(),
+            self.timeout_sec,
+        ):
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type")
+            if event_type == "content_block_start":
+                block = event.get("content_block", {})
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    yield LLMStreamEvent(
+                        kind="tool_call_delta",
+                        metadata={
+                            "call_id": str(block.get("id", "")),
+                            "index": event.get("index", 0),
+                            "name": str(block.get("name", "")),
+                            "arguments_delta": "",
+                        },
+                    )
+                    finish_reason = "tool_calls"
+            elif event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                if not isinstance(delta, dict):
+                    continue
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    yield LLMStreamEvent(
+                        kind="message_delta",
+                        content=str(delta["text"]),
+                    )
+                elif delta.get("type") == "input_json_delta":
+                    yield LLMStreamEvent(
+                        kind="tool_call_delta",
+                        metadata={
+                            "index": event.get("index", 0),
+                            "arguments_delta": str(delta.get("partial_json", "")),
+                        },
+                    )
+                    finish_reason = "tool_calls"
+            elif event_type == "message_delta":
+                delta = event.get("delta", {})
+                if isinstance(delta, dict) and delta.get("stop_reason"):
+                    finish_reason = (
+                        "tool_calls"
+                        if delta["stop_reason"] == "tool_use"
+                        else str(delta["stop_reason"])
+                    )
+                raw_usage = event.get("usage")
+                if isinstance(raw_usage, dict):
+                    usage = dict(raw_usage)
+            elif event_type == "message_stop":
+                break
+
+        yield LLMStreamEvent(
+            kind="message_end",
+            metadata={"finish_reason": finish_reason, "usage": usage},
+        )
 
     def function_call(
         self,
