@@ -30,49 +30,29 @@ def run_nested_agent_runtime(
     prompt/context assembly remains at this boundary.  Runtime Core never
     needs to know about AgentRegistry, LangGraph, or the parent graph node.
     """
-    from .context_loader import enrich_system_prompt
-    from .nodes._helpers import (
-        DOMAIN_AGENT_REACT_SYSTEM,
-        _build_history_context,
-        _inject_agent_guidelines,
-        _inject_data_index,
-        _inject_lessons,
-        _inject_working_memory,
-        _today_cn,
-    )
+    from .nodes._helpers import _build_history_context
 
     session_id = str(cfg.get("session_id") or f"agent-tool-{uuid.uuid4().hex}")
     owner_id = str(cfg.get("user_id") or "default")
     history = cfg.get("history", [])
     history_context = _build_history_context(history)
-    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
-        agent_name=agent_def.name,
-        persona=agent_def.persona,
-        task=task,
-        today=_today_cn(),
+    message_text = history_context + f"请完成以下任务：{task}"
+    message_content = build_multimodal_content(
+        message_text,
+        cfg.get("attachments", []),
     )
-    system_prompt = _inject_working_memory(
-        system_prompt, cfg.get("working_memory", {}), history,
-    )
-    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
-    system_prompt = enrich_system_prompt(
-        system_prompt,
+    system_prompt = build_agent_system_prompt(
         agent_def=agent_def,
-        agent_registry=cfg.get("agent_registry"),
+        task=task,
+        cfg=cfg,
+        working_memory=cfg.get("working_memory", {}),
+        context_messages=[{"role": "user", "content": message_text}],
     )
-    system_prompt = _inject_lessons(system_prompt, task, agent_def.id, cfg)
 
     messages = [Message(
         role="user",
-        content=build_multimodal_content(
-            history_context + f"请完成以下任务：{task}",
-            cfg.get("attachments", []),
-        ),
+        content=message_content,
     )]
-    system_prompt = _inject_data_index(
-        system_prompt, cfg.get("ref_store"),
-        [{"role": "user", "content": messages[0].content}],
-    )
     policy = cfg.get("execution_policy", ExecutionPolicy())
     request = RunRequest(
         owner_id=owner_id,
@@ -153,6 +133,52 @@ def build_multimodal_content(
     return blocks
 
 
+def build_agent_system_prompt(
+    *,
+    agent_def: Any,
+    task: str,
+    cfg: dict[str, Any],
+    selected_skill_name: str = "",
+    working_memory: dict[str, Any] | None = None,
+    context_messages: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build the canonical prompt shared by every Runtime execution path."""
+    from .context_loader import enrich_system_prompt
+    from .nodes._helpers import (
+        DOMAIN_AGENT_REACT_SYSTEM,
+        _inject_agent_guidelines,
+        _inject_data_index,
+        _inject_lessons,
+        _inject_working_memory,
+        _today_cn,
+    )
+
+    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
+        agent_name=agent_def.name,
+        persona=agent_def.to_system_prompt(),
+        task=task,
+        today=_today_cn(),
+    )
+    system_prompt = _inject_working_memory(
+        system_prompt,
+        working_memory or cfg.get("working_memory", {}),
+        context_messages or [],
+    )
+    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
+    system_prompt = enrich_system_prompt(
+        system_prompt,
+        agent_def=agent_def,
+        agent_registry=cfg.get("agent_registry"),
+        selected_skill_name=selected_skill_name,
+    )
+    system_prompt = _inject_data_index(
+        system_prompt,
+        cfg.get("ref_store"),
+        context_messages or [],
+    )
+    return _inject_lessons(system_prompt, task, agent_def.id, cfg)
+
+
 def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> RunRequest:
     """Resolve one DAG step at the application boundary, never in Runtime Core."""
     agent_id = step.get("agent_id", "commander")
@@ -171,18 +197,25 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
             f"<dependency_results>{dependency_json}</dependency_results>\n"
             f"请完成以下任务：{task}"
         )
+    message_content = build_multimodal_content(message, cfg.get("attachments", []))
+    selected_skill_name = str(step.get("skill_name", "")).strip()
+    system_prompt = build_agent_system_prompt(
+        agent_def=agent_def,
+        task=task,
+        cfg=cfg,
+        selected_skill_name=selected_skill_name,
+        working_memory=state.get("working_memory") or cfg.get("working_memory", {}),
+        context_messages=[{"role": "user", "content": message}],
+    )
     return RunRequest(
         owner_id=state.get("owner_id", cfg.get("user_id", "default")),
         session_id=state.get("session_id", ""),
         agent_id=agent_id,
         messages=[Message(
             role="user",
-            content=build_multimodal_content(message, cfg.get("attachments", [])),
+            content=message_content,
         )],
-        system_prompt=(
-            f"你是{agent_def.name}。{agent_def.persona}\n"
-            f"请完成任务：{task}"
-        ),
+        system_prompt=system_prompt,
         model=getattr(cfg["llm"], "model", ""),
         tools=tool_specs(registry),
         execution_policy=cfg.get("execution_policy", ExecutionPolicy()),
@@ -190,6 +223,7 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
         metadata={
             "operation_scope": "dag_step",
             "step_id": str(step.get("step", "")),
+            "skill_name": selected_skill_name,
             "dependency_results": dependency_results,
         },
     )

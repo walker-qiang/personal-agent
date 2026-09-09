@@ -163,6 +163,21 @@ class AgentRegistry:
 
         return all_skills
 
+    def get_skill_for_agent(
+        self, agent_id: str, skill_name: str,
+    ) -> SkillDefinition | None:
+        """Return one skill only when it is assigned to the requested agent."""
+        if not skill_name:
+            return None
+        return next(
+            (
+                skill
+                for skill in self.load_skills_for_agent(agent_id)
+                if skill.name == skill_name
+            ),
+            None,
+        )
+
     def list_all_skills(self) -> list[SkillDefinition]:
         """List all skills across all directories."""
         if self._flat_structure:

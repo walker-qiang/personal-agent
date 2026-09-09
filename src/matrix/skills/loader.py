@@ -33,6 +33,7 @@ class SkillDefinition:
     script_files: list[str] = field(default_factory=list)
     parameter_bindings: list[dict[str, str]] = field(default_factory=list)
     # Each binding: {"from": "step_1", "field": "output.items", "to": "step_2", "param": "items"}
+    instructions: str = ""
 
     @classmethod
     def from_dir(cls, skill_dir: Path) -> "SkillDefinition":
@@ -57,6 +58,7 @@ class SkillDefinition:
             name=name,
             title=title or name,
             description=frontmatter.get("description", "").strip(),
+            instructions=body.strip(),
             workflow=workflow,
             output_format=output_format.strip(),
             knowledge_files=knowledge_files,

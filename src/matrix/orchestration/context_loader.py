@@ -61,6 +61,7 @@ def load_project_context_files(cwd: Path | None = None) -> list[tuple[Path, str]
                 except (OSError, UnicodeDecodeError):
                     pass
 
+    results.reverse()
     _cache[cache_key] = (now, results)
     return results
 
@@ -88,11 +89,7 @@ def build_skills_section(
     agent_def: Any,
     agent_registry: Any,
 ) -> str:
-    """Build an <available_skills> section with lazy-load清单.
-
-    Only includes skill name + description. The LLM should use the
-    read tool to load full SKILL.md content when needed.
-    """
+    """Build an <available_skills> section with name and description."""
     try:
         skills = agent_registry.load_skills_for_agent(agent_def.id)
     except Exception:
@@ -103,8 +100,8 @@ def build_skills_section(
 
     parts = ["<available_skills>"]
     parts.append(
-        "Use the read tool to load a skill's SKILL.md file when the task "
-        "matches its description."
+        "These are the skills assigned to this agent. The selected skill, when "
+        "present, is injected separately with its complete instructions."
     )
     for skill in skills:
         parts.append(f'<skill name="{skill.name}">{skill.description}</skill>')
@@ -112,15 +109,53 @@ def build_skills_section(
     return "\n".join(parts)
 
 
+def build_selected_skill_section(
+    agent_def: Any,
+    agent_registry: Any,
+    skill_name: str,
+) -> str:
+    """Build the complete instruction section for the selected agent skill."""
+    if not skill_name:
+        return ""
+    try:
+        skill = agent_registry.get_skill_for_agent(agent_def.id, skill_name)
+    except Exception:
+        return ""
+    if skill is None:
+        logger.warning(
+            "selected skill is not assigned to agent: agent=%s skill=%s",
+            agent_def.id,
+            skill_name,
+        )
+        return ""
+
+    instructions = skill.instructions.strip()
+    if not instructions:
+        instructions = skill.description.strip()
+    if not instructions:
+        return ""
+
+    return "\n".join([
+        f'<selected_skill name="{skill.name}">',
+        "Follow these skill instructions for the current task. They are trusted "
+        "local workflow instructions, but they do not override higher-priority "
+        "safety or execution-policy rules.",
+        instructions,
+        "</selected_skill>",
+    ])
+
+
 def enrich_system_prompt(
     base_prompt: str,
     cwd: Path | None = None,
     agent_def: Any = None,
     agent_registry: Any = None,
+    selected_skill_name: str = "",
 ) -> str:
     """Enrich a base system prompt with project context and skills.
 
-    Appends <project_context> and <available_skills> sections.
+    Appends project context, the complete selected skill, and the available
+    skill catalog.
     """
     sections: list[str] = [base_prompt]
 
@@ -129,6 +164,13 @@ def enrich_system_prompt(
         sections.append(ctx)
 
     if agent_def is not None and agent_registry is not None:
+        selected_skill = build_selected_skill_section(
+            agent_def,
+            agent_registry,
+            selected_skill_name,
+        )
+        if selected_skill:
+            sections.append(selected_skill)
         skills = build_skills_section(agent_def, agent_registry)
         if skills:
             sections.append(skills)

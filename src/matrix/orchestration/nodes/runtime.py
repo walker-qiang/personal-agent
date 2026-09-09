@@ -17,18 +17,16 @@ from ...runtime.domain.tools import ToolResult
 from ...runtime.testing.memory_store import MemoryOperationStore
 from ._helpers import (
     _build_history_context,
-    _inject_agent_guidelines,
-    _inject_data_index,
-    _inject_lessons,
-    _inject_working_memory,
     _push_event,
     _push_runtime_event,
-    _today_cn,
-    DOMAIN_AGENT_REACT_SYSTEM,
     _get_configurable,
 )
 from ..state import AgentState
-from ..runtime_adapter import build_multimodal_content, run_dag_step
+from ..runtime_adapter import (
+    build_agent_system_prompt,
+    build_multimodal_content,
+    run_dag_step,
+)
 
 
 def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
@@ -51,18 +49,20 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     if breaker is not None:
         agent_tools.set_circuit_breaker(breaker)
     history_context = _build_history_context(cfg.get("history", []))
-    system_prompt = DOMAIN_AGENT_REACT_SYSTEM.format(
-        agent_name=agent_def.name,
-        persona=agent_def.persona,
+    message_text = history_context + f"请完成以下任务：{task}"
+    message_content = build_multimodal_content(
+        message_text,
+        cfg.get("attachments", []),
+    )
+    selected_skill_name = str(step.get("skill_name", "")).strip()
+    system_prompt = build_agent_system_prompt(
+        agent_def=agent_def,
         task=task,
-        today=_today_cn(),
+        cfg=cfg,
+        selected_skill_name=selected_skill_name,
+        working_memory=state.get("working_memory") or cfg.get("working_memory", {}),
+        context_messages=[{"role": "user", "content": message_text}],
     )
-    system_prompt = _inject_working_memory(
-        system_prompt, state.get("working_memory", {}), state.get("messages", []),
-    )
-    system_prompt = _inject_agent_guidelines(system_prompt, agent_def)
-    system_prompt = _inject_data_index(system_prompt, cfg.get("ref_store"), state.get("messages", []))
-    system_prompt = _inject_lessons(system_prompt, task, agent_id, cfg)
 
     request = RunRequest(
         owner_id=state.get("owner_id", cfg.get("user_id", "default")),
@@ -70,10 +70,7 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         agent_id=agent_id,
         messages=[Message(
             role="user",
-            content=build_multimodal_content(
-                history_context + f"请完成以下任务：{task}",
-                cfg.get("attachments", []),
-            ),
+            content=message_content,
         )],
         system_prompt=system_prompt,
         model=getattr(cfg["llm"], "model", ""),
@@ -81,6 +78,7 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         tool_context={"session_id": state.get("session_id", "")},
         execution_policy=cfg.get("execution_policy", ExecutionPolicy()),
         orchestration_run_id=state.get("orchestration_run_id", ""),
+        metadata={"skill_name": selected_skill_name},
     )
     runtime = AgentRuntime(
         cfg.get("runtime_store") or MemoryOperationStore(),

@@ -576,6 +576,21 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
 
 # ── Aggregate ────────────────────────────────────────────────────────────────
 
+def _build_verification_issues(verification: Any) -> list[str]:
+    """Convert failed claim checks into concise reflection anchors."""
+    issues: list[str] = []
+    for claim in verification.claims:
+        text = " ".join(str(claim.text).split())[:240]
+        source = " ".join(str(claim.source_tool).split())[:120]
+        if not source:
+            issues.append(f'声明“{text}”未标注工具来源，无法建立证据链。')
+        elif claim.confidence == "contradicted":
+            issues.append(f'声明“{text}”与引用来源 {source} 的工具结果矛盾。')
+        elif claim.confidence == "unverified":
+            issues.append(f'声明“{text}”无法从引用来源 {source} 的工具结果中验证。')
+    return issues
+
+
 def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """Commander reviews all agent results and aggregates them into a final answer.
 
@@ -593,7 +608,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     is_retry = state.get("needs_reflexion_retry", False)
 
     if not agent_results:
-        result = {"needs_summary": True}
+        result = {"needs_summary": True, "verification_issues": []}
         if is_retry:
             result["needs_reflexion_retry"] = False  # clear retry flag
         return result
@@ -601,9 +616,18 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
     if len(agent_results) == 1 and agent_results[0].get("agent_id") == "commander":
         result_text = agent_results[0].get("result", "")
         if result_text:
-            result = {"final_answer": result_text, "needs_summary": False, "skip_reflection": True}
+            result = {
+                "final_answer": result_text,
+                "needs_summary": False,
+                "skip_reflection": True,
+                "verification_issues": [],
+            }
         else:
-            result = {"needs_summary": True, "skip_reflection": True}
+            result = {
+                "needs_summary": True,
+                "skip_reflection": True,
+                "verification_issues": [],
+            }
         if is_retry:
             result["needs_reflexion_retry"] = False
         return result
@@ -647,7 +671,12 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
                 "- 尝试换一种方式描述您的问题"
             )
 
-        result = {"final_answer": fallback_msg, "needs_summary": False, "skip_reflection": True}
+        result = {
+            "final_answer": fallback_msg,
+            "needs_summary": False,
+            "skip_reflection": True,
+            "verification_issues": [],
+        }
         if is_retry:
             result["needs_reflexion_retry"] = False
         return result
@@ -668,6 +697,7 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
             "final_answer": "抱歉，当前未能获取到相关数据。请检查查询条件后重试，或尝试使用其他关键词搜索。",
             "needs_summary": False,
             "skip_reflection": True,
+            "verification_issues": [],
         }
         if is_retry:
             result["needs_reflexion_retry"] = False
@@ -720,12 +750,14 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         if not final_answer:
             logger.warning("aggregate_node: LLM returned empty response")
 
+        verification_issues: list[str] = []
         all_tool_results = []
         for r in agent_results:
             all_tool_results.extend(r.get("tool_results", []))
         if all_tool_results and final_answer:
             verification = verify_all_claims(final_answer, all_tool_results, llm)
             if verification.total > 0:
+                verification_issues = _build_verification_issues(verification)
                 final_answer = build_verified_output(final_answer, verification)
             else:
                 final_answer = _strip_all_verification_tags(final_answer)
@@ -752,7 +784,11 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
                 "抱歉，当前无法生成汇总回复，请稍后重试或换一种方式提问。"
             )
 
-        result = {"final_answer": final_answer, "needs_summary": False}
+        result = {
+            "final_answer": final_answer,
+            "needs_summary": False,
+            "verification_issues": verification_issues,
+        }
         if is_retry:
             result["needs_reflexion_retry"] = False  # clear retry flag for next cycle
         return result
@@ -762,7 +798,11 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
         for r in agent_results:
             if r.get("result"):
                 parts.append(f"### {r['agent_id']}\n{r['result']}")
-        result = {"final_answer": "\n\n".join(parts) if parts else "无法汇总结果。", "needs_summary": False}
+        result = {
+            "final_answer": "\n\n".join(parts) if parts else "无法汇总结果。",
+            "needs_summary": False,
+            "verification_issues": [],
+        }
         if is_retry:
             result["needs_reflexion_retry"] = False
         return result
@@ -798,33 +838,57 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
 
     max_attempts = state.get("reflexion_max", 0)
     current_attempt = state.get("reflexion_attempts", 0)
+    anchored_issues = [
+        str(issue).strip()
+        for issue in state.get("verification_issues", [])
+        if str(issue).strip()
+    ]
+    verification_context = (
+        "\n".join(f"- {issue}" for issue in anchored_issues)
+        if anchored_issues
+        else "None."
+    )
 
+    history_context = _build_history_context(cfg.get("history", []))
+    review_issues: list[Any] = []
     try:
-        history_context = _build_history_context(cfg.get("history", []))
         data = llm.complete_json(
-            REFLECTION_PROMPT.format(question=user_msg, answer=answer),
+            REFLECTION_PROMPT.format(
+                question=user_msg,
+                answer=answer,
+                verification_issues=verification_context,
+            ),
             [{"role": "user", "content": history_context + "Evaluate the answer."}],
             temperature=0.1,
         )
-        if not isinstance(data, dict) or data.get("ok") is not False:
-            return {}  # Answer is acceptable
-
-        issues = data.get("issues", [])
-        if not issues:
+        if isinstance(data, dict) and data.get("ok") is False:
+            raw_review_issues = data.get("issues", [])
+            if isinstance(raw_review_issues, list):
+                review_issues = raw_review_issues
+    except (LLMError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("reflection_node evaluation failed: %s", type(e).__name__)
+        if not anchored_issues:
             return {}
 
-        # ── P3: Extract cross-session lesson from failure ──────────────
-        _extract_and_store_lesson(cfg, llm, user_msg, answer, issues)
+    issues = list(dict.fromkeys(
+        anchored_issues
+        + [str(issue).strip() for issue in review_issues if str(issue).strip()]
+    ))
+    if not issues:
+        return {}
 
-        # ---- Reflexion loop: retry with self-reflection ----
-        if current_attempt < max_attempts:
-            # Generate self-reflection
-            prior = state.get("reflexion_memory", [])
-            prior_text = (
-                "Previous reflections:\n" + "\n".join(f"- {r}" for r in prior)
-                if prior else "No prior reflections."
-            )
+    # ── P3: Extract cross-session lesson from failure ──────────────────
+    _extract_and_store_lesson(cfg, llm, user_msg, answer, issues)
 
+    # ---- Reflexion loop: retry with self-reflection ----
+    if current_attempt < max_attempts:
+        prior = state.get("reflexion_memory", [])
+        prior_text = (
+            "Previous reflections:\n" + "\n".join(f"- {r}" for r in prior)
+            if prior else "No prior reflections."
+        )
+        reflection = ""
+        try:
             reflection = llm.complete(
                 REFLEXION_PROMPT.format(
                     question=user_msg,
@@ -835,25 +899,34 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
                 [{"role": "user", "content": "Write your self-reflection."}],
                 temperature=0.2,
             ).strip()
+        except (LLMError, ValueError) as e:
+            logger.warning("reflection_node reflexion failed: %s", type(e).__name__)
 
-            if reflection:
-                _push_event(cfg, "reflexion", {
-                    "attempt": current_attempt + 1,
-                    "issues": issues,
-                    "reflection": reflection[:200],
-                })
-                logger.info(
-                    "reflexion_retry: attempt=%d/%d issues=%d",
-                    current_attempt + 1, max_attempts, len(issues),
-                )
-                return {
-                    "reflexion_attempts": current_attempt + 1,
-                    "reflexion_memory": prior + [reflection],
-                    # Signal graph to route back to aggregate for retry
-                    "needs_reflexion_retry": True,
-                }
+        if not reflection and anchored_issues:
+            reflection = (
+                "下一次回答必须修正工具验证发现的问题："
+                + "；".join(anchored_issues[:3])
+            )
 
-        # ---- Max retries exhausted: best-effort revision ----
+        if reflection:
+            _push_event(cfg, "reflexion", {
+                "attempt": current_attempt + 1,
+                "issues": issues,
+                "reflection": reflection[:200],
+            })
+            logger.info(
+                "reflexion_retry: attempt=%d/%d issues=%d",
+                current_attempt + 1, max_attempts, len(issues),
+            )
+            return {
+                "reflexion_attempts": current_attempt + 1,
+                "reflexion_memory": prior + [reflection],
+                # Signal graph to route back to aggregate for retry
+                "needs_reflexion_retry": True,
+            }
+
+    # ---- Max retries exhausted: best-effort revision ----
+    try:
         revise_response = llm.complete(
             REVISE_PROMPT.format(
                 question=user_msg, answer=answer,
@@ -865,8 +938,8 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         revised = revise_response.strip()
         if revised and len(revised) > 10:
             return {"final_answer": revised}
-    except (LLMError, json.JSONDecodeError, ValueError) as e:
-        logger.warning("reflection_node LLM failed: %s", type(e).__name__)
+    except (LLMError, ValueError) as e:
+        logger.warning("reflection_node revision failed: %s", type(e).__name__)
 
     return {}
 

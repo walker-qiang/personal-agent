@@ -12,6 +12,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 logger = logging.getLogger("matrix.anti_hallucination")
@@ -28,6 +29,7 @@ class Claim:
     verified: bool = False
     matched_evidence: str = ""
     confidence: str = "unverified"  # verified | partial | unverified | contradicted
+    verification_method: str = ""  # deterministic | string | llm
 
 
 @dataclass
@@ -263,6 +265,287 @@ def _get_target_text_for_claim(claim: Claim, tool_results: list[dict[str, Any]])
     return "\n".join(parts) if parts else None
 
 
+def _get_target_entries_for_claim(
+    claim: Claim,
+    tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the cited tool call entries, preserving structured result fields."""
+    if not claim.source_tool:
+        return []
+
+    parsed = _parse_source_index(claim.source_tool)
+    if parsed:
+        tool_name, expected_index = parsed
+        current_index = 0
+        for entry in tool_results:
+            if entry.get("name", "") != tool_name:
+                continue
+            current_index += 1
+            if current_index == expected_index:
+                return [entry]
+        return []
+
+    return [
+        entry
+        for entry in tool_results
+        if entry.get("name", "") == claim.source_tool
+    ]
+
+
+@dataclass(frozen=True)
+class _NumericAtom:
+    value: Decimal
+    kind: str
+    unit: str
+    raw: str
+    scaled: bool
+
+
+_DETERMINISTIC_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])"
+    r"(?P<prefix>HK\$|US\$|[¥￥$])?\s*"
+    r"(?P<number>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+    r"\s*(?P<scale>亿|万|千|百|billion|million|thousand)?"
+    r"\s*(?P<unit>%|％|percent|港元|美元|日元|欧元|英镑|元|倍)?"
+    r"(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
+_SCALE_MULTIPLIERS = {
+    "百": Decimal("100"),
+    "千": Decimal("1000"),
+    "万": Decimal("10000"),
+    "亿": Decimal("100000000"),
+    "thousand": Decimal("1000"),
+    "million": Decimal("1000000"),
+    "billion": Decimal("1000000000"),
+}
+_CURRENCY_UNITS = {
+    "HK$": "HKD",
+    "港元": "HKD",
+    "US$": "USD",
+    "$": "USD",
+    "美元": "USD",
+    "¥": "CNY",
+    "￥": "CNY",
+    "元": "CNY",
+    "日元": "JPY",
+    "欧元": "EUR",
+    "英镑": "GBP",
+}
+
+
+def _extract_numeric_atoms(text: str) -> list[_NumericAtom]:
+    """Extract normalized numeric values without interpreting surrounding prose."""
+    atoms: list[_NumericAtom] = []
+    for match in _DETERMINISTIC_NUMBER_RE.finditer(text):
+        raw_number = match.group("number").replace(",", "")
+        try:
+            value = Decimal(raw_number)
+        except InvalidOperation:
+            continue
+
+        scale = (match.group("scale") or "").lower()
+        multiplier = _SCALE_MULTIPLIERS.get(scale, Decimal("1"))
+        value *= multiplier
+
+        prefix = match.group("prefix") or ""
+        suffix = match.group("unit") or ""
+        currency = (
+            _CURRENCY_UNITS.get(prefix.upper())
+            or _CURRENCY_UNITS.get(suffix)
+        )
+        if suffix.lower() in {"%", "％", "percent"}:
+            kind = "percent"
+            unit = "%"
+        elif currency:
+            kind = "currency"
+            unit = currency
+        elif suffix == "倍":
+            kind = "multiple"
+            unit = "x"
+        elif scale:
+            kind = "scaled"
+            unit = ""
+        else:
+            kind = "plain"
+            unit = ""
+
+        atoms.append(_NumericAtom(
+            value=value,
+            kind=kind,
+            unit=unit,
+            raw=match.group(0).strip(),
+            scaled=bool(scale),
+        ))
+    return atoms
+
+
+def _numeric_values_match(
+    claim_atom: _NumericAtom,
+    evidence_atom: _NumericAtom,
+    claim_type: str,
+) -> bool:
+    """Compare normalized values using conservative, type-aware tolerances."""
+    if (
+        claim_atom.kind == "currency"
+        and evidence_atom.kind == "currency"
+        and claim_atom.unit != evidence_atom.unit
+    ):
+        return False
+
+    evidence_values = [evidence_atom.value]
+    if claim_atom.kind == "percent" and evidence_atom.kind == "plain":
+        evidence_values.append(evidence_atom.value * Decimal("100"))
+
+    for evidence_value in evidence_values:
+        if claim_type == "date":
+            if claim_atom.value == evidence_value:
+                return True
+            continue
+
+        if (
+            claim_atom.kind == "plain"
+            and not claim_atom.scaled
+            and "." not in claim_atom.raw
+        ):
+            if claim_atom.value == evidence_value:
+                return True
+            continue
+
+        if claim_atom.kind == "percent":
+            if abs(claim_atom.value - evidence_value) <= Decimal("0.01"):
+                return True
+            continue
+
+        tolerance = max(abs(claim_atom.value) * Decimal("0.01"), Decimal("0.000001"))
+        if abs(claim_atom.value - evidence_value) <= tolerance:
+            return True
+
+    return False
+
+
+def _all_numeric_values_match(
+    claim_atoms: list[_NumericAtom],
+    evidence_atoms: list[_NumericAtom],
+    claim_type: str,
+) -> bool:
+    remaining = list(evidence_atoms)
+    for claim_atom in claim_atoms:
+        for index, evidence_atom in enumerate(remaining):
+            if _numeric_values_match(claim_atom, evidence_atom, claim_type):
+                remaining.pop(index)
+                break
+        else:
+            return False
+    return True
+
+
+_CODE_SUCCESS_RE = re.compile(
+    r"(?:代码|程序|脚本)?(?:执行|运行)?(?:已)?(?:成功|完成|通过|正常)"
+    r"|(?:succeeded|completed successfully|ran successfully)"
+    r"|exit(?:_code| code)?\s*(?:is|=|为)?\s*0",
+    re.IGNORECASE,
+)
+_CODE_FAILURE_RE = re.compile(
+    r"(?:代码|程序|脚本)?(?:执行|运行)?(?:已)?(?:失败|报错|异常)"
+    r"|(?:failed|raised an error|non-zero exit)"
+    r"|exit(?:_code| code)?\s*(?:is|=|为)?\s*-?[1-9]\d*",
+    re.IGNORECASE,
+)
+_SIMPLE_CODE_OUTCOME_RE = re.compile(
+    r"^\s*(?:(?:代码|程序|脚本)?(?:执行|运行)?(?:已)?"
+    r"(?:成功|完成|通过|正常|失败|报错|异常)"
+    r"|(?:the\s+)?(?:code|program|script|execution)?\s*"
+    r"(?:succeeded|completed successfully|ran successfully|failed)"
+    r"|exit(?:_code| code)?\s*(?:is|=|为)?\s*-?\d+)"
+    r"[。.!！]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _code_outcome_expectation(text: str) -> bool | None:
+    normalized = text.lower()
+    if any(token in normalized for token in ("没有报错", "无报错", "无错误", "no error")):
+        return True
+    if any(token in normalized for token in ("未成功", "没有成功", "not successful")):
+        return False
+    if _CODE_FAILURE_RE.search(text):
+        return False
+    if _CODE_SUCCESS_RE.search(text):
+        return True
+    return None
+
+
+def _verify_code_outcome(
+    claim: Claim,
+    tool_results: list[dict[str, Any]],
+) -> str | None:
+    """Return verified/contradicted for explicit code execution outcome claims."""
+    parsed = _parse_source_index(claim.source_tool)
+    tool_name = parsed[0] if parsed else claim.source_tool
+    if tool_name != "code.run_python":
+        return None
+
+    expected_success = _code_outcome_expectation(claim.text)
+    if expected_success is None:
+        return None
+
+    entries = _get_target_entries_for_claim(claim, tool_results)
+    if len(entries) != 1:
+        return None
+    payload = entries[0].get("result")
+    if not isinstance(payload, dict) or "exit_code" not in payload:
+        return None
+    try:
+        actual_success = int(payload["exit_code"]) == 0
+    except (TypeError, ValueError):
+        return None
+
+    if actual_success != expected_success:
+        return "contradicted"
+    if _SIMPLE_CODE_OUTCOME_RE.fullmatch(claim.text):
+        return "verified"
+    return None
+
+
+def verify_claim_deterministic(
+    claim: Claim,
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    """Apply high-confidence numeric and code checks before fuzzy/LLM checks."""
+    code_verdict = _verify_code_outcome(claim, tool_results)
+    if code_verdict:
+        claim.confidence = code_verdict
+        claim.verified = code_verdict == "verified"
+        claim.verification_method = "deterministic"
+        return True
+
+    target_text = _get_target_text_for_claim(claim, tool_results)
+    if target_text is None or not claim.stated_evidence:
+        return False
+
+    evidence_text = claim.stated_evidence.strip()
+    if _normalize(evidence_text) not in _normalize(target_text):
+        return False
+
+    claim_atoms = _extract_numeric_atoms(claim.text)
+    evidence_atoms = _extract_numeric_atoms(evidence_text)
+    if not claim_atoms or not evidence_atoms:
+        return False
+
+    if _all_numeric_values_match(claim_atoms, evidence_atoms, claim.claim_type):
+        claim.matched_evidence = claim.stated_evidence[:200]
+        claim.verified = True
+        claim.confidence = "verified"
+        claim.verification_method = "deterministic"
+        return True
+
+    claim.matched_evidence = claim.stated_evidence[:200]
+    claim.confidence = "contradicted"
+    claim.verification_method = "deterministic"
+    return True
+
+
 def verify_claim_string_match(claim: Claim, tool_results: list[dict[str, Any]]) -> bool:
     """Level 1: Check if claim evidence/keywords appear in tool results.
 
@@ -289,6 +572,7 @@ def verify_claim_string_match(claim: Claim, tool_results: list[dict[str, Any]]) 
             claim.matched_evidence = claim.stated_evidence[:200]
             claim.verified = True
             claim.confidence = "verified"
+            claim.verification_method = "string"
             return True
 
     # Strategy 2: Check key tokens from claim text
@@ -313,10 +597,12 @@ def verify_claim_string_match(claim: Claim, tool_results: list[dict[str, Any]]) 
         claim.matched_evidence = " | ".join(matched_evidence_parts[:3])[:300]
         claim.verified = True
         claim.confidence = "verified"
+        claim.verification_method = "string"
         return True
     elif match_ratio >= 0.3:
         claim.matched_evidence = " | ".join(matched_evidence_parts[:2])[:200]
         claim.confidence = "partial"
+        claim.verification_method = "string"
         return False
     else:
         claim.confidence = "unverified"
@@ -385,12 +671,16 @@ def verify_claims_with_llm(
             if "SUPPORTED" in verdict:
                 claim.confidence = "verified"
                 claim.verified = True
+                claim.verification_method = "llm"
             elif "PARTIALLY" in verdict:
                 claim.confidence = "partial"
+                claim.verification_method = "llm"
             elif "CONTRADICTED" in verdict:
                 claim.confidence = "contradicted"
+                claim.verification_method = "llm"
             else:
                 claim.confidence = "unverified"
+                claim.verification_method = "llm"
 
 
 # ── Step 5: Main verification entry point ────────────────────────────────────
@@ -403,9 +693,9 @@ def verify_all_claims(
     """Full verification pipeline.
 
     1. Parse [VERIFICATION] block from LLM output
-    2. Fallback to heuristic extraction if no block
-    3. Level 1: string matching
-    4. Level 2: LLM verification for unverified claims
+    2. Deterministic numeric/code verification
+    3. Level 1: string matching for unresolved claims
+    4. Level 2: LLM verification for unresolved claims
     5. Return VerificationResult
     """
     # Parse claims — only from explicit [VERIFICATION] block.
@@ -417,9 +707,15 @@ def verify_all_claims(
     if not claims:
         return VerificationResult()
 
-    # Level 1: string matching
+    # Deterministic verification must run first so contradictory evidence
+    # cannot be upgraded by a later fuzzy string match.
     for claim in claims:
-        verify_claim_string_match(claim, tool_results)
+        verify_claim_deterministic(claim, tool_results)
+
+    # Level 1: string matching for unresolved claims
+    for claim in claims:
+        if claim.confidence == "unverified":
+            verify_claim_string_match(claim, tool_results)
 
     # Level 2: LLM verification for unverified
     unverified = [c for c in claims if c.confidence == "unverified"]

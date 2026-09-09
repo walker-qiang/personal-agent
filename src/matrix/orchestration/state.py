@@ -109,6 +109,10 @@ class AgentState(BaseModel):
         description="Self-reflections from previous attempts, newest last",
     )
     needs_reflexion_retry: bool = False  # signal from reflection → aggregate retry
+    verification_issues: list[str] = Field(
+        default_factory=list,
+        description="Tool-anchored factual issues from the latest aggregate pass",
+    )
 
     # Plan-and-Execute: DAG-based execution with dynamic replanning
     completed_steps: Annotated[list[int], operator.add] = Field(
