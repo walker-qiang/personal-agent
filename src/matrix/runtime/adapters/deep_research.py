@@ -189,7 +189,7 @@ def _sanitization_summary(
 def _merge_repaired_text_lists(
     initial: dict[str, Any], repaired: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    """Keep safe first-pass text items when a repair rewrites too thinly."""
+    """Keep safe first-pass list items when a repair rewrites too thinly."""
     merged = dict(repaired)
     retained_from_initial: dict[str, int] = {}
     for field in ("highlights", "thesis", "antithesis", "risks"):
@@ -222,6 +222,61 @@ def _merge_repaired_text_lists(
                     continue
                 seen.add(fingerprint)
                 items.append(value)
+                retained_from_initial[field] = (
+                    retained_from_initial.get(field, 0) + 1
+                )
+        if isinstance(repair_items, list) or isinstance(initial_items, list):
+            merged[field] = items
+
+    def structured_item_key(field: str, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        if field == "metrics":
+            name = str(item.get("name") or "").strip()
+            if not name or item.get("value") in (None, ""):
+                return ""
+            return name.casefold()
+        if field == "triggers":
+            trigger_type = str(item.get("type") or "").strip()
+            condition = str(item.get("condition") or "").strip()
+            if not trigger_type or not condition:
+                return ""
+            return f"{trigger_type.casefold()}\n{condition.casefold()}"
+        if field == "sources":
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            source_type = str(item.get("source_type") or "").strip()
+            if (
+                not title
+                or not url.startswith(("http://", "https://"))
+                or "date" not in item
+                or not source_type
+            ):
+                return ""
+            return url.casefold()
+        return ""
+
+    for field in ("metrics", "triggers", "sources"):
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        repair_items = repaired.get(field)
+        initial_items = initial.get(field)
+        for item in repair_items if isinstance(repair_items, list) else []:
+            key = structured_item_key(field, item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(dict(item))
+        minimum = RESEARCH_MINIMUM_ITEMS[field]
+        if len(items) < minimum:
+            for item in initial_items if isinstance(initial_items, list) else []:
+                if len(items) >= minimum:
+                    break
+                key = structured_item_key(field, item)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                items.append(dict(item))
                 retained_from_initial[field] = (
                     retained_from_initial.get(field, 0) + 1
                 )
