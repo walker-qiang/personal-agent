@@ -224,7 +224,7 @@ def load_config() -> AgentConfig:
         skills_base_path = Path(skills_base_raw).expanduser()
         skills_base_dir = skills_base_path if skills_base_path.is_absolute() else root / skills_base_path
     else:
-        skills_base_dir = root / ".." / "personal-assets" / "技能"
+        skills_base_dir = root / ".." / "personal-assets" / "31-技能"
 
     host, port = load_bind_addr()
     provider = os.environ.get(ENV_AGENT_PROVIDER, "codex").strip().lower() or "codex"
@@ -258,7 +258,7 @@ def load_config() -> AgentConfig:
     # Memory sync path: MATRIX_MEMORY_SYNC_PATH > default
     memory_sync_path = os.environ.get(ENV_MEMORY_SYNC_PATH, "").strip()
     if not memory_sync_path:
-        memory_sync_path = str(root / ".." / "personal-assets" / "system" / "memory")
+        memory_sync_path = str(root / ".." / "personal-assets" / "92-系统" / "memory")
 
     # JWT secret: required
     jwt_secret = os.environ.get(ENV_JWT_SECRET, "").strip()

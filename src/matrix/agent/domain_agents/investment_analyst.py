@@ -30,11 +30,11 @@ INVESTMENT_ANALYST = AgentDefinition(
         "mcp_browser_screenshot",
         "personal_os.*",
     ],
-    # General skills: available from skills/common/ (flat structure: all in personal-assets/技能/)
+    # General skills: available from skills/common/ (flat structure: all in personal-assets/31-技能/)
     general_skills=[
         "decision-mirror",
     ],
-    # Domain skills: investment-related skills from personal-assets/技能/
+    # Domain skills: investment-related skills from personal-assets/31-技能/
     domain_skills=[
         "anomaly-diagnosis",
         "portfolio-review",

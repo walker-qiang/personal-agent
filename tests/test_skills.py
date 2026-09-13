@@ -68,12 +68,12 @@ class TestSkillDefinition:
 
 
 class TestLoadSkills:
-    # Skills are stored in personal-assets/技能/ (durable source of truth).
+    # Skills are stored in personal-assets/31-技能/ (durable source of truth).
     # Tests reference it via relative path from personal-agent/ root.
-    SKILLS_DIR = Path("../personal-assets/技能")
+    SKILLS_DIR = Path("../personal-assets/31-技能")
 
     def test_loads_from_skill_dirs(self):
-        """Test loading skills from personal-assets/技能/ directory."""
+        """Test loading skills from personal-assets/31-技能/ directory."""
         skills_dir = self.SKILLS_DIR
         if not skills_dir.exists():
             return  # Skip if dir doesn't exist in test context

@@ -152,7 +152,7 @@ done
 
 `./.venv/bin/python -m matrix.evaluation.cli check-skills` 执行：
 
-1. 从 `AgentConfig` 读取 `skills_base_dir`（默认指向 `personal-assets/技能/`，可通过 `MATRIX_SKILLS_BASE_DIR` 环境变量覆盖）
+1. 从 `AgentConfig` 读取 `skills_base_dir`（默认指向 `personal-assets/31-技能/`，可通过 `MATRIX_SKILLS_BASE_DIR` 环境变量覆盖）
 2. 对每个含 `SKILL.md` 的目录，调用 `SkillDefinition.from_dir()` 解析
 3. 检查项：
    - YAML frontmatter 能否解析
@@ -161,7 +161,7 @@ done
    - 引用的 knowledge/scripts 文件存在
 4. 任一校验失败 → exit 1，输出错误详情
 
-> **注意**：skill 的 durable source of truth 在 `personal-assets/技能/`，
+> **注意**：skill 的 durable source of truth 在 `personal-assets/31-技能/`，
 > `personal-agent/skills/` 目录下的副本已删除，避免同步漂移。
 
 ### 退出行为
@@ -420,7 +420,7 @@ git push
 | 变更类型 | 文件路径匹配 | 触发评估 |
 |----------|-------------|----------|
 | Agent 代码 | `src/matrix/agent/*`, `src/matrix/orchestration/*`, `src/matrix/chat/*`, `src/matrix/tools/*`, `src/matrix/tools/base.py`, `src/matrix/tools/registry.py` | Layer 2 回归 |
-| Skill/知识库 | `personal-assets/技能/*`, `skills/*` | Layer 2 回归 |
+| Skill/知识库 | `personal-assets/31-技能/*`, `skills/*` | Layer 2 回归 |
 | Prompt/LLM 逻辑 | `commander.py`, `domain_agents/*`, `_helpers.py` | Layer 2 + Layer 3 |
 | 仅测试/文档 | `tests/*`, `docs/*`, `*.md`, `scripts/*` | 跳过 |
 

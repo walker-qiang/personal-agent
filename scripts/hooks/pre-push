@@ -7,7 +7,7 @@
 #
 # Additionally detects what changed and prints recommendations:
 #   - Agent code changed (src/matrix/)       → recommend Layer 2 regression
-#   - Skills/knowledge changed (技能/)        → recommend Layer 2 regression
+#   - Skills/knowledge changed (31-技能/)        → recommend Layer 2 regression
 #   - Prompts or LLM config changed          → recommend Layer 3 quality
 #
 # Bypass with: git push --no-verify (not recommended)
@@ -111,7 +111,7 @@ while IFS= read -r file; do
     case "$file" in
         src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*)
             AGENT_CODE_CHANGED=true ;;
-        ../personal-assets/技能/*|skills/*)
+        ../personal-assets/31-技能/*|skills/*)
             SKILL_KB_CHANGED=true ;;
         src/matrix/agent/commander.py|src/matrix/agent/domain_agents/*|src/matrix/orchestration/nodes/_helpers.py)
             PROMPT_LLM_CHANGED=true ;;
@@ -139,7 +139,7 @@ if [ -n "$RECOMMENDATIONS" ]; then
         echo "  ⚡ Agent 代码已变更 (src/matrix/)"
     fi
     if [ "$SKILL_KB_CHANGED" = true ]; then
-        echo "  📚 Skill/知识库已变更 (技能/)"
+        echo "  📚 Skill/知识库已变更 (31-技能/)"
     fi
     if [ "$PROMPT_LLM_CHANGED" = true ]; then
         echo "  🧠 Prompt/LLM 逻辑已变更"

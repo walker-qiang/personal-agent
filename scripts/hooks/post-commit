@@ -24,7 +24,7 @@ NEEDS_EVAL=false
 while IFS= read -r file; do
     case "$file" in
         src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*|\
-        ../personal-assets/技能/*|skills/*)
+        ../personal-assets/31-技能/*|skills/*)
             NEEDS_EVAL=true; break ;;
     esac
 done <<< "$CHANGED_FILES"

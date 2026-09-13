@@ -8,7 +8,7 @@
 #
 # 变更类型 → 评估层级映射:
 #   Agent 代码 (src/matrix/)        → Layer 2 回归评估
-#   Skill/知识库 (技能/)             → Layer 2 回归评估
+#   Skill/知识库 (31-技能/)             → Layer 2 回归评估
 #   Prompt/LLM 逻辑                  → Layer 2 + Layer 3 质量评估
 #   仅测试/文档                      → 跳过 (Layer 1 已覆盖)
 #
@@ -97,7 +97,7 @@ else
                     AGENT_CHANGED=true; PROMPT_CHANGED=true; ONLY_INFRA=false ;;
                 src/matrix/agent/*|src/matrix/orchestration/*|src/matrix/chat/*|src/matrix/tools/*)
                     AGENT_CHANGED=true; ONLY_INFRA=false ;;
-                ../personal-assets/技能/*|skills/*)
+                ../personal-assets/31-技能/*|skills/*)
                     SKILL_CHANGED=true; ONLY_INFRA=false ;;
                 tests/*|docs/*|*.md|scripts/*)
                     # Infrastructure/docs — don't trigger eval

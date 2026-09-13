@@ -30,7 +30,7 @@ def _resolve_skills_dir() -> Path:
     """Resolve skills_base_dir using the same logic as config.py.
 
     Does NOT require JWT_SECRET or other env vars — only needs
-    MATRIX_SKILLS_BASE_DIR or the default personal-assets/技能/ path.
+    MATRIX_SKILLS_BASE_DIR or the default personal-assets/31-技能/ path.
     """
     from matrix.config import ENV_SKILLS_BASE_DIR, find_root
 
@@ -39,7 +39,7 @@ def _resolve_skills_dir() -> Path:
     if skills_raw:
         p = Path(skills_raw).expanduser()
         return p if p.is_absolute() else root / p
-    return root / ".." / "personal-assets" / "技能"
+    return root / ".." / "personal-assets" / "31-技能"
 
 
 def _default_dataset_path() -> Path:
