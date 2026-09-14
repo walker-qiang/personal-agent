@@ -396,10 +396,12 @@ def _enforce_research_quality(
     }
     blockers: list[str] = []
     quote = results.get("personal_os.market_quote")
-    if not isinstance(quote, dict) or quote.get("price") in (None, ""):
-        blockers.append("行情缺少可靠价格")
-    elif not quote.get("datetime"):
-        blockers.append("行情缺少数据时间")
+    quote_required = not is_fund or "personal_os.market_quote" in results
+    if quote_required:
+        if not isinstance(quote, dict) or quote.get("price") in (None, ""):
+            blockers.append("行情缺少可靠价格")
+        elif not quote.get("datetime"):
+            blockers.append("行情缺少数据时间")
 
     financials = results.get("personal_os.financials")
     financial_data = financials.get("data") if isinstance(financials, dict) else None
@@ -484,8 +486,16 @@ def _enforce_research_quality(
         blockers.append("最新财务报告已过期")
     if not is_fund and not official_evidence_ready:
         blockers.append("没有通过正文核验的官方公告或财报")
-    if is_fund and not official_product_source_ready and not verified_official:
-        blockers.append("没有可核验的官方基金产品资料")
+    official_product_body_ready = any(
+        entry.get("tool") == "personal_os.web_fetch"
+        and isinstance(entry.get("result"), dict)
+        and not entry["result"].get("error")
+        and entry["result"].get("source_tier") == "official"
+        and bool(entry["result"].get("content"))
+        for entry in evidence
+    )
+    if is_fund and not official_product_body_ready:
+        blockers.append("没有完成正文核验的官方基金产品资料")
 
     quality = normalized.get("data_quality")
     if not isinstance(quality, dict):
@@ -499,7 +509,7 @@ def _enforce_research_quality(
         warning = "尚无通过正文报告期核验的官方文档"
         if warning not in warnings:
             warnings.append(warning)
-    if is_fund and not verified_official and official_product_source_ready:
+    if is_fund and not official_product_body_ready and official_product_source_ready:
         warning = "官方基金产品资料已发现，但尚未抓取正文进行二次核验"
         if warning not in warnings:
             warnings.append(warning)

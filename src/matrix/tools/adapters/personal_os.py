@@ -188,12 +188,12 @@ def peers(code: str) -> dict[str, Any]:
     return _get("/api/tools/market/peers", {"code": _normalize_market_code(code)})
 
 
-def research_context(code: str = "", name: str = "") -> dict[str, Any]:
+def research_context(code: str = "", name: str = "", object_type: str = "") -> dict[str, Any]:
     if not str(code).strip() and not str(name).strip():
         return tool_error("personal_os.research_context", "读取研究上下文", "code or name is required")
     return _get(
         "/api/tools/research/context",
-        {"code": _normalize_market_code(code), "name": name},
+        {"code": str(code).strip(), "name": name, "object_type": object_type},
     )
 
 
@@ -353,6 +353,7 @@ def register_all(registry: ToolRegistry) -> None:
                 "properties": {
                     "code": {"type": "string"},
                     "name": {"type": "string"},
+                    "object_type": {"type": "string", "enum": ["stock", "fund", ""]},
                 },
             },
             handler=research_context,

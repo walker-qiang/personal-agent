@@ -13,6 +13,7 @@ import json
 import re
 import time
 import uuid
+from .review import snapshot_from_question, review_instructions, document_candidates, evidence_text as build_evidence_text, finalize_result, is_exchange_fund
 from typing import Any, Callable, Iterator
 
 from ..domain.events import RuntimeEvent, RuntimeEventType
@@ -191,6 +192,8 @@ def _merge_repaired_text_lists(
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Keep safe first-pass list items when a repair rewrites too thinly."""
     merged = dict(repaired)
+    if "review_result" not in merged and "review_result" in initial:
+        merged["review_result"] = initial["review_result"]
     retained_from_initial: dict[str, int] = {}
     for field in ("highlights", "thesis", "antithesis", "risks"):
         items: list[str] = []
@@ -446,6 +449,7 @@ class DeepResearchHandle:
         self.workflow = workflow
         self.operation = operation
         self.question = question
+        self.review_snapshot = snapshot_from_question(question)
         self.name = name
         self.research_date = research_date
         self.attachments = attachments or []
@@ -489,6 +493,10 @@ class DeepResearchHandle:
             evidence: list[dict[str, Any]] = []
             agent_tools = self.workflow.agent_tools
             calls = self._tool_calls(code, object_type)
+            if self.review_snapshot:
+                for gap in self.review_snapshot.get("gaps", []):
+                    if not gap.get("url"):
+                        calls.append(("personal_os.information_search", {"query": f"{self.name} {gap.get('title', '')} 官方 报告", "limit": 5}))
             for tool_name, arguments in calls:
                 if tool_name not in agent_tools.tool_names():
                     result = {"error": "tool unavailable"}
@@ -558,6 +566,9 @@ class DeepResearchHandle:
             )
             info_sources = info.get("items", []) if isinstance(info, dict) else []
             sources = list(announcement_sources) + list(info_sources)
+            for entry in evidence:
+                if entry.get("tool") == "personal_os.information_search" and isinstance(entry.get("result"), dict):
+                    sources.extend(entry["result"].get("items") or [])
             financials = next(
                 (item["result"] for item in evidence
                  if item["tool"] == "personal_os.financials"
@@ -580,13 +591,9 @@ class DeepResearchHandle:
                         "tier": candidate.get("source_level", ""),
                     })
             if "personal_os.web_fetch" in agent_tools.tool_names():
-                remaining_sources = list(sources)
-                for candidate_index in range(3):
-                    official_url = self.workflow.select_latest_official_url(
-                        remaining_sources, self.research_date[:4] or time.strftime("%Y")
-                    )
-                    if not official_url:
-                        break
+                candidates = document_candidates(self.review_snapshot, sources,
+                    self.workflow.select_latest_official_url, self.research_date[:4] or time.strftime("%Y"))
+                for candidate_index, official_url in enumerate(candidates):
 
                     tool_name = "personal_os.web_fetch"
                     arguments = {"url": official_url}
@@ -635,17 +642,13 @@ class DeepResearchHandle:
                         and result.get("source_tier") == "official"
                         and result.get("verification_status") == "verified"
                     )
-                    if verified:
+                    if verified and not self.review_snapshot:
                         break
-                    remaining_sources = [
-                        item for item in remaining_sources
-                        if str(item.get("url") or item.get("source_url") or "").strip() != official_url
-                    ]
 
             model_evidence = _model_evidence(evidence)
-            evidence_text = json.dumps(
-                model_evidence, ensure_ascii=False, default=str,
-            )[:60000]
+            evidence_text = build_evidence_text(model_evidence)
+            if self.review_snapshot:
+                evidence_text = review_instructions(self.review_snapshot) + "\n" + evidence_text
             current, event = self.workflow._commit(
                 current, OperationPhase.REQUESTING_MODEL,
                 RuntimeEventType.MESSAGE_START,
@@ -665,18 +668,6 @@ class DeepResearchHandle:
             )
             if not isinstance(result, dict):
                 raise ValueError("深度研究汇总结果不是 JSON 对象")
-            official_period = _bounded_report_period(
-                self.workflow.extract_official_report_period(evidence),
-                self.research_date,
-            )
-            if official_period:
-                for entry in evidence:
-                    if entry.get("tool") != "personal_os.web_fetch":
-                        continue
-                    payload = entry.get("result")
-                    if isinstance(payload, dict) and payload.get("content"):
-                        payload["report_period"] = official_period
-                        payload["verification_status"] = "verified"
             normalized_result = self.workflow.normalize_result(
                 result, evidence, code=code, name=self.name,
                 object_type=object_type, research_date=self.research_date,
@@ -754,15 +745,16 @@ class DeepResearchHandle:
                     )
                     self._events.append(event)
                     yield event
-                    raise ValueError(
-                        "研究结果质量闸门未通过（已修复 1 次）："
-                        + "；".join(issues)
-                    )
+                    if not self.review_snapshot:
+                        raise ValueError(
+                            "研究结果质量闸门未通过（已修复 1 次）："
+                            + "；".join(issues)
+                        )
                 current, event = self.workflow._commit(
                     current, OperationPhase.REQUESTING_MODEL,
                     RuntimeEventType.MESSAGE_END,
                     {
-                        "stage": "validation_repair_passed",
+                        "stage": "validation_partial" if issues else "validation_repair_passed",
                         "attempt": 1,
                         "initial_issues": initial_issues,
                         "issues": [],
@@ -770,10 +762,12 @@ class DeepResearchHandle:
                         "repair_sanitization": repair_sanitization,
                         "retained_initial_text_items": retained_initial_items,
                     },
-                    {"type": "thinking", "content": "修正结果已通过质量校验。"},
+                    {"type": "thinking", "content": "保留已取得证据和剩余缺口。" if issues else "修正结果已通过质量校验。"},
                 )
                 self._events.append(event)
                 yield event
+            if self.review_snapshot:
+                result = finalize_result(result, self.review_snapshot, evidence, issues)
             answer = json.dumps(result, ensure_ascii=False)
             current, event = self.workflow._commit(
                 current, OperationPhase.REQUESTING_MODEL,
@@ -808,25 +802,32 @@ class DeepResearchHandle:
     ) -> list[tuple[str, dict[str, Any]]]:
         year = self.research_date[:4] or time.strftime("%Y")
         common_calls = [
-            ("personal_os.market_quote", {"code": code}),
-            ("personal_os.profile", {"code": code}),
-            ("personal_os.research_context", {"code": code, "name": self.name}),
-            ("personal_os.announcements", {"code": code, "limit": 10}),
+            ("personal_os.research_context", {"code": code, "name": self.name, "object_type": object_type}),
             ("personal_os.information_search", {
-                "query": f"{self.name} {code} {year} 最新季报 二季度 业绩公告 年报 经营风险",
+                "query": f"{self.name} {code} {year} 最新官方报告 重大事项 经营风险",
                 "limit": 12,
             }),
         ]
         if object_type == "fund":
+            common_calls[1][1]["query"] = f"{self.name} {code} {year} 基金 招募说明书 定期报告 费率 持仓 流动性"
+            product = (self.review_snapshot or {}).get("baseline", {}).get("product", {})
+            market_traded = product.get("quote_mode") == "market" if product else is_exchange_fund(code)
+            if market_traded:
+                common_calls.extend([
+                    ("personal_os.market_quote", {"code": code}),
+                    ("personal_os.announcements", {"code": code, "limit": 10}),
+                ])
             return common_calls
         return [
+            common_calls[0],
             ("personal_os.market_quote", {"code": code}),
             ("personal_os.financials", {"code": code, "periods": 8}),
             ("personal_os.profile", {"code": code}),
             ("personal_os.dividend", {"code": code, "years": 5}),
             ("personal_os.valuation", {"code": code}),
             ("personal_os.peers", {"code": code}),
-            *common_calls[2:],
+            ("personal_os.announcements", {"code": code, "limit": 20}),
+            common_calls[1],
         ]
 
     def _call_with_retry(self, name: str, arguments: dict[str, Any]) -> tuple[Any, str]:
