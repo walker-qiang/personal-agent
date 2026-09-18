@@ -86,6 +86,7 @@ def run_nested_agent_runtime(
             owner_id=owner_id,
             mode=policy.mode,
             allow_external_effects=policy.allow_external_effects,
+            strict_classification=True,
         ),
         context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
@@ -241,6 +242,7 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
             owner_id=request.owner_id,
             mode=request.execution_policy.mode,
             allow_external_effects=request.execution_policy.allow_external_effects,
+            strict_classification=True,
         ),
         context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )

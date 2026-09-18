@@ -219,6 +219,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=resolve_security,
             capabilities=["security_master", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -232,6 +233,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=market_quote,
             capabilities=["market_data"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -248,6 +250,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=financials,
             capabilities=["financial_data", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -267,6 +270,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=announcements,
             capabilities=["official_announcements", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -287,6 +291,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=price_history,
             capabilities=["historical_market_data", "source_validation", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -300,6 +305,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=profile,
             capabilities=["company_profile", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -316,6 +322,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=dividend,
             capabilities=["dividend_data", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -329,6 +336,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=valuation,
             capabilities=["valuation_data", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -342,6 +350,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=peers,
             capabilities=["peer_comparison", "valuation_data", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -358,6 +367,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=research_context,
             capabilities=["research_context"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -373,6 +383,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=information_search,
             capabilities=["web_search", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -386,6 +397,7 @@ def register_all(registry: ToolRegistry) -> None:
             },
             handler=web_fetch,
             capabilities=["web_fetch", "source_provenance"],
+            policy_class="external_read",
         )
     )
     registry.register(
@@ -407,6 +419,7 @@ def register_all(registry: ToolRegistry) -> None:
             handler=writeback_prepare,
             capabilities=["writeback_plan"],
             recovery_policy="idempotent",
+            policy_class="read_only",
         )
     )
     registry.register(
@@ -429,5 +442,6 @@ def register_all(registry: ToolRegistry) -> None:
             requires_approval=True,
             recovery_policy="idempotent",
             side_effect=True,
+            policy_class="durable_write",
         )
     )

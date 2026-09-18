@@ -2,7 +2,7 @@
 # pre-push hook: Layer 1 Fast Gate + Smart Change Detection
 #
 # Always runs:
-#   - Unit tests (fail-fast)
+#   - Deterministic unit tests (fail-fast; integration tests are excluded)
 #   - Skill format validation
 #
 # Additionally detects what changed and prints recommendations:
@@ -39,8 +39,8 @@ export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 echo "  Python: $PYTHON_BIN"
 
 # ---- 1. Unit tests (fail-fast) ----
-echo "▶ Running unit tests..."
-"$PYTHON_BIN" -m pytest tests/ -x -q 2>&1 | tail -5
+echo "▶ Running deterministic unit tests..."
+"$PYTHON_BIN" -m pytest tests/ -m "not integration" -x -q 2>&1 | tail -5
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo ""
     echo "✗ Unit tests failed. Push blocked."

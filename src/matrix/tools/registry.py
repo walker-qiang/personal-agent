@@ -76,6 +76,9 @@ class ToolRegistry:
     ) -> dict[str, Any]:
         """Invoke a tool through the five-step pipeline.
 
+        This remains a legacy compatibility API. Production Runtime execution
+        should enter through ``ToolExecutionGateway`` so policy evaluation is
+        applied before this registry pipeline.
         Returns a result dict. Errors are encoded as {"error": "..."}.
         Never raises — the caller (ReAct loop) can rely on getting a dict back.
         """

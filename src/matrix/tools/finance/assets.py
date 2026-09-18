@@ -68,4 +68,5 @@ tool_definition = ToolDefinition(
         "additionalProperties": False,
     },
     handler=asset_lookup,
+    policy_class="read_only",
 )

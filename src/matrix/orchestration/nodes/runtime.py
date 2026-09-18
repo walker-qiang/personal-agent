@@ -89,6 +89,7 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
             owner_id=state.get("owner_id", cfg.get("user_id", "default")),
             mode=cfg.get("execution_policy", ExecutionPolicy()).mode,
             allow_external_effects=cfg.get("execution_policy", ExecutionPolicy()).allow_external_effects,
+            strict_classification=True,
         ),
         context=cfg.get("runtime_context") or MatrixContextAdapter(),
     )
@@ -208,6 +209,7 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
                 agent_tools, session_id=operation.session_id, owner_id=operation.owner_id,
                 mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
                 allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+                strict_classification=True,
             ),
             context=cfg.get("runtime_context") or MatrixContextAdapter(),
         )

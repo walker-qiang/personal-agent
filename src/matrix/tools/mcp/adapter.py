@@ -90,6 +90,7 @@ def register_mcp_tools(
                 description=description,
                 input_schema=input_schema,
                 handler=_make_handler(manager, server_name, mcp_tool.name),
+                policy_class="unclassified",
             )
             registry.register(tool_def)
             count += 1

@@ -8,9 +8,14 @@ from matrix.runtime.domain.approvals import ApprovalStatus
 from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
 from matrix.runtime.domain.operations import OperationPhase
-from matrix.runtime.domain.requests import ExecutionOptions, ResumeInput, RunRequest
+from matrix.runtime.domain.requests import (
+    ExecutionOptions,
+    ExecutionPolicy,
+    ResumeInput,
+    RunRequest,
+)
 from matrix.runtime.domain.results import RunOutcome
-from matrix.runtime.domain.tools import RecoveryPolicy, ToolSpec
+from matrix.runtime.domain.tools import RecoveryPolicy, ToolPolicyClass, ToolSpec
 from matrix.runtime.ports.model import ModelResponse
 from matrix.runtime.testing.fake_model import FakeModel, tool_call
 from matrix.runtime.testing.fake_tools import FakeToolExecutor
@@ -171,6 +176,40 @@ def _suspend_for_approval(store: MemoryOperationStore):
     operation = store.load("user-a", handle.operation_id)
     approval_id = operation.state["pending_tool_calls"][0]["approval_id"]
     return handle.operation_id, approval_id, result
+
+
+def test_durable_write_classification_requires_runtime_approval() -> None:
+    store = MemoryOperationStore()
+    tools = FakeToolExecutor({"write": lambda args: {"ok": True}})
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([
+            ModelResponse(
+                tool_calls=(tool_call("call-durable", "write", {"value": 1}),),
+                finish_reason="tool_calls",
+            ),
+        ]),
+        tools=tools,
+    )
+
+    result = runtime.start(RunRequest(
+        owner_id="user-a",
+        session_id="durable-write-session",
+        agent_id="assistant",
+        messages=[Message(role="user", content="write")],
+        tools=[ToolSpec(
+            name="write",
+            policy_class=ToolPolicyClass.DURABLE_WRITE,
+            recovery_policy=RecoveryPolicy.MANUAL,
+        )],
+        execution_policy=ExecutionPolicy(
+            mode="writeback",
+            allow_external_effects=True,
+        ),
+    )).result()
+
+    assert result.outcome is RunOutcome.SUSPENDED
+    assert tools.requests == []
 
 
 def test_approved_resume_uses_effect_journal() -> None:

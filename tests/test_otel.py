@@ -524,7 +524,7 @@ class TestOTelConfig:
         from matrix.config import load_config
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318/v1/traces")
         monkeypatch.setenv("OTEL_EXPORT", "true")
-        monkeypatch.setenv("JWT_SECRET", "test-secret")
+        monkeypatch.setenv("JWT_SECRET", "test-secret-for-otel-tests-32bytes")
         monkeypatch.chdir(str(Path(__file__).parent.parent))
         config = load_config()
         assert config.otel_exporter_endpoint == "http://localhost:4318/v1/traces"
@@ -532,7 +532,7 @@ class TestOTelConfig:
 
     def test_env_var_otlp_disabled_by_default(self, monkeypatch):
         from matrix.config import load_config
-        monkeypatch.setenv("JWT_SECRET", "test-secret")
+        monkeypatch.setenv("JWT_SECRET", "test-secret-for-otel-tests-32bytes")
         monkeypatch.chdir(str(Path(__file__).parent.parent))
         config = load_config()
         assert config.otel_export is False

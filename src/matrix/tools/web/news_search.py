@@ -45,6 +45,7 @@ tool_definition = ToolDefinition(
         "required": ["query"],
     },
     handler=None,
+    policy_class="external_read",
 )
 
 _BING_NEWS_URL = "https://www.bing.com/news/search"

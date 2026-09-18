@@ -164,7 +164,11 @@ async def async_client(agent_config: AgentConfig):
     # Override config to enable auth
     config = agent_config
     object.__setattr__(config, "admin_password_hash", hash_password("test-password"))
-    object.__setattr__(config, "jwt_secret", "test-jwt-secret-for-auth-tests")
+    object.__setattr__(
+        config,
+        "jwt_secret",
+        "test-jwt-secret-for-auth-tests-32bytes",
+    )
 
     app = create_app(config)
     transport = ASGITransport(app=app)

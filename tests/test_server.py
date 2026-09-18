@@ -30,7 +30,7 @@ def client(tmp_cache_path: Path):
         agnes_api_key="test-key",
         agent_provider="deepseek",
         agent_model="deepseek-chat",
-        jwt_secret="test-jwt-secret-for-server-tests",
+        jwt_secret="test-jwt-secret-for-server-tests-32bytes",
         admin_password_hash=hash_password("test-password"),
     )
     app = create_app(config)
@@ -187,7 +187,7 @@ class TestChat:
             skills_base_dir=tmp_cache_path.parent / "skills",
             host="127.0.0.1",
             port=0,
-            jwt_secret="test-jwt-secret-for-server-tests",
+            jwt_secret="test-jwt-secret-for-server-tests-32bytes",
             admin_password_hash=hash_password("test-password"),
         )
         app = create_app(config)

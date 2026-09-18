@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from matrix.skills import SkillDefinition, execute_skill, load_skills
-from matrix.tools import FinanceToolError, ToolRegistry
+from matrix.tools import FinanceToolError, ToolDefinition, ToolRegistry
 from matrix.tools.finance import register_all
 
 
@@ -137,6 +137,32 @@ class TestExecuteSkill:
         result = execute_skill(skill, registry)
         assert result["steps_executed"] == 0
         assert len(result["errors"]) == 1
+
+    def test_rejects_unclassified_tool(self):
+        calls = []
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="custom.unclassified",
+                description="Unclassified test tool",
+                input_schema={"type": "object", "properties": {}, "required": []},
+                handler=lambda **kw: calls.append(kw) or {"ok": True},
+            )
+        )
+        skill = SkillDefinition(
+            name="test",
+            title="测试",
+            workflow=[
+                {"step": 1, "tool": "custom.unclassified", "arguments": {}},
+            ],
+        )
+
+        result = execute_skill(skill, registry)
+
+        assert result["steps_executed"] == 0
+        assert len(result["errors"]) == 1
+        assert "explicit classification" in result["errors"][0]
+        assert calls == []
 
     def test_skips_non_tool_steps(self, tmp_cache_path):
         registry = ToolRegistry()

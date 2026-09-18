@@ -73,4 +73,5 @@ python_tool = ToolDefinition(
         "required": ["code"],
     },
     handler=_run_python,
+    policy_class="code_execution",
 )

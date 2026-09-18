@@ -235,6 +235,18 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 
 这使 Commander 能够在规划时做出更精准的 Agent 选择，例如："需要实时行情数据 → 选 investment-analyst（有 market_data 能力）"。
 
+#### 统一执行策略入口
+
+工具实际执行统一经过 `ToolExecutionGateway`，由 Runtime 的
+`DefaultPolicyEvaluator` 在进入 `ToolRegistry` handler 前完成策略判断。
+`ToolDefinition.policy_class` 用于声明工具的策略类别；如果无法从声明、
+名称或能力标签解析出类别，工具归为 `unclassified`。
+
+Runtime 管理的 Agent、ReAct 兼容入口和 Skill 入口均启用严格分类：
+`unclassified` 工具会被拒绝，handler 不会执行。这样可以避免新接入工具
+绕过统一策略边界。当前动态 MCP 工具仍默认标记为 `unclassified`，接入
+具体 MCP 能力时需要先完成策略分类，再允许其进入严格入口。
+
 ### 独立 Runtime 的执行策略与调试边界
 
 标准 function-calling 单 Agent 路径和 Agent-as-Tool 嵌套 Agent 均通过 Runtime Adapter 进入独立 AgentRuntime；Commander、LangGraph DAG、replan、aggregate 和 reflection

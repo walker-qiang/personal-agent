@@ -301,6 +301,7 @@ class AgentToolWrapper:
             input_schema=self.input_schema,
             handler=self.__call__,
             capabilities=self.capabilities,
+            policy_class="agent_delegation",
         )
 
 

@@ -11,7 +11,11 @@ import logging
 import time
 from typing import Any
 
+from ...runtime.domain.policy import ToolExecutionContext
+from ...runtime.domain.requests import ExecutionPolicy
+from ...runtime.domain.tools import ToolRequest
 from ...tools import ToolRegistry
+from ...tools.execution_gateway import ToolExecutionGateway
 from ...tools.principal import tool_principal
 from ...context import ToolResultRefStore
 
@@ -205,13 +209,32 @@ def _execute_single_tool(
 
     try:
         policy = cfg.get("execution_policy")
+        if not isinstance(policy, ExecutionPolicy):
+            policy = ExecutionPolicy()
+        operation_id = str(cfg.get("operation_id", "")).strip() or f"react:{session_id}"
+        request = ToolRequest(
+            operation_id=operation_id,
+            call_id=str(tc_raw.get("id", "")).strip() or f"react:{name}",
+            name=name,
+            arguments=arguments,
+        )
+        context = ToolExecutionContext(
+            owner_id=str(cfg.get("user_id", "default")),
+            session_id=session_id,
+            source="react",
+            operation_id=operation_id,
+            orchestration_run_id=str(cfg.get("orchestration_run_id", "")),
+            policy=policy,
+            strict_classification=True,
+        )
+        gateway = ToolExecutionGateway(agent_tools)
         with tool_principal(
             str(cfg.get("user_id", "default")),
             session_id,
-            getattr(policy, "mode", "read_only"),
-            bool(getattr(policy, "allow_external_effects", False)),
+            policy.mode,
+            policy.allow_external_effects,
         ):
-            tool_result = agent_tools.call(name, arguments, session_id=session_id)
+            tool_result = gateway.call(request, context)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
         # call() returns {"error": ...} on tool execution failures (Phase 2 pipeline).

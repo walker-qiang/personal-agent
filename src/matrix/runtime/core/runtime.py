@@ -172,6 +172,7 @@ class AgentRuntime:
                         "recovery_policy": tool.recovery_policy.value,
                         "requires_approval": tool.requires_approval,
                         "side_effect": tool.side_effect,
+                        "policy_class": tool.policy_class.value,
                     }
                     for tool in request.tools
                 ],
@@ -491,6 +492,7 @@ class AgentRuntime:
                 recovery_policy=RecoveryPolicy(item.get("recovery_policy", "manual")),
                 requires_approval=bool(item.get("requires_approval", False)),
                 side_effect=bool(item.get("side_effect", False)),
+                policy_class=item.get("policy_class", "read_only"),
             ) for item in state.get("tools", [])],
             execution_options=ExecutionOptions(**{
                 key: value

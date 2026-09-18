@@ -1959,6 +1959,7 @@ class ChatService:
                     owner_id=user_id,
                     mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
                     allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+                    strict_classification=True,
                 ),
             )
             pending_items = operation.state.get("pending_tool_calls", [])
@@ -2097,6 +2098,7 @@ class ChatService:
                 "required": ["refId"],
             },
             handler=make_get_stored_data_tool(self._ref_store),
+            policy_class="read_only",
         ))
         self.tools.register(ToolDefinition(
             name="working_memory",
@@ -2115,6 +2117,7 @@ class ChatService:
                 "required": ["action", "content"],
             },
             handler=self._handle_working_memory,
+            policy_class="durable_write",
         ))
 
     def _make_cfg_factory(self) -> Callable[[], dict[str, Any]]:

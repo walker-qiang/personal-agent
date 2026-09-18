@@ -135,6 +135,7 @@ image_tool = ToolDefinition(
         "required": ["prompt"],
     },
     handler=generate_image,
+    policy_class="durable_write",
 )
 
 
@@ -264,4 +265,5 @@ video_tool = ToolDefinition(
         "required": ["prompt"],
     },
     handler=generate_video,
+    policy_class="durable_write",
 )

@@ -134,6 +134,7 @@ class TestRunToolCalls:
                 description="Echo tool",
                 input_schema={"type": "object", "properties": {"msg": {"type": "string"}}, "required": ["msg"]},
                 handler=lambda msg="": {"echo": msg},
+                policy_class="read_only",
             )
         )
         tc_raw = [{"function": {"name": "test.echo", "arguments": json.dumps({"msg": "hello"})}}]
@@ -163,6 +164,7 @@ class TestRunToolCalls:
                 description="Echo",
                 input_schema={"type": "object", "properties": {"msg": {"type": "string"}}, "required": ["msg"]},
                 handler=lambda msg="": {"echo": msg},
+                policy_class="read_only",
             )
         )
         # Pre-populate accumulated with existing call
@@ -211,6 +213,7 @@ class TestRunToolCalls:
                 description="Always fails",
                 input_schema={"type": "object", "properties": {}, "required": []},
                 handler=lambda **kw: (_ for _ in ()).throw(FinanceToolError("deliberate test failure")),
+                policy_class="read_only",
             )
         )
         tc_raw = [{"function": {"name": "test.fail", "arguments": "{}"}}]
@@ -232,6 +235,41 @@ class TestRunToolCalls:
         assert "error" in result["new_tool_results"][0]
         assert "deliberate test failure" in result["new_tool_results"][0]["error"]
 
+    def test_strict_classification_blocks_unclassified_tool(self):
+        calls = []
+        reg = ToolRegistry()
+        reg.register(
+            ToolDefinition(
+                name="custom.unclassified",
+                description="Unclassified test tool",
+                input_schema={"type": "object", "properties": {}, "required": []},
+                handler=lambda **kw: calls.append(kw) or {"ok": True},
+            )
+        )
+        result = _react_execute_tool_calls(
+            tool_calls_raw=[{
+                "function": {
+                    "name": "custom.unclassified",
+                    "arguments": "{}",
+                },
+            }],
+            agent_tools=reg,
+            messages=[],
+            accumulated=[],
+            agent_id="test",
+            session_id="test",
+            cfg={},
+            node_name="test",
+            consecutive_failures=0,
+            consecutive_no_progress=0,
+            prev_result_count=0,
+        )
+
+        assert result["executed"] == 1
+        assert result["failed"] == 1
+        assert calls == []
+        assert "explicit classification" in result["new_tool_results"][0]["error"]
+
     def test_tool_arg_order_independent_dedup(self):
         reg = ToolRegistry()
         reg.register(
@@ -240,6 +278,7 @@ class TestRunToolCalls:
                 description="Args test",
                 input_schema={"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]},
                 handler=lambda a="", b="": {"a": a, "b": b},
+                policy_class="read_only",
             )
         )
         # First call
@@ -355,6 +394,7 @@ class TestBuildToolsForLLM:
                 description="Echo",
                 input_schema={"type": "object", "properties": {"msg": {"type": "string"}}, "required": ["msg"]},
                 handler=lambda msg="": {"echo": msg},
+                policy_class="read_only",
             )
         )
         reg.register(
@@ -363,6 +403,7 @@ class TestBuildToolsForLLM:
                 description="Upper",
                 input_schema={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
                 handler=lambda text="": {"upper": text.upper()},
+                policy_class="read_only",
             )
         )
         tools = _build_tools_for_llm(reg)

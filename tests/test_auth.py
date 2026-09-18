@@ -51,7 +51,7 @@ class TestJWTToken:
 
     def test_wrong_secret_fails(self):
         token = create_token("alice", self.SECRET)
-        assert verify_token(token, "wrong-secret") is None
+        assert verify_token(token, "wrong-secret-key-with-32-byte-padding") is None
 
     def test_expired_token(self):
         token = create_token("alice", self.SECRET, expiry_hours=0)
@@ -92,7 +92,11 @@ class TestAuthRoutes:
 
         config = agent_config
         object.__setattr__(config, "admin_password_hash", hash_password("test-password"))
-        object.__setattr__(config, "jwt_secret", "test-jwt-secret-for-auth-tests")
+        object.__setattr__(
+            config,
+            "jwt_secret",
+            "test-jwt-secret-for-auth-tests-32bytes",
+        )
 
         app = create_app(config)
         with TestClient(app, base_url="http://test") as c:
@@ -183,7 +187,11 @@ class TestRegisterRoutes:
 
         config = agent_config
         object.__setattr__(config, "admin_password_hash", "")
-        object.__setattr__(config, "jwt_secret", "test-jwt-secret-for-auth-tests")
+        object.__setattr__(
+            config,
+            "jwt_secret",
+            "test-jwt-secret-for-auth-tests-32bytes",
+        )
 
         app = create_app(config)
         with TestClient(app, base_url="http://test") as c:

@@ -34,6 +34,7 @@ def register_all(
             input_schema=knowledge.tool_definition.input_schema,
             handler=knowledge.knowledge_search,
             capabilities=knowledge.tool_definition.capabilities,
+            policy_class=knowledge.tool_definition.policy_class,
         )
     )
 

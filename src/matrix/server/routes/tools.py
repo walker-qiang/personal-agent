@@ -11,7 +11,11 @@ from fastapi.responses import JSONResponse
 
 from ...chat import result_count, timestamp
 from ...guardrails.tool_guard import ToolGuardError
+from ...runtime.domain.policy import ToolExecutionContext
+from ...runtime.domain.requests import ExecutionPolicy
+from ...runtime.domain.tools import ToolPolicyClass, ToolRequest
 from ...tools import FinanceToolError, ToolRegistry
+from ...tools.execution_gateway import ToolExecutionGateway
 
 router = APIRouter()
 
@@ -25,6 +29,11 @@ async def list_tools(request: Request) -> dict:
 @router.post("/tools/call")
 async def tools_call(request: Request) -> JSONResponse:
     registry: ToolRegistry = request.app.state.tools
+    gateway: ToolExecutionGateway | None = getattr(
+        request.app.state, "tool_gateway", None
+    )
+    if gateway is None:
+        gateway = ToolExecutionGateway(registry)
     trace = request.app.state.trace
     try:
         payload = await request.json()
@@ -40,7 +49,25 @@ async def tools_call(request: Request) -> JSONResponse:
         user_id = getattr(request.state, "user_id", "default")
         session_id = str(payload.get("session_id", "")).strip() or f"user:{user_id}"
         started = time.perf_counter()
-        result = registry.call(tool, arguments, session_id=session_id)
+        request_context = ToolExecutionContext(
+            owner_id=user_id,
+            session_id=session_id,
+            source="http.tools_call",
+            policy=ExecutionPolicy(),
+            allowed_tool_classes=frozenset({
+                ToolPolicyClass.READ_ONLY,
+                ToolPolicyClass.EXTERNAL_READ,
+            }),
+        )
+        result = gateway.call(
+            ToolRequest(
+                operation_id="",
+                call_id=f"http:{session_id}:{tool}",
+                name=tool,
+                arguments=arguments,
+            ),
+            request_context,
+        )
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         is_error = isinstance(result, dict) and "error" in result
         trace.record(

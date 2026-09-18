@@ -29,6 +29,7 @@ tool_definition = ToolDefinition(
         "required": ["city"],
     },
     handler=None,
+    policy_class="external_read",
 )
 
 _GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"

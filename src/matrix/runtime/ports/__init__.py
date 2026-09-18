@@ -4,6 +4,7 @@ from .clock import ClockPort
 from .context import ContextPort
 from .ids import IdPort
 from .model import ModelEvent, ModelPort, ModelRequest, ModelResponse
+from .policy import PolicyEvaluatorPort
 from .store import OperationStorePort
 from .tools import ToolExecutorPort
 
@@ -16,5 +17,6 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "OperationStorePort",
+    "PolicyEvaluatorPort",
     "ToolExecutorPort",
 ]

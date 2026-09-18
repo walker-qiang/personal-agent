@@ -17,6 +17,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=search.tool_definition.input_schema,
             handler=search.web_search,
             capabilities=search.tool_definition.capabilities,
+            policy_class=search.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -26,6 +27,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=news_search.tool_definition.input_schema,
             handler=news_search.news_search,
             capabilities=news_search.tool_definition.capabilities,
+            policy_class=news_search.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -35,6 +37,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=finance.tool_definition.input_schema,
             handler=finance.finance_query,
             capabilities=finance.tool_definition.capabilities,
+            policy_class=finance.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -44,6 +47,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=fetch.tool_definition.input_schema,
             handler=fetch.web_fetch,
             capabilities=fetch.tool_definition.capabilities,
+            policy_class=fetch.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -53,6 +57,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=weather.tool_definition.input_schema,
             handler=weather.weather,
             capabilities=weather.tool_definition.capabilities,
+            policy_class=weather.tool_definition.policy_class,
         )
     )
 

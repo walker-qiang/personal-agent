@@ -149,6 +149,7 @@ history_tool = ToolDefinition(
         "additionalProperties": False,
     },
     handler=snapshot_history,
+    policy_class="read_only",
 )
 
 recent_tool = ToolDefinition(
@@ -166,4 +167,5 @@ recent_tool = ToolDefinition(
         "additionalProperties": False,
     },
     handler=recent_snapshots,
+    policy_class="read_only",
 )

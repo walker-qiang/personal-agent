@@ -18,7 +18,13 @@
 | Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge + 质量基线对比逻辑 |
 | 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
 
-**最近一次全量测试（2026-08-21）**：876 passed, 11 skipped, 0 failed；共收集 887 个测试。
+**最近一次默认回归（2026-09-18）**：850 passed, 0 skipped, 0 failed；共收集 850 个测试。
+当前剩余 3 个第三方 `jieba` 的 `SyntaxWarning`，不影响测试结果；本轮已消除
+Starlette/httpx2 弃用提示和 PyJWT 短密钥提示。
+
+默认回归只包含确定性的单元测试、契约测试和 mock 驱动的核心流程测试。
+浏览器 MCP、真实 LLM、真实 embedding 模型和 ChromaDB 持久化不属于默认阻断门禁；
+如需验证，应在显式准备好环境后单独执行。
 
 ## 现状分析
 
@@ -26,7 +32,7 @@
 
 | 能力 | 现状 | 评估 |
 |------|------|------|
-| 单元测试 | 887 个已收集测试，pytest 框架 | 覆盖良好，已集成 pre-push hook |
+| 单元测试 | 850 个默认回归测试，pytest 框架 | 覆盖核心流程，已集成 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
 | 评估数据集 | eval_dataset.json（23 条 case） | 已扩展，覆盖 7 大场景 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
@@ -88,7 +94,7 @@
 ### 执行内容
 
 ```
-1. ./.venv/bin/python -m pytest tests/ -x -q       # 单元测试, fail-fast
+1. ./.venv/bin/python -m pytest tests/ -m "not integration" -x -q # 确定性单测, fail-fast
 2. ./.venv/bin/python -m matrix.evaluation.cli check-skills   # skill 格式校验
 ```
 
@@ -113,7 +119,7 @@ set -e
 # 脚本优先选择 .venv/bin/python，并校验 Python 3.10+。
 # 1. 单元测试 (fail-fast)
 echo "▶ Running unit tests..."
-"$PYTHON_BIN" -m pytest tests/ -x -q 2>&1 | tail -5
+"$PYTHON_BIN" -m pytest tests/ -m "not integration" -x -q 2>&1 | tail -5
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "✗ Unit tests failed. Push blocked."
     exit 1

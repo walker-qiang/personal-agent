@@ -32,4 +32,5 @@ tool_definition = ToolDefinition(
         "additionalProperties": False,
     },
     handler=bucket_allocation,
+    policy_class="read_only",
 )

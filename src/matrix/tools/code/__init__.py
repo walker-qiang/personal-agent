@@ -50,6 +50,7 @@ def register_all(
             input_schema=_tool.input_schema,
             handler=_tool.handler,
             capabilities=_tool.capabilities,
+            policy_class="code_execution",
         )
     )
 

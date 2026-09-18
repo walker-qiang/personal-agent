@@ -20,6 +20,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             input_schema=holdings.tool_definition.input_schema,
             handler=lambda **kwargs: holdings.holdings_summary(cache_path=str(cache_path), **kwargs),
             capabilities=holdings.tool_definition.capabilities,
+            policy_class=holdings.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -29,6 +30,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             input_schema=assets.tool_definition.input_schema,
             handler=lambda **kwargs: assets.asset_lookup(cache_path=str(cache_path), **kwargs),
             capabilities=assets.tool_definition.capabilities,
+            policy_class=assets.tool_definition.policy_class,
         )
     )
     registry.register(
@@ -38,6 +40,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             input_schema=snapshots.history_tool.input_schema,
             handler=lambda **kwargs: snapshots.snapshot_history(cache_path=str(cache_path), **kwargs),
             capabilities=snapshots.history_tool.capabilities,
+            policy_class=snapshots.history_tool.policy_class,
         )
     )
     registry.register(
@@ -47,6 +50,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             input_schema=snapshots.recent_tool.input_schema,
             handler=lambda **kwargs: snapshots.recent_snapshots(cache_path=str(cache_path), **kwargs),
             capabilities=snapshots.recent_tool.capabilities,
+            policy_class=snapshots.recent_tool.policy_class,
         )
     )
     registry.register(
@@ -56,6 +60,7 @@ def register_all(registry: ToolRegistry, cache_path: Path) -> None:
             input_schema=allocation.tool_definition.input_schema,
             handler=lambda **kwargs: allocation.bucket_allocation(cache_path=str(cache_path), **kwargs),
             capabilities=allocation.tool_definition.capabilities,
+            policy_class=allocation.tool_definition.policy_class,
         )
     )
 

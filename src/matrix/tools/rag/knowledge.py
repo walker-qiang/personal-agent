@@ -38,6 +38,7 @@ tool_definition = ToolDefinition(
         "required": ["query"],
     },
     handler=None,  # replaced at registration time
+    policy_class="read_only",
 )
 
 

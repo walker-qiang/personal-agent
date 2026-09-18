@@ -31,6 +31,7 @@ tool_definition = ToolDefinition(
         "required": ["url"],
     },
     handler=None,  # replaced at registration time
+    policy_class="external_read",
 )
 
 _SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)

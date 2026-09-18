@@ -68,4 +68,5 @@ tool_definition = ToolDefinition(
         "additionalProperties": False,
     },
     handler=holdings_summary,
+    policy_class="read_only",
 )

@@ -21,6 +21,7 @@ from ..guardrails import GuardrailPipeline, GuardConfig
 from ..logging_config import RequestIdFilter, get_logger, setup_logging
 from ..observability.trace import TraceLogger
 from ..tools import ToolRegistry
+from ..tools.execution_gateway import ToolExecutionGateway
 from ..tools.finance import register_all as register_finance_tools
 from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
@@ -188,6 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- END GUARDRAILS ----
 
     app.state.tools = tools_registry
+    app.state.tool_gateway = ToolExecutionGateway(tools_registry)
     app.state.trace = trace
     app.state.guardrails = guardrails
     app.state.stream_tickets = StreamTicketStore()

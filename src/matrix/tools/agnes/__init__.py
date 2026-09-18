@@ -17,6 +17,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=image_tool.input_schema,
             handler=image_tool.handler,
             capabilities=image_tool.capabilities,
+            policy_class=image_tool.policy_class,
         )
     )
     registry.register(
@@ -26,6 +27,7 @@ def register_all(registry: ToolRegistry) -> None:
             input_schema=video_tool.input_schema,
             handler=video_tool.handler,
             capabilities=video_tool.capabilities,
+            policy_class=video_tool.policy_class,
         )
     )
 

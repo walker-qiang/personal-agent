@@ -21,9 +21,10 @@ from ..domain.approvals import (
 )
 from ..domain.messages import Message, ToolCall
 from ..domain.operations import OperationPhase, OperationState, StateTransition
+from ..domain.policy import EffectGrant, effect_grant_from_approval
 from ..domain.requests import RunRequest
 from ..domain.results import RunOutcome, RunResult, Suspension
-from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
+from ..domain.tools import RecoveryPolicy, ToolPolicyClass, ToolRequest, ToolResult
 from ..ports.model import ModelPort, ModelRequest, ModelResponse
 from ..ports.context import ContextPort
 from ..ports.store import OperationStorePort
@@ -83,7 +84,7 @@ def execute_operation(
                     call_id=pending_call.call_id, name=pending_call.name,
                     error="tool call skipped by user", is_error=True,
                 )
-            elif tool_spec is not None and tool_spec.side_effect and not request.execution_policy.allow_external_effects:
+            elif _is_effectful_tool(tool_spec) and not request.execution_policy.allow_external_effects:
                 result = ToolResult(
                     call_id=pending_call.call_id,
                     name=pending_call.name,
@@ -94,6 +95,15 @@ def execute_operation(
                     is_error=True,
                 )
             else:
+                approval_grant = None
+                if approval_id:
+                    approval = store.get_approval(current.owner_id, approval_id)
+                    if (
+                        approval is not None
+                        and approval.status is ApprovalStatus.APPROVED
+                        and approval.decision is ApprovalDecision.APPROVE
+                    ):
+                        approval_grant = effect_grant_from_approval(approval)
                 current = _commit_state(
                     store,
                     current,
@@ -105,7 +115,9 @@ def execute_operation(
                 )
                 tool_request = ToolRequest(
                     operation_id=current.operation_id, call_id=pending_call.call_id,
-                    name=pending_call.name, arguments=pending_call.arguments,
+                    name=pending_call.name,
+                    arguments=pending_call.arguments,
+                    approval_grant=approval_grant,
                 )
                 result = _execute_tool_effect(
                     store,
@@ -229,9 +241,9 @@ def execute_operation(
                             (spec for spec in request.tools if spec.name == tool_call.name), None,
                         ).requires_approval
                         or (
-                            next(
+                            _is_effectful_tool(next(
                                 (spec for spec in request.tools if spec.name == tool_call.name), None,
-                            ).side_effect and request.execution_policy.require_approval
+                            )) and request.execution_policy.require_approval
                         )
                     )
                     and not _can_auto_approve(
@@ -338,10 +350,13 @@ def execute_operation(
                 requires_approval = bool(
                     tool_spec is not None and (
                         tool_spec.requires_approval
-                        or (tool_spec.side_effect and request.execution_policy.require_approval)
+                        or (
+                            _is_effectful_tool(tool_spec)
+                            and request.execution_policy.require_approval
+                        )
                     )
                 )
-                if tool_spec is not None and tool_spec.side_effect and not request.execution_policy.allow_external_effects:
+                if _is_effectful_tool(tool_spec) and not request.execution_policy.allow_external_effects:
                     result = ToolResult(
                         call_id=tool_call.call_id,
                         name=tool_call.name,
@@ -377,6 +392,7 @@ def execute_operation(
                 auto_approved = _can_auto_approve(
                     tool_call.name, tool_call.arguments, request.execution_policy,
                 )
+                approval_grant: EffectGrant | None = None
                 if requires_approval and not auto_approved:
                     approval_set_id = uuid.uuid4().hex
                     store.create_approval_set(ApprovalSet(
@@ -469,8 +485,12 @@ def execute_operation(
                         approval_set_id=approval_set_id,
                         status=ApprovalStatus.APPROVED,
                         decision=ApprovalDecision.APPROVE,
+                        decided_by="policy",
+                        decided_at=approval_created_at,
+                        decision_source="policy",
                     )
                     store.create_approval(approval)
+                    approval_grant = effect_grant_from_approval(approval)
                     _debug(debug_trace, "approval_auto_approved", {
                         "approval_id": approval.approval_id,
                         "name": tool_call.name,
@@ -498,6 +518,7 @@ def execute_operation(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=tool_call.arguments,
+                    approval_grant=approval_grant,
                 )
                 _debug(debug_trace, "tool_request", {
                     "name": tool_request.name,
@@ -833,6 +854,19 @@ def _approval_operation(tool_name: str, arguments: dict[str, Any]) -> str:
         if isinstance(plan, dict):
             return str(plan.get("operation", ""))
     return tool_name
+
+
+def _is_effectful_tool(tool_spec: Any) -> bool:
+    """Treat explicit durable-write classification as an external effect."""
+
+    if tool_spec is None:
+        return False
+    policy_class = getattr(tool_spec, "policy_class", None)
+    policy_class = getattr(policy_class, "value", policy_class)
+    return bool(
+        getattr(tool_spec, "side_effect", False)
+        or policy_class == ToolPolicyClass.DURABLE_WRITE.value
+    )
 
 
 def _approval_payload(approval: Approval) -> dict[str, Any]:

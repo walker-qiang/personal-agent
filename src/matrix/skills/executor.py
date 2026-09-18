@@ -22,7 +22,12 @@ import re
 import time
 from typing import Any
 
+from ..runtime.domain.policy import ToolExecutionContext
+from ..runtime.domain.requests import ExecutionPolicy
+from ..runtime.domain.tools import ToolRequest
 from ..tools import FinanceToolError, ToolRegistry
+from ..tools.execution_gateway import ToolExecutionGateway
+from ..tools.principal import tool_principal
 from .loader import SkillDefinition
 
 logger = logging.getLogger("matrix.skills")
@@ -35,6 +40,9 @@ def execute_skill(
     skill: SkillDefinition,
     tools: ToolRegistry,
     trace: Any = None,
+    owner_id: str = "default",
+    session_id: str = "",
+    policy: ExecutionPolicy | None = None,
 ) -> dict[str, Any]:
     """Execute a skill's workflow steps sequentially with parameter bindings.
 
@@ -45,6 +53,16 @@ def execute_skill(
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     findings: list[str] = []
+    execution_policy = policy or ExecutionPolicy()
+    execution_session_id = session_id or f"skill:{skill.name}"
+    gateway = ToolExecutionGateway(tools)
+    execution_context = ToolExecutionContext(
+        owner_id=owner_id,
+        session_id=execution_session_id,
+        source="skill",
+        policy=execution_policy,
+        strict_classification=True,
+    )
     # Index: {step_key: output_value} for template resolution
     step_outputs: dict[str, Any] = {}
 
@@ -66,7 +84,19 @@ def execute_skill(
 
         started = time.perf_counter()
         try:
-            result = tools.call(tool_name, arguments)
+            request = ToolRequest(
+                operation_id=f"skill:{skill.name}",
+                call_id=f"skill:{skill.name}:{step_num}",
+                name=tool_name,
+                arguments=arguments,
+            )
+            with tool_principal(
+                owner_id,
+                execution_session_id,
+                execution_policy.mode,
+                execution_policy.allow_external_effects,
+            ):
+                result = gateway.call(request, execution_context)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
             # call() returns {"error": ...} on failures (Phase 2 pipeline)
