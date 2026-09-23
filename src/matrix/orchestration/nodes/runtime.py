@@ -16,6 +16,8 @@ from ...runtime.adapters.model import MatrixModelAdapter
 from ...runtime.adapters.tools import MatrixToolAdapter, tool_specs
 from ...runtime.adapters.context import MatrixContextAdapter
 from ...runtime.domain.messages import Message
+from ...runtime.domain.errors import OperationConflictError
+from ...runtime.domain.operations import OperationPhase
 from ...runtime.domain.results import RunOutcome
 from ...runtime.domain.requests import ResumeInput
 from ...runtime.domain.tools import ToolResult
@@ -204,6 +206,32 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
         operation = cfg["runtime_store"].load(cfg.get("user_id", "default"), operation_id)
         if operation is None:
             return {"error": "Runtime operation not found", "confirmed": True}
+        step_number = _operation_step_number(operation, state)
+        task = _operation_task(state, step_number)
+        if operation.phase is OperationPhase.COMPLETED:
+            agent_result = {
+                "agent_id": operation.agent_id,
+                "task": task,
+                "result": _runtime_final_message(operation),
+                "operation_id": operation_id,
+            }
+            if step_number is not None:
+                agent_result["step"] = step_number
+                completed_steps.append(step_number)
+                completed_step_refs.append(
+                    f"{state.get('plan_revision', 0)}:{step_number}"
+                )
+            agent_results.append(agent_result)
+            runtime_operation_ids.append({
+                "step": step_number,
+                "operation_id": operation_id,
+            })
+            continue
+        if operation.phase is not OperationPhase.WAITING_APPROVAL:
+            raise OperationConflictError(
+                f"operation {operation_id} is not waiting for approval: "
+                f"{operation.phase.value}"
+            )
         agent_def = cfg["agent_registry"].get(operation.agent_id)
         if agent_def is None:
             return {"error": "Agent not found", "confirmed": True}
@@ -265,25 +293,6 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
                     "operation_id": handle.operation_id,
                     "event": trace_event,
                 })
-        step_number: int | None = None
-        if operation.step_id:
-            try:
-                step_number = int(operation.step_id)
-            except ValueError:
-                step_number = None
-        if step_number is None:
-            plan = state.get("delegation_plan", [])
-            current_step = state.get("current_step", 0)
-            if 0 <= current_step < len(plan):
-                raw_step = plan[current_step].get("step")
-                if isinstance(raw_step, int):
-                    step_number = raw_step
-        task = ""
-        if step_number is not None:
-            for item in state.get("delegation_plan", []):
-                if item.get("step") == step_number:
-                    task = item.get("task", "")
-                    break
         agent_result: dict[str, Any] = {
             "agent_id": operation.agent_id,
             "task": task,
@@ -348,3 +357,41 @@ def _tool_result_dict(result: ToolResult) -> dict[str, Any]:
         "error": result.error,
         "call_id": result.call_id,
     }
+
+
+def _operation_step_number(operation: Any, state: AgentState) -> int | None:
+    if operation.step_id:
+        try:
+            return int(operation.step_id)
+        except ValueError:
+            pass
+    plan = state.get("delegation_plan", [])
+    current_step = state.get("current_step", 0)
+    if 0 <= current_step < len(plan):
+        raw_step = plan[current_step].get("step")
+        if isinstance(raw_step, int):
+            return raw_step
+    return None
+
+
+def _operation_task(state: AgentState, step_number: int | None) -> str:
+    if step_number is None:
+        return ""
+    for item in state.get("delegation_plan", []):
+        if item.get("step") == step_number:
+            return str(item.get("task", ""))
+    return ""
+
+
+def _runtime_final_message(operation: Any) -> str:
+    messages = operation.state.get("runtime_messages", [])
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+        ):
+            return message["content"]
+    return ""
