@@ -83,6 +83,16 @@ class OperationStorePort(Protocol):
     ) -> None:
         ...
 
+    def get_orchestration_run(
+        self, owner_id: str, run_id: str,
+    ) -> dict | None:
+        ...
+
+    def list_orchestration_steps(
+        self, owner_id: str, run_id: str,
+    ) -> list[dict]:
+        ...
+
     def upsert_orchestration_step(
         self,
         run_id: str,

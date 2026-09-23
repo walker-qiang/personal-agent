@@ -101,6 +101,7 @@ class MemoryOperationStore:
             raise OperationConflictError("operation owner cannot change")
         self.operations[current.operation_id] = transition.new_state
         self.events[current.operation_id].extend(transition.events)
+        self._sync_orchestration_projection(transition.new_state)
 
     def list_incomplete(self) -> list[OperationState]:
         return [operation for operation in self.operations.values() if not operation.is_terminal]
@@ -134,6 +135,7 @@ class MemoryOperationStore:
             )
             self.operations[operation.operation_id] = recovered_operation
             self.events[operation.operation_id].append(event)
+            self._sync_orchestration_projection(recovered_operation)
             recovered.append(recovered_operation)
         return recovered
 
@@ -216,11 +218,42 @@ class MemoryOperationStore:
     ):
         if not run_id:
             return
+        current = self.orchestration_runs.get(run_id)
+        if current is not None:
+            self.orchestration_runs[run_id] = {
+                **current,
+                "owner_id": owner_id,
+                "session_id": session_id,
+                "graph_thread_id": graph_thread_id or current.get("graph_thread_id", ""),
+                "metadata": (
+                    dict(metadata)
+                    if metadata is not None
+                    else dict(current.get("metadata", {}))
+                ),
+            }
+            return
         self.orchestration_runs[run_id] = {
             "run_id": run_id, "owner_id": owner_id, "session_id": session_id,
             "graph_thread_id": graph_thread_id, "status": "running",
             "metadata": dict(metadata or {}),
         }
+
+    def get_orchestration_run(self, owner_id, run_id):
+        value = self.orchestration_runs.get(run_id)
+        if value is None or value.get("owner_id") != owner_id:
+            return None
+        return dict(value)
+
+    def list_orchestration_steps(self, owner_id, run_id):
+        if self.get_orchestration_run(owner_id, run_id) is None:
+            return []
+        values = [
+            dict(value)
+            for (candidate_run_id, _), value in self.orchestration_steps.items()
+            if candidate_run_id == run_id
+        ]
+        values.sort(key=lambda item: item.get("step_id", ""))
+        return values
 
     def upsert_orchestration_step(
         self, run_id, step_id, operation_id, status, metadata=None,
@@ -234,6 +267,52 @@ class MemoryOperationStore:
             "status": status, "version": current["version"] + 1,
             "metadata": dict(metadata or {}),
         }
+
+    def _sync_orchestration_projection(self, operation: OperationState) -> None:
+        run_id = operation.orchestration_run_id
+        if not run_id:
+            return
+        if operation.step_id:
+            self.upsert_orchestration_step(
+                run_id,
+                operation.step_id,
+                operation.operation_id,
+                operation.phase.value,
+            )
+        terminal = {
+            OperationPhase.COMPLETED.value,
+            OperationPhase.FAILED.value,
+            OperationPhase.ABORTED.value,
+            OperationPhase.RECOVERY_REQUIRED.value,
+        }
+        run = self.orchestration_runs.get(run_id)
+        if run is None:
+            return
+        if operation.operation_scope == "top_level" and operation.phase.value in terminal:
+            run["status"] = operation.phase.value
+            return
+        if operation.operation_scope != "dag_step":
+            return
+        steps = [
+            item for (candidate_run_id, _), item in self.orchestration_steps.items()
+            if candidate_run_id == run_id
+        ]
+        if steps and all(item["status"] in terminal for item in steps):
+            run["status"] = (
+                OperationPhase.RECOVERY_REQUIRED.value
+                if any(
+                    item["status"] == OperationPhase.RECOVERY_REQUIRED.value
+                    for item in steps
+                )
+                else (
+                    OperationPhase.COMPLETED.value
+                    if all(
+                        item["status"] == OperationPhase.COMPLETED.value
+                        for item in steps
+                    )
+                    else OperationPhase.FAILED.value
+                )
+            )
 
     def event_list(self, operation_id: str) -> list[object]:
         return list(self.events.get(operation_id, []))

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from matrix.config import AgentConfig
 from matrix.runtime.domain.operations import OperationPhase, OperationState
+from matrix.runtime.domain.requests import RUNTIME_STATE_SCHEMA_VERSION
 from matrix.server.app import create_app
 from matrix.auth import hash_password
 
@@ -302,7 +303,13 @@ class TestRuntimeRetryContext:
                 "runtime_messages": [
                     {"role": "user", "content": "请重新检查这项任务"},
                 ],
-                "execution_policy": {"mode": "read_only", "preset": "default"},
+                "request_snapshot": {
+                    "schema_version": RUNTIME_STATE_SCHEMA_VERSION,
+                    "execution_policy": {
+                        "mode": "read_only",
+                        "preset": "default",
+                    },
+                },
             },
         )
         client.app.state.runtime_store.create(operation)

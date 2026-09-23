@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from ...runtime.domain.approvals import Approval
 from ...runtime.domain.operations import OperationPhase, OperationState
+from ...runtime.domain.requests import RuntimeRequestSnapshot
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
@@ -146,13 +147,13 @@ async def retry_context(request: Request, operation_id: str):
     )
     if not user_message:
         raise HTTPException(status_code=409, detail="operation has no retryable user message")
-    policy = operation.state.get("execution_policy", {})
+    policy = RuntimeRequestSnapshot.from_state(operation.state).execution_policy
     return {
         "operation_id": operation.operation_id,
         "session_id": operation.session_id,
         "message": user_message,
-        "mode": str(policy.get("mode", "read_only")),
-        "preset": str(policy.get("preset", "default")),
+        "mode": policy.mode,
+        "preset": policy.preset,
     }
 
 

@@ -5,7 +5,13 @@ from .core.plan_compiler import PlanCompiler
 from .domain.events import RuntimeEvent, RuntimeEventType
 from .domain.debug import DebugTraceEvent
 from .domain.plans import ExecutionPlan, PlanStatus, PlanStep
-from .domain.requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
+from .domain.requests import (
+    ExecutionOptions,
+    ExecutionPolicy,
+    ResumeInput,
+    RunRequest,
+    RuntimeRequestSnapshot,
+)
 from .domain.results import RunOutcome, RunResult
 
 __all__ = [
@@ -18,6 +24,7 @@ __all__ = [
     "RunHandle",
     "RunOutcome",
     "RunRequest",
+    "RuntimeRequestSnapshot",
     "RunResult",
     "PlanCompiler",
     "PlanStatus",

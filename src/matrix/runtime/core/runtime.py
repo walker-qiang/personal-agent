@@ -18,15 +18,18 @@ from ..domain.errors import OperationConflictError, RuntimeNotImplementedError
 from ..domain.approvals import ApprovalDecision, ApprovalStatus
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.operations import OperationPhase, OperationState, StateTransition
-from ..domain.requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
-from ..domain.messages import Message
-from ..domain.tools import RecoveryPolicy, ToolSpec
+from ..domain.requests import (
+    RUNTIME_STATE_SCHEMA_VERSION,
+    ResumeInput,
+    RunRequest,
+    RuntimeRequestSnapshot,
+)
 from ..domain.results import RunOutcome, RunResult, Suspension
 from ..ports.model import ModelPort
 from ..ports.context import ContextPort
 from ..ports.store import OperationStorePort
 from ..ports.tools import ToolExecutorPort
-from .loop import execute_operation
+from .loop import _messages_from_state, execute_operation
 from .debug import EphemeralDebugTrace
 from .reducer import with_next_phase
 
@@ -154,6 +157,7 @@ class AgentRuntime:
         if self.model is None or self.tools is None:
             raise RuntimeNotImplementedError("model and tools are required for Runtime execution")
         operation_id = uuid.uuid4().hex
+        request_snapshot = RuntimeRequestSnapshot.from_request(request)
         operation = OperationState(
             operation_id=operation_id,
             owner_id=request.owner_id,
@@ -163,36 +167,7 @@ class AgentRuntime:
             operation_scope=str(request.metadata.get("operation_scope", "top_level")),
             step_id=str(request.metadata.get("step_id", "")),
             state={
-                "system_prompt": request.system_prompt,
-                "model": request.model,
-                "tools": [
-                    {
-                        "name": tool.name, "description": tool.description,
-                        "input_schema": tool.input_schema,
-                        "recovery_policy": tool.recovery_policy.value,
-                        "requires_approval": tool.requires_approval,
-                        "side_effect": tool.side_effect,
-                        "policy_class": tool.policy_class.value,
-                    }
-                    for tool in request.tools
-                ],
-                "execution_options": {
-                    "max_turns": request.execution_options.max_turns,
-                    "max_tool_calls": request.execution_options.max_tool_calls,
-                    "timeout_seconds": request.execution_options.timeout_seconds,
-                    "max_model_retries": request.execution_options.max_model_retries,
-                },
-                "execution_policy": {
-                    "mode": request.execution_policy.mode,
-                    "preset": request.execution_policy.preset,
-                    "allow_external_effects": request.execution_policy.allow_external_effects,
-                    "require_approval": request.execution_policy.require_approval,
-                    "approval_mode": request.execution_policy.approval_mode,
-                    "auto_approve_operations": list(request.execution_policy.auto_approve_operations),
-                    "debug_trace": request.execution_policy.debug_trace,
-                    "output_style": request.execution_policy.output_style,
-                },
-                "metadata": request.metadata,
+                **request_snapshot.to_state(),
                 "runtime_messages": [
                     {
                         "role": message.role, "content": message.content,
@@ -205,8 +180,25 @@ class AgentRuntime:
                     for message in request.messages
                 ],
             },
+            state_schema_version=RUNTIME_STATE_SCHEMA_VERSION,
         )
         self.store.create(operation)
+        if request.orchestration_run_id:
+            self.store.ensure_orchestration_run(
+                request.orchestration_run_id,
+                request.owner_id,
+                request.session_id,
+                graph_thread_id=str(request.metadata.get("graph_thread_id", "")),
+                metadata=request.metadata,
+            )
+            if operation.step_id:
+                self.store.upsert_orchestration_step(
+                    request.orchestration_run_id,
+                    operation.step_id,
+                    operation.operation_id,
+                    operation.phase.value,
+                    metadata=request.metadata,
+                )
         handle = RunHandle(
             operation_id=operation_id,
             _debug=EphemeralDebugTrace() if request.execution_policy.debug_trace else None,
@@ -271,14 +263,7 @@ class AgentRuntime:
         approval_set = self.store.get_approval_set(owner_id, approval_set_id)
         if approval_set is None or approval_set.operation_id != operation_id:
             raise OperationConflictError("approval set does not belong to operation")
-        policy_data = operation.state.get("execution_policy", {})
-        policy = ExecutionPolicy(**{
-            key: value for key, value in policy_data.items()
-            if key in {
-                "mode", "preset", "allow_external_effects", "require_approval",
-                "approval_mode", "auto_approve_operations", "debug_trace", "output_style",
-            }
-        })
+        policy = RuntimeRequestSnapshot.from_state(operation.state).execution_policy
         handle = RunHandle(
             operation_id=operation_id,
             _debug=EphemeralDebugTrace() if policy.debug_trace else None,
@@ -290,7 +275,6 @@ class AgentRuntime:
             approval_set_id=approval_set_id,
             approval_ids=approval_ids or [item.approval_id for item in approvals],
             decisions=decisions,
-            policy=policy,
             expected_version=operation.version,
             expected_approval_set_version=(
                 approval_set.version
@@ -312,7 +296,6 @@ class AgentRuntime:
         approval_set_id: str,
         approval_ids: list[str],
         decisions: dict[str, str],
-        policy: ExecutionPolicy,
         expected_version: int,
         expected_approval_set_version: int,
         decided_by: str,
@@ -478,29 +461,12 @@ class AgentRuntime:
             )
 
         state = resumed_state.state
-        request = RunRequest(
+        request_snapshot = RuntimeRequestSnapshot.from_state(state)
+        request = request_snapshot.to_request(
             owner_id=resumed_state.owner_id,
             session_id=resumed_state.session_id,
             agent_id=resumed_state.agent_id,
-            messages=[],
-            system_prompt=state.get("system_prompt", ""),
-            model=state.get("model", ""),
-            tools=[ToolSpec(
-                name=item["name"],
-                description=item.get("description", ""),
-                input_schema=item.get("input_schema", {}),
-                recovery_policy=RecoveryPolicy(item.get("recovery_policy", "manual")),
-                requires_approval=bool(item.get("requires_approval", False)),
-                side_effect=bool(item.get("side_effect", False)),
-                policy_class=item.get("policy_class", "read_only"),
-            ) for item in state.get("tools", [])],
-            execution_options=ExecutionOptions(**{
-                key: value
-                for key, value in state.get("execution_options", {}).items()
-                if key in {"max_turns", "max_tool_calls", "timeout_seconds", "max_model_retries"}
-            }),
-            execution_policy=policy,
-            metadata=dict(state.get("metadata", {})),
+            messages=_messages_from_state(state),
             orchestration_run_id=resumed_state.orchestration_run_id,
         )
         return execute_operation(

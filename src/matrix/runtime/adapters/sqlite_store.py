@@ -151,6 +151,15 @@ class SQLiteRuntimeStore:
                     )
                     if updated.rowcount != 1:
                         raise OperationConflictError("runtime recovery compare-and-swap failed")
+                    recovered_operation = replace(
+                        _operation_from_row(row),
+                        phase=OperationPhase.RECOVERY_REQUIRED,
+                        version=int(row["version"]) + 1,
+                        last_event_sequence=sequence,
+                        state=state,
+                        updated_at=now,
+                    )
+                    _sync_orchestration_projection(conn, recovered_operation)
                     conn.execute(
                         "INSERT INTO runtime_events "
                         "(event_id, owner_id, operation_id, session_id, sequence, event_type, timestamp, payload_json) "
@@ -272,8 +281,14 @@ class SQLiteRuntimeStore:
                     metadata_json, created_at, updated_at)
                    VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET
-                     graph_thread_id=excluded.graph_thread_id,
-                     metadata_json=excluded.metadata_json,
+                     graph_thread_id=CASE
+                       WHEN excluded.graph_thread_id <> '' THEN excluded.graph_thread_id
+                       ELSE orchestration_runs.graph_thread_id
+                     END,
+                     metadata_json=CASE
+                       WHEN excluded.metadata_json <> '{}' THEN excluded.metadata_json
+                       ELSE orchestration_runs.metadata_json
+                     END,
                      updated_at=excluded.updated_at""",
                 (
                     run_id, owner_id, session_id, graph_thread_id,
@@ -282,6 +297,52 @@ class SQLiteRuntimeStore:
                 ),
             )
             conn.commit()
+
+    def get_orchestration_run(
+        self, owner_id: str, run_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT * FROM orchestration_runs WHERE owner_id=? AND run_id=?",
+                (owner_id, run_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "owner_id": row["owner_id"],
+            "session_id": row["session_id"],
+            "graph_thread_id": row["graph_thread_id"],
+            "status": row["status"],
+            "metadata": _json_dict(row["metadata_json"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def list_orchestration_steps(
+        self, owner_id: str, run_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._get_conn().execute(
+                """SELECT s.* FROM orchestration_run_steps s
+                   JOIN orchestration_runs r ON r.run_id=s.run_id
+                   WHERE r.owner_id=? AND s.run_id=?
+                   ORDER BY s.created_at, s.step_id""",
+                (owner_id, run_id),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "step_id": row["step_id"],
+                "operation_id": row["operation_id"],
+                "status": row["status"],
+                "version": int(row["version"]),
+                "metadata": _json_dict(row["metadata_json"]),
+                "created_at": float(row["created_at"]),
+                "updated_at": float(row["updated_at"]),
+            }
+            for row in rows
+        ]
 
     def upsert_orchestration_step(
         self,
@@ -964,50 +1025,7 @@ def _apply_transition(conn: sqlite3.Connection, transition: StateTransition) -> 
                 json.dumps(event.payload, ensure_ascii=False, default=str),
             ),
             )
-    if state.orchestration_run_id and state.step_id:
-        now = time.time()
-        conn.execute(
-            """INSERT INTO orchestration_run_steps
-               (run_id, step_id, operation_id, status, version,
-                metadata_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 0, '{}', ?, ?)
-               ON CONFLICT(run_id, step_id) DO UPDATE SET
-                 operation_id=excluded.operation_id,
-                 status=excluded.status,
-                 version=orchestration_run_steps.version+1,
-                 updated_at=excluded.updated_at""",
-            (
-                state.orchestration_run_id, state.step_id, state.operation_id,
-                state.phase.value, now, now,
-            ),
-        )
-    if state.orchestration_run_id:
-        terminal = {
-            OperationPhase.COMPLETED.value,
-            OperationPhase.FAILED.value,
-            OperationPhase.ABORTED.value,
-            OperationPhase.RECOVERY_REQUIRED.value,
-        }
-        if state.operation_scope == "top_level" and state.phase.value in terminal:
-            conn.execute(
-                "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
-                (state.phase.value, time.time(), state.orchestration_run_id),
-            )
-        elif state.operation_scope == "dag_step":
-            step_rows = conn.execute(
-                "SELECT status FROM orchestration_run_steps WHERE run_id=?",
-                (state.orchestration_run_id,),
-            ).fetchall()
-            if step_rows and all(row["status"] in terminal for row in step_rows):
-                run_status = (
-                    OperationPhase.COMPLETED.value
-                    if all(row["status"] == OperationPhase.COMPLETED.value for row in step_rows)
-                    else OperationPhase.FAILED.value
-                )
-                conn.execute(
-                    "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
-                    (run_status, time.time(), state.orchestration_run_id),
-                )
+    _sync_orchestration_projection(conn, state)
 
 
 def _operation_from_row(row: sqlite3.Row) -> OperationState:
@@ -1060,7 +1078,76 @@ def _approval_set_from_row(row: sqlite3.Row) -> ApprovalSet:
         version=int(row["version"]),
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
+        last_idempotency_key=row["last_idempotency_key"] or "",
     )
+
+
+def _json_dict(value: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _sync_orchestration_projection(
+    conn: sqlite3.Connection, state: OperationState,
+) -> None:
+    if not state.orchestration_run_id:
+        return
+    now = time.time()
+    if state.step_id:
+        conn.execute(
+            """INSERT INTO orchestration_run_steps
+               (run_id, step_id, operation_id, status, version,
+                metadata_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 0, '{}', ?, ?)
+               ON CONFLICT(run_id, step_id) DO UPDATE SET
+                 operation_id=excluded.operation_id,
+                 status=excluded.status,
+                 version=orchestration_run_steps.version+1,
+                 updated_at=excluded.updated_at""",
+            (
+                state.orchestration_run_id, state.step_id, state.operation_id,
+                state.phase.value, now, now,
+            ),
+        )
+    terminal = {
+        OperationPhase.COMPLETED.value,
+        OperationPhase.FAILED.value,
+        OperationPhase.ABORTED.value,
+        OperationPhase.RECOVERY_REQUIRED.value,
+    }
+    if state.operation_scope == "top_level" and state.phase.value in terminal:
+        conn.execute(
+            "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
+            (state.phase.value, now, state.orchestration_run_id),
+        )
+    elif state.operation_scope == "dag_step":
+        step_rows = conn.execute(
+            "SELECT status FROM orchestration_run_steps WHERE run_id=?",
+            (state.orchestration_run_id,),
+        ).fetchall()
+        if step_rows and all(row["status"] in terminal for row in step_rows):
+            run_status = (
+                OperationPhase.RECOVERY_REQUIRED.value
+                if any(
+                    row["status"] == OperationPhase.RECOVERY_REQUIRED.value
+                    for row in step_rows
+                )
+                else (
+                    OperationPhase.COMPLETED.value
+                    if all(
+                        row["status"] == OperationPhase.COMPLETED.value
+                        for row in step_rows
+                    )
+                    else OperationPhase.FAILED.value
+                )
+            )
+            conn.execute(
+                "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
+                (run_status, now, state.orchestration_run_id),
+            )
 
 
 def _approval_set_status(approvals: tuple[Approval, ...]) -> ApprovalSetStatus:

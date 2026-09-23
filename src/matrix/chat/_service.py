@@ -37,7 +37,12 @@ from ..runtime.adapters.deep_research import (
     RESEARCH_MINIMUM_ITEMS,
     DeepResearchWorkflow,
 )
-from ..runtime import AgentRuntime, ExecutionPolicy, ResumeInput
+from ..runtime import (
+    AgentRuntime,
+    ExecutionPolicy,
+    ResumeInput,
+    RuntimeRequestSnapshot,
+)
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..runtime.adapters.context import MatrixContextAdapter
@@ -1886,18 +1891,17 @@ class ChatService:
         idempotency_key: str,
     ) -> Iterator[dict[str, Any]]:
         """Resume the parent LangGraph checkpoint after Runtime approvals."""
-        policy_data = operation.state.get("execution_policy", {})
-        policy = ExecutionPolicy(**{
-            key: value for key, value in policy_data.items()
-            if key in {
-                "mode", "preset", "allow_external_effects", "require_approval",
-                "approval_mode", "auto_approve_operations", "debug_trace", "output_style",
-            }
-        })
+        policy = RuntimeRequestSnapshot.from_state(operation.state).execution_policy
         history = self._get_history(session_id, user_id)
         llm = self._get_llm(session_id, user_id=user_id)
+        orchestration_run = self._runtime_store.get_orchestration_run(
+            user_id, operation.orchestration_run_id,
+        )
+        graph_thread_id = str(
+            (orchestration_run or {}).get("graph_thread_id") or session_id
+        )
         graph_config = self._build_graph_config(
-            session_id, llm, history, "", user_id, [],
+            graph_thread_id, llm, history, "", user_id, [],
             agent_policy=policy,
         )
         resume_payload: dict[str, Any] = {
@@ -1919,7 +1923,7 @@ class ChatService:
                 yield from self._finalize_stream(
                     final_state, session_id, "", llm, history, user_id,
                 )
-            self._prune_checkpoints(session_id, keep_latest=False)
+            self._prune_checkpoints(graph_thread_id, keep_latest=False)
         except GraphInterrupt as gi:
             yield from self._handle_hitl_interrupt(gi, session_id)
         except Exception as err:
@@ -1950,6 +1954,8 @@ class ChatService:
             if agent_def is None:
                 raise ValueError(f"Agent not found: {operation.agent_id}")
             agent_tools = self.agent_registry.build_tool_registry(operation.agent_id, self.tools)
+            request_snapshot = RuntimeRequestSnapshot.from_state(operation.state)
+            policy = request_snapshot.execution_policy
             runtime = AgentRuntime(
                 self._runtime_store,
                 model=MatrixModelAdapter(self._get_llm(session_id, user_id=user_id)),
@@ -1957,8 +1963,8 @@ class ChatService:
                     agent_tools,
                     session_id=session_id,
                     owner_id=user_id,
-                    mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
-                    allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+                    mode=policy.mode,
+                    allow_external_effects=policy.allow_external_effects,
                     strict_classification=True,
                 ),
             )
