@@ -6,7 +6,12 @@ from typing import Any
 
 from langgraph.types import RunnableConfig, interrupt
 
-from ...runtime import AgentRuntime, ExecutionPolicy, RunRequest
+from ...runtime import (
+    AgentRuntime,
+    ExecutionPolicy,
+    RunRequest,
+    RuntimeRequestSnapshot,
+)
 from ...runtime.adapters.model import MatrixModelAdapter
 from ...runtime.adapters.tools import MatrixToolAdapter, tool_specs
 from ...runtime.adapters.context import MatrixContextAdapter
@@ -203,12 +208,14 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
         if agent_def is None:
             return {"error": "Agent not found", "confirmed": True}
         agent_tools = cfg["agent_registry"].build_tool_registry(operation.agent_id, cfg["full_tools"])
+        request_snapshot = RuntimeRequestSnapshot.from_state(operation.state)
+        policy = request_snapshot.execution_policy
         runtime = AgentRuntime(
             cfg["runtime_store"], model=MatrixModelAdapter(cfg["llm"]),
             tools=MatrixToolAdapter(
                 agent_tools, session_id=operation.session_id, owner_id=operation.owner_id,
-                mode=str(operation.state.get("execution_policy", {}).get("mode", "read_only")),
-                allow_external_effects=bool(operation.state.get("execution_policy", {}).get("allow_external_effects", False)),
+                mode=policy.mode,
+                allow_external_effects=policy.allow_external_effects,
                 strict_classification=True,
             ),
             context=cfg.get("runtime_context") or MatrixContextAdapter(),
@@ -244,12 +251,15 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
                     "expected_operation_version": operation.version,
                     "expected_approval_set_version": expected_set_version,
                     "decisions": operation_decisions,
+                    "idempotency_key": str(
+                        decision_payload.get("idempotency_key", "")
+                    ),
                 },
             ),
         )
         events = list(handle.events())
         result = handle.result()
-        if cfg.get("execution_policy", ExecutionPolicy()).debug_trace:
+        if policy.debug_trace:
             for trace_event in handle.debug_trace():
                 _push_event(cfg, "debug_trace", {
                     "operation_id": handle.operation_id,

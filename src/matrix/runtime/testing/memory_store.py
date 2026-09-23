@@ -17,7 +17,12 @@ from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 
 from ..domain.errors import OperationConflictError
-from ..domain.operations import OperationPhase, OperationState, StateTransition
+from ..domain.operations import (
+    OperationPhase,
+    OperationState,
+    StateTransition,
+    aggregate_orchestration_status,
+)
 
 
 class MemoryOperationStore:
@@ -30,6 +35,8 @@ class MemoryOperationStore:
         self.orchestration_steps: dict[tuple[str, str], dict] = {}
         self.effects: dict[tuple[str, str], dict] = {}
         self.session_entries: list[dict] = []
+        self._operation_order: dict[str, int] = {}
+        self._next_operation_order = 0
 
     def append_session_entry(self, owner_id, session_id, entry_type, payload):
         entry = {
@@ -77,6 +84,8 @@ class MemoryOperationStore:
                 raise OperationConflictError("DAG step operation already exists")
         self.operations[operation.operation_id] = operation
         self.events[operation.operation_id] = []
+        self._operation_order[operation.operation_id] = self._next_operation_order
+        self._next_operation_order += 1
 
     def load(self, owner_id: str, operation_id: str) -> OperationState | None:
         operation = self.operations.get(operation_id)
@@ -283,6 +292,95 @@ class MemoryOperationStore:
         values.sort(key=lambda item: item.get("step_id", ""))
         return values
 
+    def reconcile_orchestration_runs(self) -> list[dict]:
+        """Rebuild in-memory run and step projections from operations."""
+
+        summaries: list[dict] = []
+        for run_id, run in self.orchestration_runs.items():
+            step_operations: dict[str, OperationState] = {}
+            top_level_operations: list[OperationState] = []
+            for operation in self.operations.values():
+                if operation.orchestration_run_id != run_id:
+                    continue
+                if operation.operation_scope == "dag_step" and operation.step_id:
+                    current = step_operations.get(operation.step_id)
+                    if (
+                        current is None
+                        or _operation_projection_key(
+                            operation,
+                            self._operation_order.get(operation.operation_id, -1),
+                        )
+                        > _operation_projection_key(
+                            current,
+                            self._operation_order.get(current.operation_id, -1),
+                        )
+                    ):
+                        step_operations[operation.step_id] = operation
+                elif operation.operation_scope == "top_level":
+                    top_level_operations.append(operation)
+
+            projected_keys = {
+                key for key in self.orchestration_steps
+                if key[0] == run_id
+            }
+            for step_id, operation in step_operations.items():
+                key = (run_id, step_id)
+                metadata = _operation_projection_metadata(operation)
+                current = self.orchestration_steps.get(key)
+                if current is None:
+                    self.orchestration_steps[key] = {
+                        "run_id": run_id,
+                        "step_id": step_id,
+                        "operation_id": operation.operation_id,
+                        "status": operation.phase.value,
+                        "version": 0,
+                        "metadata": metadata,
+                    }
+                elif (
+                    current["operation_id"] != operation.operation_id
+                    or current["status"] != operation.phase.value
+                    or current.get("metadata", {}) != metadata
+                ):
+                    self.orchestration_steps[key] = {
+                        **current,
+                        "operation_id": operation.operation_id,
+                        "status": operation.phase.value,
+                        "version": current["version"] + 1,
+                        "metadata": metadata,
+                    }
+            for key in projected_keys - {
+                (run_id, step_id) for step_id in step_operations
+            }:
+                del self.orchestration_steps[key]
+
+            step_statuses = [
+                operation.phase.value for operation in step_operations.values()
+            ]
+            if step_statuses:
+                run_status = aggregate_orchestration_status(step_statuses)
+            elif top_level_operations:
+                latest_top_level = max(
+                    top_level_operations,
+                    key=lambda operation: _operation_projection_key(
+                        operation,
+                        self._operation_order.get(operation.operation_id, -1),
+                    ),
+                )
+                run_status = aggregate_orchestration_status(
+                    [latest_top_level.phase.value],
+                )
+            else:
+                run_status = str(run.get("status") or "running")
+            run["status"] = run_status
+            summaries.append({
+                "run_id": run_id,
+                "owner_id": run.get("owner_id", ""),
+                "session_id": run.get("session_id", ""),
+                "status": run_status,
+                "step_count": len(step_operations),
+            })
+        return summaries
+
     def upsert_orchestration_step(
         self, run_id, step_id, operation_id, status, metadata=None,
     ):
@@ -325,21 +423,9 @@ class MemoryOperationStore:
             item for (candidate_run_id, _), item in self.orchestration_steps.items()
             if candidate_run_id == run_id
         ]
-        if steps and all(item["status"] in terminal for item in steps):
-            run["status"] = (
-                OperationPhase.RECOVERY_REQUIRED.value
-                if any(
-                    item["status"] == OperationPhase.RECOVERY_REQUIRED.value
-                    for item in steps
-                )
-                else (
-                    OperationPhase.COMPLETED.value
-                    if all(
-                        item["status"] == OperationPhase.COMPLETED.value
-                        for item in steps
-                    )
-                    else OperationPhase.FAILED.value
-                )
+        if steps:
+            run["status"] = aggregate_orchestration_status(
+                item["status"] for item in steps
             )
 
     def event_list(self, operation_id: str) -> list[object]:
@@ -406,6 +492,10 @@ class MemoryOperationStore:
         }
         self.operations = {
             key: value for key, value in self.operations.items()
+            if key not in operation_ids
+        }
+        self._operation_order = {
+            key: value for key, value in self._operation_order.items()
             if key not in operation_ids
         }
         self.events = {
@@ -596,3 +686,24 @@ def _approval_set_status(approvals: tuple[Approval, ...]) -> ApprovalSetStatus:
     if all(item.status is ApprovalStatus.APPROVED for item in approvals):
         return ApprovalSetStatus.APPROVED
     return ApprovalSetStatus.SKIPPED
+
+
+def _operation_projection_key(
+    operation: OperationState,
+    order: int,
+) -> tuple[float, float, int, str, int]:
+    return (
+        float(operation.updated_at),
+        float(operation.created_at),
+        operation.version,
+        order,
+        operation.operation_id,
+    )
+
+
+def _operation_projection_metadata(operation: OperationState) -> dict:
+    snapshot = operation.state.get("request_snapshot")
+    if not isinstance(snapshot, dict):
+        return {}
+    metadata = snapshot.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}

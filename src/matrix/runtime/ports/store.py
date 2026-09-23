@@ -94,6 +94,10 @@ class OperationStorePort(Protocol):
     ) -> list[dict]:
         ...
 
+    def reconcile_orchestration_runs(self) -> list[dict]:
+        """Rebuild orchestration projections from durable Runtime operations."""
+        ...
+
     def upsert_orchestration_step(
         self,
         run_id: str,

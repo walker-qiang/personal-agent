@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
 
 from .events import RuntimeEvent
 
@@ -29,6 +29,22 @@ TERMINAL_PHASES = frozenset({
     OperationPhase.ABORTED,
     OperationPhase.RECOVERY_REQUIRED,
 })
+
+
+def aggregate_orchestration_status(statuses: Iterable[str]) -> str:
+    """Derive a fail-closed run status from its projected step statuses."""
+
+    values = {str(status) for status in statuses}
+    if OperationPhase.RECOVERY_REQUIRED.value in values:
+        return OperationPhase.RECOVERY_REQUIRED.value
+    if values.intersection({
+        OperationPhase.FAILED.value,
+        OperationPhase.ABORTED.value,
+    }):
+        return OperationPhase.FAILED.value
+    if values and values == {OperationPhase.COMPLETED.value}:
+        return OperationPhase.COMPLETED.value
+    return "running"
 
 
 @dataclass(frozen=True)

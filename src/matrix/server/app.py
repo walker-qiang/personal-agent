@@ -206,6 +206,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "no side effects were replayed",
             len(recovered),
         )
+    reconciled = runtime_store.reconcile_orchestration_runs()
+    if reconciled:
+        logger.info(
+            "runtime: reconciled %d orchestration run projection(s)",
+            len(reconciled),
+        )
     incomplete = runtime_store.list_incomplete()
     waiting = [item for item in incomplete if item.phase.value == "waiting_approval"]
     if waiting:

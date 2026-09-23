@@ -21,7 +21,12 @@ from ..domain.approvals import (
 )
 from ..domain.errors import OperationConflictError
 from ..domain.events import RuntimeEvent, RuntimeEventType
-from ..domain.operations import OperationPhase, OperationState, StateTransition
+from ..domain.operations import (
+    OperationPhase,
+    OperationState,
+    StateTransition,
+    aggregate_orchestration_status,
+)
 from ..domain.tools import RecoveryPolicy, ToolRequest, ToolResult
 from .sqlite_schema import migrate_runtime_schema
 
@@ -314,6 +319,127 @@ class SQLiteRuntimeStore:
             }
             for row in rows
         ]
+
+    def reconcile_orchestration_runs(self) -> list[dict[str, Any]]:
+        """Rebuild run and step projections from durable operation snapshots."""
+
+        summaries: list[dict[str, Any]] = []
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                run_rows = conn.execute(
+                    "SELECT * FROM orchestration_runs ORDER BY created_at, run_id"
+                ).fetchall()
+                for run_row in run_rows:
+                    run_id = str(run_row["run_id"])
+                    operation_rows = conn.execute(
+                        """SELECT * FROM runtime_operations
+                           WHERE orchestration_run_id=?
+                           ORDER BY updated_at, created_at, operation_id""",
+                        (run_id,),
+                    ).fetchall()
+                    step_operations: dict[str, sqlite3.Row] = {}
+                    top_level_operations: list[sqlite3.Row] = []
+                    for row in operation_rows:
+                        if row["operation_scope"] == "dag_step" and row["step_id"]:
+                            step_id = str(row["step_id"])
+                            current = step_operations.get(step_id)
+                            if current is None or _operation_projection_key(row) > _operation_projection_key(current):
+                                step_operations[step_id] = row
+                        elif row["operation_scope"] == "top_level":
+                            top_level_operations.append(row)
+
+                    projected_rows = conn.execute(
+                        """SELECT step_id, operation_id, status, metadata_json
+                           FROM orchestration_run_steps
+                           WHERE run_id=?""",
+                        (run_id,),
+                    ).fetchall()
+                    projected_by_step = {
+                        str(row["step_id"]): row for row in projected_rows
+                    }
+                    now = time.time()
+                    for step_id, operation_row in step_operations.items():
+                        operation_id = str(operation_row["operation_id"])
+                        status = str(operation_row["phase"])
+                        metadata = _operation_projection_metadata(operation_row)
+                        projected = projected_by_step.get(step_id)
+                        if projected is None:
+                            conn.execute(
+                                """INSERT INTO orchestration_run_steps
+                                   (run_id, step_id, operation_id, status, version,
+                                    metadata_json, created_at, updated_at)
+                                   VALUES (?, ?, ?, ?, 0, ?, ?, ?)""",
+                                (
+                                    run_id, step_id, operation_id, status,
+                                    json.dumps(metadata, ensure_ascii=False, default=str),
+                                    now, now,
+                                ),
+                            )
+                        elif (
+                            projected["operation_id"] != operation_id
+                            or projected["status"] != status
+                            or _json_dict(projected["metadata_json"]) != metadata
+                        ):
+                            conn.execute(
+                                """UPDATE orchestration_run_steps
+                                   SET operation_id=?, status=?, version=version+1,
+                                       metadata_json=?,
+                                       updated_at=?
+                                   WHERE run_id=? AND step_id=?""",
+                                (
+                                    operation_id,
+                                    status,
+                                    json.dumps(metadata, ensure_ascii=False, default=str),
+                                    now,
+                                    run_id,
+                                    step_id,
+                                ),
+                            )
+
+                    stale_step_ids = set(projected_by_step) - set(step_operations)
+                    for step_id in stale_step_ids:
+                        conn.execute(
+                            "DELETE FROM orchestration_run_steps "
+                            "WHERE run_id=? AND step_id=?",
+                            (run_id, step_id),
+                        )
+
+                    step_statuses = [
+                        str(row["phase"])
+                        for row in step_operations.values()
+                    ]
+                    if step_statuses:
+                        run_status = aggregate_orchestration_status(step_statuses)
+                    elif top_level_operations:
+                        latest_top_level = max(
+                            top_level_operations,
+                            key=_operation_projection_key,
+                        )
+                        run_status = aggregate_orchestration_status(
+                            [str(latest_top_level["phase"])]
+                        )
+                    else:
+                        run_status = str(run_row["status"] or "running")
+                    if run_status != run_row["status"]:
+                        conn.execute(
+                            "UPDATE orchestration_runs SET status=?, updated_at=? "
+                            "WHERE run_id=?",
+                            (run_status, now, run_id),
+                        )
+                    summaries.append({
+                        "run_id": run_id,
+                        "owner_id": run_row["owner_id"],
+                        "session_id": run_row["session_id"],
+                        "status": run_status,
+                        "step_count": len(step_operations),
+                    })
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return summaries
 
     def upsert_orchestration_step(
         self,
@@ -1038,6 +1164,24 @@ def _operation_from_row(row: sqlite3.Row) -> OperationState:
     )
 
 
+def _operation_projection_key(row: sqlite3.Row) -> tuple[float, float, int, str]:
+    return (
+        float(row["updated_at"]),
+        float(row["created_at"]),
+        int(row["version"]),
+        str(row["operation_id"]),
+    )
+
+
+def _operation_projection_metadata(row: sqlite3.Row) -> dict[str, Any]:
+    state = _json_dict(row["state_json"])
+    snapshot = state.get("request_snapshot")
+    if not isinstance(snapshot, dict):
+        return {}
+    metadata = snapshot.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
 def _event_from_row(row: sqlite3.Row) -> RuntimeEvent:
     return RuntimeEvent(
         event_id=row["event_id"], owner_id=row["owner_id"], operation_id=row["operation_id"],
@@ -1249,21 +1393,9 @@ def _sync_orchestration_projection(
             "SELECT status FROM orchestration_run_steps WHERE run_id=?",
             (state.orchestration_run_id,),
         ).fetchall()
-        if step_rows and all(row["status"] in terminal for row in step_rows):
-            run_status = (
-                OperationPhase.RECOVERY_REQUIRED.value
-                if any(
-                    row["status"] == OperationPhase.RECOVERY_REQUIRED.value
-                    for row in step_rows
-                )
-                else (
-                    OperationPhase.COMPLETED.value
-                    if all(
-                        row["status"] == OperationPhase.COMPLETED.value
-                        for row in step_rows
-                    )
-                    else OperationPhase.FAILED.value
-                )
+        if step_rows:
+            run_status = aggregate_orchestration_status(
+                row["status"] for row in step_rows
             )
             conn.execute(
                 "UPDATE orchestration_runs SET status=?, updated_at=? WHERE run_id=?",
