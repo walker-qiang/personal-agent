@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 
-RUNTIME_SCHEMA_VERSION = 3
+RUNTIME_SCHEMA_VERSION = 4
 
 
 def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
@@ -86,7 +86,8 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_dag_step
             ON runtime_operations(orchestration_run_id, step_id)
             WHERE operation_scope = 'dag_step'
-              AND orchestration_run_id <> '' AND step_id IS NOT NULL;
+              AND orchestration_run_id <> '' AND step_id IS NOT NULL
+              AND phase NOT IN ('completed', 'failed', 'aborted', 'recovery_required');
         CREATE TABLE IF NOT EXISTS runtime_events (
             event_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -186,6 +187,20 @@ def migrate_runtime_schema(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT version FROM runtime_schema_meta ORDER BY version DESC LIMIT 1"
     ).fetchone()
+    if row is None or int(row[0]) < 4:
+        # Schema v4 allows a later plan revision to reuse a step number after
+        # the prior operation reached a terminal phase. Active duplicates
+        # remain rejected by the recreated partial unique index.
+        conn.execute("DROP INDEX IF EXISTS uq_runtime_dag_step")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_dag_step
+               ON runtime_operations(orchestration_run_id, step_id)
+               WHERE operation_scope = 'dag_step'
+                 AND orchestration_run_id <> '' AND step_id IS NOT NULL
+                 AND phase NOT IN (
+                   'completed', 'failed', 'aborted', 'recovery_required'
+                 )"""
+        )
     if row is None or int(row[0]) < RUNTIME_SCHEMA_VERSION:
         conn.execute(
             "INSERT OR REPLACE INTO runtime_schema_meta(version, applied_at) VALUES (?, ?)",
