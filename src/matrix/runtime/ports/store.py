@@ -26,9 +26,10 @@ class OperationStorePort(Protocol):
     def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
         """Fail closed operations left mid-flight by a process restart.
 
-        WAITING_APPROVAL is intentionally preserved because it has a durable,
-        user-mediated resume path. Other non-terminal phases cannot be safely
-        replayed without knowing whether an external effect already ran.
+        WAITING_APPROVAL is preserved when no tool effect was started because
+        it has a durable, user-mediated resume path. An executing tool effect
+        makes the operation recovery-required even if the operation snapshot
+        otherwise looks terminal.
         """
         ...
 
@@ -143,4 +144,10 @@ class OperationStorePort(Protocol):
         ...
 
     def settle_tool_effect(self, request: ToolRequest, result: ToolResult) -> None:
+        ...
+
+    def list_tool_effects(
+        self, owner_id: str, operation_id: str,
+    ) -> list[dict]:
+        """List durable tool effect intents owned by the caller."""
         ...

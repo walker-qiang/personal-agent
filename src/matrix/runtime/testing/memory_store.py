@@ -109,12 +109,40 @@ class MemoryOperationStore:
     def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
         recovered: list[OperationState] = []
         for operation in list(self.operations.values()):
-            if operation.is_terminal or operation.phase is OperationPhase.WAITING_APPROVAL:
+            unresolved_effects = [
+                {
+                    "tool_call_id": call_id,
+                    "tool_name": effect.get("name", ""),
+                    "recovery_policy": effect.get("policy", ""),
+                    "idempotency_key": effect.get("idempotency_key", ""),
+                }
+                for (operation_id, call_id), effect in self.effects.items()
+                if operation_id == operation.operation_id
+                and effect.get("status") == "executing"
+            ]
+            if (
+                (operation.is_terminal and not unresolved_effects)
+                or (
+                    operation.phase is OperationPhase.WAITING_APPROVAL
+                    and not unresolved_effects
+                )
+            ):
                 continue
+            for (operation_id, _), effect in self.effects.items():
+                if (
+                    operation_id == operation.operation_id
+                    and effect.get("status") == "executing"
+                ):
+                    effect["status"] = "recovery_required"
+                    effect["error"] = (
+                        f"tool effect interrupted during {reason}; "
+                        "external outcome is unknown"
+                    )
             state = dict(operation.state)
             state["runtime_recovery"] = {
                 "reason": reason,
                 "previous_phase": operation.phase.value,
+                "unresolved_tool_effects": unresolved_effects,
             }
             event = RuntimeEvent(
                 event_id=uuid.uuid4().hex,
@@ -524,12 +552,32 @@ class MemoryOperationStore:
 
     def settle_tool_effect(self, request: ToolRequest, result: ToolResult) -> None:
         key = (request.operation_id, request.call_id)
-        if key not in self.effects:
+        if key not in self.effects or self.effects[key].get("status") != "executing":
             raise OperationConflictError("tool effect intent does not exist")
         self.effects[key].update({
             "status": "failed" if result.is_error else "settled",
             "result": result.result, "error": result.error,
         })
+
+    def list_tool_effects(self, owner_id, operation_id):
+        operation = self.operations.get(operation_id)
+        if operation is None or operation.owner_id != owner_id:
+            return []
+        return [
+            {
+                "operation_id": operation_id,
+                "tool_call_id": call_id,
+                "owner_id": owner_id,
+                "tool_name": effect.get("name", ""),
+                "recovery_policy": effect.get("policy", ""),
+                "status": effect.get("status", ""),
+                "idempotency_key": effect.get("idempotency_key", ""),
+                "result": effect.get("result"),
+                "error": effect.get("error", ""),
+            }
+            for (candidate_operation_id, call_id), effect in self.effects.items()
+            if candidate_operation_id == operation_id
+        ]
 
 
 def _approval_set_status(approvals: tuple[Approval, ...]) -> ApprovalSetStatus:

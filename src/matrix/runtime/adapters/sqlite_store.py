@@ -111,11 +111,11 @@ class SQLiteRuntimeStore:
         return [_operation_from_row(row) for row in rows]
 
     def recover_incomplete(self, reason: str = "process_restart") -> list[OperationState]:
-        """Mark non-approval operations left mid-flight as recovery-required.
+        """Mark unsafe operations left mid-flight as recovery-required.
 
-        The update and its audit event are committed together. Approval waits
-        remain resumable; replaying any other phase could duplicate a tool
-        effect after a crash between the effect and its settlement.
+        Approval waits remain resumable when no tool effect was started. Any
+        executing effect makes the operation unsafe to replay, including an
+        operation whose snapshot otherwise looks terminal.
         """
         recovered_ids: list[tuple[str, str]] = []
         now = time.time()
@@ -124,51 +124,22 @@ class SQLiteRuntimeStore:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
-                    "SELECT * FROM runtime_operations "
-                    "WHERE phase NOT IN ('completed','failed','aborted','recovery_required','waiting_approval') "
-                    "ORDER BY created_at"
+                    """SELECT o.* FROM runtime_operations o
+                       WHERE o.phase <> 'recovery_required'
+                         AND (
+                           o.phase NOT IN
+                             ('completed','failed','aborted','waiting_approval')
+                           OR EXISTS (
+                             SELECT 1 FROM runtime_tool_effects e
+                             WHERE e.operation_id=o.operation_id
+                               AND e.status='executing'
+                           )
+                         )
+                       ORDER BY o.created_at"""
                 ).fetchall()
                 for row in rows:
-                    previous_phase = str(row["phase"])
-                    state = json.loads(row["state_json"] or "{}")
-                    if not isinstance(state, dict):
-                        state = {}
-                    state["runtime_recovery"] = {
-                        "reason": reason,
-                        "previous_phase": previous_phase,
-                        "recovered_at": now,
-                    }
-                    sequence = int(row["last_event_sequence"]) + 1
-                    event_id = uuid.uuid4().hex
-                    updated = conn.execute(
-                        "UPDATE runtime_operations SET phase='recovery_required', version=version+1, "
-                        "last_event_sequence=?, state_json=?, updated_at=? "
-                        "WHERE operation_id=? AND version=? AND phase=?",
-                        (
-                            sequence, json.dumps(state, ensure_ascii=False, default=str), now,
-                            row["operation_id"], row["version"], previous_phase,
-                        ),
-                    )
-                    if updated.rowcount != 1:
-                        raise OperationConflictError("runtime recovery compare-and-swap failed")
-                    recovered_operation = replace(
-                        _operation_from_row(row),
-                        phase=OperationPhase.RECOVERY_REQUIRED,
-                        version=int(row["version"]) + 1,
-                        last_event_sequence=sequence,
-                        state=state,
-                        updated_at=now,
-                    )
-                    _sync_orchestration_projection(conn, recovered_operation)
-                    conn.execute(
-                        "INSERT INTO runtime_events "
-                        "(event_id, owner_id, operation_id, session_id, sequence, event_type, timestamp, payload_json) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            event_id, row["owner_id"], row["operation_id"], row["session_id"],
-                            sequence, RuntimeEventType.RECOVERY_REQUIRED.value, now,
-                            json.dumps({"reason": reason, "previous_phase": previous_phase}, ensure_ascii=False),
-                        ),
+                    recovered_operation = _recover_operation_row(
+                        conn, row, reason, now,
                     )
                     recovered_ids.append((row["owner_id"], row["operation_id"]))
                 conn.commit()
@@ -947,18 +918,43 @@ class SQLiteRuntimeStore:
                 raise OperationConflictError("tool effect intent does not exist or is settled")
             conn.commit()
 
-    def mark_recovery_required(self, operation_id: str, owner_id: str = "") -> None:
-        """Classify an abandoned operation without replaying external effects."""
+    def list_tool_effects(
+        self, owner_id: str, operation_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._get_conn().execute(
+                """SELECT * FROM runtime_tool_effects
+                   WHERE owner_id=? AND operation_id=?
+                   ORDER BY created_at, tool_call_id""",
+                (owner_id, operation_id),
+            ).fetchall()
+        return [_tool_effect_from_row(row) for row in rows]
+
+    def mark_recovery_required(
+        self,
+        operation_id: str,
+        owner_id: str = "",
+        reason: str = "manual_recovery",
+    ) -> None:
+        """Classify one operation using the same durable recovery path."""
         with self._lock:
             conn = self._get_conn()
-            params: tuple[Any, ...] = (operation_id,)
-            sql = "UPDATE runtime_operations SET phase='recovery_required', version=version+1, updated_at=? WHERE operation_id=?"
-            params = (time.time(), operation_id)
-            if owner_id:
-                sql += " AND owner_id=?"
-                params += (owner_id,)
-            conn.execute(sql, params)
-            conn.commit()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                params: tuple[Any, ...] = (operation_id,)
+                sql = "SELECT * FROM runtime_operations WHERE operation_id=?"
+                if owner_id:
+                    sql += " AND owner_id=?"
+                    params += (owner_id,)
+                row = conn.execute(sql, params).fetchone()
+                if row is None:
+                    raise OperationConflictError("operation not found")
+                if row["phase"] != OperationPhase.RECOVERY_REQUIRED.value:
+                    _recover_operation_row(conn, row, reason, time.time())
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
 
 def _operation_values(operation: OperationState) -> tuple[Any, ...]:
@@ -1051,6 +1047,26 @@ def _event_from_row(row: sqlite3.Row) -> RuntimeEvent:
     )
 
 
+def _tool_effect_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        result = json.loads(row["result_json"]) if row["result_json"] else None
+    except json.JSONDecodeError:
+        result = None
+    return {
+        "operation_id": row["operation_id"],
+        "tool_call_id": row["tool_call_id"],
+        "owner_id": row["owner_id"],
+        "tool_name": row["tool_name"],
+        "recovery_policy": row["recovery_policy"],
+        "status": row["status"],
+        "idempotency_key": row["idempotency_key"] or "",
+        "result": result,
+        "error": row["error"] or "",
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
 def _approval_from_row(row: sqlite3.Row) -> Approval:
     return Approval(
         approval_id=row["approval_id"], owner_id=row["owner_id"], operation_id=row["operation_id"],
@@ -1080,6 +1096,111 @@ def _approval_set_from_row(row: sqlite3.Row) -> ApprovalSet:
         updated_at=float(row["updated_at"]),
         last_idempotency_key=row["last_idempotency_key"] or "",
     )
+
+
+def _recover_operation_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    reason: str,
+    recovered_at: float,
+) -> OperationState:
+    previous_phase = str(row["phase"])
+    unresolved_effects = _mark_executing_effects_recovery_required(
+        conn, row["operation_id"], recovered_at, reason,
+    )
+    state = json.loads(row["state_json"] or "{}")
+    if not isinstance(state, dict):
+        state = {}
+    state["runtime_recovery"] = {
+        "reason": reason,
+        "previous_phase": previous_phase,
+        "recovered_at": recovered_at,
+        "unresolved_tool_effects": unresolved_effects,
+    }
+    sequence = int(row["last_event_sequence"]) + 1
+    updated = conn.execute(
+        "UPDATE runtime_operations SET phase='recovery_required', version=version+1, "
+        "last_event_sequence=?, state_json=?, updated_at=? "
+        "WHERE operation_id=? AND version=? AND phase=?",
+        (
+            sequence, json.dumps(state, ensure_ascii=False, default=str), recovered_at,
+            row["operation_id"], row["version"], previous_phase,
+        ),
+    )
+    if updated.rowcount != 1:
+        raise OperationConflictError("runtime recovery compare-and-swap failed")
+    recovered_operation = replace(
+        _operation_from_row(row),
+        phase=OperationPhase.RECOVERY_REQUIRED,
+        version=int(row["version"]) + 1,
+        last_event_sequence=sequence,
+        state=state,
+        updated_at=recovered_at,
+    )
+    _sync_orchestration_projection(conn, recovered_operation)
+    conn.execute(
+        "INSERT INTO runtime_events "
+        "(event_id, owner_id, operation_id, session_id, sequence, event_type, timestamp, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            uuid.uuid4().hex,
+            row["owner_id"],
+            row["operation_id"],
+            row["session_id"],
+            sequence,
+            RuntimeEventType.RECOVERY_REQUIRED.value,
+            recovered_at,
+            json.dumps({
+                "reason": reason,
+                "previous_phase": previous_phase,
+                "unresolved_tool_effects": unresolved_effects,
+            }, ensure_ascii=False),
+        ),
+    )
+    return recovered_operation
+
+
+def _mark_executing_effects_recovery_required(
+    conn: sqlite3.Connection,
+    operation_id: str,
+    recovered_at: float,
+    reason: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT * FROM runtime_tool_effects
+           WHERE operation_id=? AND status='executing'
+           ORDER BY created_at, tool_call_id""",
+        (operation_id,),
+    ).fetchall()
+    effects: list[dict[str, Any]] = []
+    for row in rows:
+        recovery_error = (
+            f"tool effect interrupted during {reason}; external outcome is unknown"
+        )
+        conn.execute(
+            """UPDATE runtime_tool_effects
+               SET status='recovery_required',
+                   error=CASE
+                     WHEN error='' THEN ?
+                     ELSE error || '; ' || ?
+                   END,
+                   updated_at=?
+               WHERE operation_id=? AND tool_call_id=? AND status='executing'""",
+            (
+                recovery_error,
+                recovery_error,
+                recovered_at,
+                operation_id,
+                row["tool_call_id"],
+            ),
+        )
+        effects.append({
+            "tool_call_id": row["tool_call_id"],
+            "tool_name": row["tool_name"],
+            "recovery_policy": row["recovery_policy"],
+            "idempotency_key": row["idempotency_key"] or "",
+        })
+    return effects
 
 
 def _json_dict(value: str | None) -> dict[str, Any]:
