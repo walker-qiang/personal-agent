@@ -21,7 +21,11 @@ from ..domain.approvals import (
 )
 from ..domain.messages import Message, ToolCall
 from ..domain.operations import OperationPhase, OperationState, StateTransition
-from ..domain.policy import EffectGrant, effect_grant_from_approval
+from ..domain.policy import (
+    EffectGrant,
+    effect_grant_from_approval,
+    requires_manual_approval,
+)
 from ..domain.requests import RunRequest
 from ..domain.results import RunOutcome, RunResult, Suspension
 from ..domain.tools import RecoveryPolicy, ToolPolicyClass, ToolRequest, ToolResult
@@ -237,13 +241,12 @@ def execute_operation(
                         (spec for spec in request.tools if spec.name == tool_call.name), None,
                     ) is not None)
                     and (
-                        next(
-                            (spec for spec in request.tools if spec.name == tool_call.name), None,
-                        ).requires_approval
-                        or (
-                            _is_effectful_tool(next(
-                                (spec for spec in request.tools if spec.name == tool_call.name), None,
-                            )) and request.execution_policy.require_approval
+                        requires_manual_approval(
+                            next(
+                                (spec for spec in request.tools if spec.name == tool_call.name),
+                                None,
+                            ),
+                            request.execution_policy,
                         )
                     )
                     and not _can_auto_approve(
@@ -347,14 +350,9 @@ def execute_operation(
                 tool_spec = next(
                     (spec for spec in request.tools if spec.name == tool_call.name), None
                 )
-                requires_approval = bool(
-                    tool_spec is not None and (
-                        tool_spec.requires_approval
-                        or (
-                            _is_effectful_tool(tool_spec)
-                            and request.execution_policy.require_approval
-                        )
-                    )
+                requires_approval = requires_manual_approval(
+                    tool_spec,
+                    request.execution_policy,
                 )
                 if _is_effectful_tool(tool_spec) and not request.execution_policy.allow_external_effects:
                     result = ToolResult(

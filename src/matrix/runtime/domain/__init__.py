@@ -18,7 +18,9 @@ from .policy import (
     PolicyDecisionKind,
     ToolExecutionContext,
     arguments_digest,
+    requires_manual_approval,
 )
+from .plans import ExecutionPlan, PlanStatus, PlanStep
 from .requests import ExecutionOptions, ExecutionPolicy, ResumeInput, RunRequest
 from .results import RunOutcome, RunResult, Suspension
 from .tools import RecoveryPolicy, ToolPolicyClass, ToolRequest, ToolResult, ToolSpec
@@ -30,6 +32,7 @@ __all__ = [
     "DebugTraceEvent",
     "DefaultPolicyEvaluator",
     "EffectGrant",
+    "ExecutionPlan",
     "ExecutionOptions",
     "ExecutionPolicy",
     "Message",
@@ -38,6 +41,8 @@ __all__ = [
     "OperationState",
     "PolicyDecision",
     "PolicyDecisionKind",
+    "PlanStatus",
+    "PlanStep",
     "RecoveryPolicy",
     "ResumeInput",
     "RunOutcome",
@@ -57,4 +62,5 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "arguments_digest",
+    "requires_manual_approval",
 ]

@@ -59,7 +59,7 @@ async def tools_call(request: Request) -> JSONResponse:
                 ToolPolicyClass.EXTERNAL_READ,
             }),
         )
-        result = gateway.call(
+        plan = gateway.compile(
             ToolRequest(
                 operation_id="",
                 call_id=f"http:{session_id}:{tool}",
@@ -68,6 +68,7 @@ async def tools_call(request: Request) -> JSONResponse:
             ),
             request_context,
         )
+        result = gateway.execute(plan)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
         is_error = isinstance(result, dict) and "error" in result
         trace.record(

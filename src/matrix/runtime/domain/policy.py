@@ -175,9 +175,7 @@ class DefaultPolicyEvaluator:
                 ),
             )
 
-        approval_required = tool.requires_approval or (
-            effectful and policy.require_approval
-        )
+        approval_required = requires_manual_approval(tool, policy)
         if approval_required:
             if approval_grant is None:
                 return PolicyDecision(
@@ -198,6 +196,20 @@ class DefaultPolicyEvaluator:
                 )
 
         return PolicyDecision(PolicyDecisionKind.ALLOW, tool_class)
+
+
+def requires_manual_approval(
+    tool: ToolSpec | None,
+    policy: ExecutionPolicy,
+) -> bool:
+    """Return whether this tool is important enough to interrupt the user.
+
+    External effects are still blocked in read-only mode.  In writeback mode,
+    only tools explicitly marked by their owner as critical or irreversible
+    require a human decision; ordinary durable writes remain usable.
+    """
+
+    return bool(tool is not None and policy.require_approval and tool.requires_approval)
 
 
 def arguments_digest(arguments: dict[str, Any]) -> str:

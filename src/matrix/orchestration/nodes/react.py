@@ -234,7 +234,8 @@ def _execute_single_tool(
             policy.mode,
             policy.allow_external_effects,
         ):
-            tool_result = gateway.call(request, context)
+            plan = gateway.compile(request, context)
+            tool_result = gateway.execute(plan)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
         # call() returns {"error": ...} on tool execution failures (Phase 2 pipeline).

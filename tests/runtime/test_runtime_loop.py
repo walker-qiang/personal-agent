@@ -199,6 +199,7 @@ def test_durable_write_classification_requires_runtime_approval() -> None:
         messages=[Message(role="user", content="write")],
         tools=[ToolSpec(
             name="write",
+            requires_approval=True,
             policy_class=ToolPolicyClass.DURABLE_WRITE,
             recovery_policy=RecoveryPolicy.MANUAL,
         )],

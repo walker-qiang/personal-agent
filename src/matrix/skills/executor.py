@@ -96,7 +96,8 @@ def execute_skill(
                 execution_policy.mode,
                 execution_policy.allow_external_effects,
             ):
-                result = gateway.call(request, execution_context)
+                plan = gateway.compile(request, execution_context)
+                result = gateway.execute(plan)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
             # call() returns {"error": ...} on failures (Phase 2 pipeline)

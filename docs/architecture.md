@@ -237,8 +237,13 @@ investment-analyst 可用能力示例（capability → 工具列表）：
 
 #### 统一执行策略入口
 
-工具实际执行统一经过 `ToolExecutionGateway`，由 Runtime 的
-`DefaultPolicyEvaluator` 在进入 `ToolRegistry` handler 前完成策略判断。
+工具实际执行先经过 Runtime 的 `PlanCompiler`，再交给
+`ToolExecutionGateway`。Compiler 只负责解析工具元数据、生成不可变
+`ExecutionPlan` 并完成第一次策略判断，不调用任何 handler；Gateway 在真正
+进入 `ToolRegistry` 前再次复核策略、审批绑定和参数摘要，然后才执行。
+`ToolExecutionGateway.call()` 仍保留为兼容入口，但内部已经变为
+`compile → execute`。
+
 `ToolDefinition.policy_class` 用于声明工具的策略类别；如果无法从声明、
 名称或能力标签解析出类别，工具归为 `unclassified`。
 
@@ -254,7 +259,10 @@ Runtime 管理的 Agent、ReAct 兼容入口和 Skill 入口均启用严格分�
 依赖 AgentRegistry、LangGraph 或 FastAPI。
 
 - read_only 是默认策略；标记为 side_effect 的工具会在 Runtime 工具边界被拦截。
-- writeback 只允许受审批的外部 effect；它不等于开放任意文件或 Vault 写入。
+- writeback 允许普通、可恢复的 durable write 继续执行；只有工具显式声明
+  `requires_approval=True` 的关键或不可逆操作才会暂停等待人工确认。
+- 这不是放宽 Gateway：Gateway 仍会在执行前复核策略，`writeback.execute_plan`
+  等高风险操作继续走 Runtime approval。
 - Memory/Skill 管理 API 不直接写 Vault；mutation 经 `personal-os /api/vault/*`
   使用 operation-specific 校验和 AssetStore。
 - WritebackService 第一批只开放 `finance.snapshot.create`，采用 plan → approval → execute；

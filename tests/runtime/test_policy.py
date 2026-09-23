@@ -81,7 +81,11 @@ def test_policy_denies_durable_write_in_read_only_mode() -> None:
 
 def test_policy_requires_approval_for_durable_write_in_writeback_mode() -> None:
     decision = DefaultPolicyEvaluator().evaluate(
-        ToolSpec(name="write", policy_class=ToolPolicyClass.DURABLE_WRITE),
+        ToolSpec(
+            name="write",
+            requires_approval=True,
+            policy_class=ToolPolicyClass.DURABLE_WRITE,
+        ),
         _context(
             policy=ExecutionPolicy(
                 mode="writeback",
@@ -92,6 +96,21 @@ def test_policy_requires_approval_for_durable_write_in_writeback_mode() -> None:
     )
 
     assert decision.kind is PolicyDecisionKind.REQUIRE_APPROVAL
+
+
+def test_policy_does_not_interrupt_for_ordinary_durable_write() -> None:
+    decision = DefaultPolicyEvaluator().evaluate(
+        ToolSpec(name="write", policy_class=ToolPolicyClass.DURABLE_WRITE),
+        _context(
+            policy=ExecutionPolicy(
+                mode="writeback",
+                allow_external_effects=True,
+            ),
+        ),
+        {"value": 1},
+    )
+
+    assert decision.kind is PolicyDecisionKind.ALLOW
 
 
 @pytest.mark.parametrize(
@@ -110,7 +129,11 @@ def test_policy_rejects_non_matching_approval_grant(
     arguments: dict,
 ) -> None:
     decision = DefaultPolicyEvaluator().evaluate(
-        ToolSpec(name=tool_name, policy_class=ToolPolicyClass.DURABLE_WRITE),
+        ToolSpec(
+            name=tool_name,
+            requires_approval=True,
+            policy_class=ToolPolicyClass.DURABLE_WRITE,
+        ),
         _context(
             policy=ExecutionPolicy(
                 mode="writeback",
@@ -227,6 +250,36 @@ def test_compatibility_gateway_can_execute_unclassified_tool() -> None:
     )
 
     assert result == {"ok": True}
+    assert calls == [{"value": 1}]
+
+
+def test_gateway_compiles_before_execution_and_supports_plan_status() -> None:
+    calls: list[dict] = []
+    registry = ToolRegistry()
+    registry.register(ToolDefinition(
+        name="lookup",
+        description="lookup",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+        },
+        handler=lambda **kwargs: calls.append(kwargs) or {"ok": True},
+    ))
+    gateway = ToolExecutionGateway(registry)
+    plan = gateway.compile(
+        ToolRequest(
+            operation_id="operation-1",
+            call_id="call-1",
+            name="lookup",
+            arguments={"value": 1},
+        ),
+        _context(),
+    )
+
+    assert plan.ready
+    assert plan.steps[0].decision.kind is PolicyDecisionKind.ALLOW
+    assert calls == []
+    assert gateway.execute(plan) == {"ok": True}
     assert calls == [{"value": 1}]
 
 

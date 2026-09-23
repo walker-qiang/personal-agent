@@ -18,8 +18,26 @@ from typing import Any, Callable, Iterator
 
 from ..domain.events import RuntimeEvent, RuntimeEventType
 from ..domain.operations import OperationPhase, OperationState, StateTransition
+from ..domain.policy import ToolExecutionContext
+from ..domain.requests import ExecutionPolicy
 from ..domain.results import RunOutcome
+from ..domain.tools import ToolPolicyClass, ToolRequest, ToolSpec
 from ..ports.store import OperationStorePort
+from ...tools.execution_gateway import ToolExecutionGateway
+
+
+_DEEP_RESEARCH_READ_TOOLS = frozenset({
+    "personal_os.announcements",
+    "personal_os.dividend",
+    "personal_os.financials",
+    "personal_os.information_search",
+    "personal_os.market_quote",
+    "personal_os.peers",
+    "personal_os.profile",
+    "personal_os.research_context",
+    "personal_os.valuation",
+    "personal_os.web_fetch",
+})
 
 
 RESEARCH_MINIMUM_ITEMS = {
@@ -834,12 +852,47 @@ class DeepResearchHandle:
         last_error = ""
         for _ in range(2):
             try:
-                return self.workflow.agent_tools.call(
-                    name, arguments, session_id=self.operation.session_id,
-                ), ""
+                request = ToolRequest(
+                    operation_id=self.operation.operation_id,
+                    call_id=f"deep-research:{name}",
+                    name=name,
+                    arguments=arguments,
+                )
+                context = ToolExecutionContext(
+                    owner_id=self.operation.owner_id,
+                    session_id=self.operation.session_id,
+                    source="deep_research",
+                    operation_id=self.operation.operation_id,
+                    policy=ExecutionPolicy(),
+                    strict_classification=True,
+                )
+                spec_resolver = None
+                if not callable(getattr(self.workflow.agent_tools, "get_definition", None)):
+                    spec_resolver = self._resolve_mock_tool_spec
+                gateway = ToolExecutionGateway(
+                    self.workflow.agent_tools,
+                    spec_resolver=spec_resolver,
+                )
+                plan = gateway.compile(request, context)
+                return gateway.execute(plan), ""
             except Exception as exc:
                 last_error = str(exc) or exc.__class__.__name__
         return None, last_error
+
+    def _resolve_mock_tool_spec(self, name: str) -> ToolSpec | None:
+        """Resolve the read-only contract for lightweight test executors.
+
+        Production registries expose ``get_definition`` and therefore retain
+        their declared metadata.  A mock executor only needs to provide
+        ``tool_names`` and ``call``; keep its fallback deliberately limited to
+        the fixed, read-only deep-research tool set.
+        """
+        tool_names = getattr(self.workflow.agent_tools, "tool_names", None)
+        if not callable(tool_names) or name not in tool_names():
+            return None
+        if name not in _DEEP_RESEARCH_READ_TOOLS:
+            return None
+        return ToolSpec(name=name, policy_class=ToolPolicyClass.EXTERNAL_READ)
 
     def _fail(self, operation: OperationState, message: str) -> Iterator[DeepResearchEvent]:
         try:

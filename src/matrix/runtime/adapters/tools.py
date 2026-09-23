@@ -66,7 +66,8 @@ class MatrixToolAdapter(ToolExecutorPort):
                     allowed_tool_classes=context.allowed_tool_classes,
                     strict_classification=context.strict_classification,
                 )
-            result = self.gateway.call(request, context)
+            plan = self.gateway.compile(request, context)
+            result = self.gateway.execute(plan)
         if isinstance(result, dict) and "error" in result:
             return ToolResult(
                 call_id=request.call_id,
