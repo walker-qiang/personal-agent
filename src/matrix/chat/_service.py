@@ -2402,6 +2402,7 @@ class ChatService:
                 "circuit_breaker": CircuitBreaker(),
                 "lesson_store": self._lesson_store,
                 "user_id": user_id,
+                "user_message": user_message,
                 "runtime_store": self._runtime_store,
                 "runtime_context": self._runtime_context,
                 "execution_policy": agent_policy or ExecutionPolicy(),

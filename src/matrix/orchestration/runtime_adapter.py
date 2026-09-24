@@ -39,7 +39,7 @@ def run_nested_agent_runtime(
     session_id = str(cfg.get("session_id") or f"agent-tool-{uuid.uuid4().hex}")
     owner_id = str(cfg.get("user_id") or "default")
     agent_tools = _focus_registry_for_task(
-        task,
+        str(cfg.get("user_message") or task),
         agent_tools,
         cfg.get("circuit_breaker"),
     )
@@ -202,7 +202,7 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
     if agent_def is None:
         raise ValueError(f"Agent not found: {agent_id}")
     task = step.get("task", "")
-    routing_task = f"{state.get('user_message', '')}\n{task}"
+    routing_task = str(cfg.get("user_message") or state.get("user_message") or task)
     registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
     registry = _focus_registry_for_task(
         routing_task,
@@ -264,7 +264,7 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
     agent_id = request.agent_id
     registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
     registry = _focus_registry_for_task(
-        f"{state.get('user_message', '')}\n{step.get('task', '')}",
+        str(cfg.get("user_message") or state.get("user_message") or step.get("task", "")),
         registry,
         cfg.get("circuit_breaker"),
     )

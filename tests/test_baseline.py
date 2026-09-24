@@ -1,7 +1,7 @@
 """Tests for baseline management — regression and quality baseline logic.
 
 Covers:
-- Dataset validation (all 20 cases load and parse correctly)
+- Dataset validation (the smoke cases load and parse correctly)
 - Regression baseline: build, save, load, compare (no regression / regression / improvement / new cases)
 - Quality baseline: build, save, load, compare (no regression / score drop / dimension regression)
 """
@@ -66,48 +66,52 @@ def _make_case(case_id: str, **kw) -> EvalCase:
 # ---- Dataset validation -----------------------------------------------------
 
 class TestDatasetValidation:
-    """Verify the eval_dataset.json is valid and complete."""
+    """Verify the default smoke dataset is valid and complete."""
+
+    @staticmethod
+    def _dataset_path() -> Path:
+        return (
+            Path(__file__).parent.parent
+            / "src"
+            / "matrix"
+            / "evaluation"
+            / "datasets"
+            / "smoke.json"
+        )
 
     def test_dataset_loads(self):
         """Dataset file exists and is valid JSON."""
-        dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
-        if not dataset_path.exists():
-            pytest.skip("eval_dataset.json not found")
+        dataset_path = self._dataset_path()
+        assert dataset_path.exists(), f"smoke dataset not found: {dataset_path}"
         with open(dataset_path) as f:
             data = json.load(f)
         assert "cases" in data
-        assert len(data["cases"]) == 23
+        assert len(data["cases"]) == 5
 
     def test_all_cases_parse(self):
-        """All 23 cases can be parsed into EvalCase objects."""
-        dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
-        if not dataset_path.exists():
-            pytest.skip("eval_dataset.json not found")
+        """All smoke cases can be parsed into EvalCase objects."""
+        dataset_path = self._dataset_path()
         with open(dataset_path) as f:
             data = json.load(f)
         cases = [EvalCase.from_dict(c) for c in data["cases"]]
-        assert len(cases) == 23
+        assert len(cases) == 5
         # Verify case IDs are unique
         ids = {c.case_id for c in cases}
-        assert len(ids) == 23
+        assert len(ids) == 5
 
     def test_case_id_prefixes(self):
         """Case IDs follow naming conventions by category."""
-        dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
-        if not dataset_path.exists():
-            pytest.skip("eval_dataset.json not found")
+        dataset_path = self._dataset_path()
         with open(dataset_path) as f:
             data = json.load(f)
-        prefixes = ["conv_", "finance_", "web_", "media_", "multi_", "edge_", "browser_"]
+        prefixes = ["smoke_"]
         for case in data["cases"]:
             assert any(case["case_id"].startswith(p) for p in prefixes), \
                 f"Case {case['case_id']} doesn't match any prefix"
 
     def test_all_outcomes_are_answer(self):
         """All cases expect outcome=answer (no abstain/tool_error in dataset)."""
-        dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
-        if not dataset_path.exists():
-            pytest.skip("eval_dataset.json not found")
+        dataset_path = self._dataset_path()
         with open(dataset_path) as f:
             data = json.load(f)
         for case in data["cases"]:
@@ -115,9 +119,7 @@ class TestDatasetValidation:
 
     def test_difficulty_distribution(self):
         """Dataset has a mix of difficulty levels."""
-        dataset_path = Path(__file__).parent / "baselines" / "eval_dataset.json"
-        if not dataset_path.exists():
-            pytest.skip("eval_dataset.json not found")
+        dataset_path = self._dataset_path()
         with open(dataset_path) as f:
             data = json.load(f)
         difficulties = {c["difficulty"] for c in data["cases"]}

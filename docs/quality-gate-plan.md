@@ -14,8 +14,8 @@
 | 层级 | 状态 | 实现内容 |
 |------|------|----------|
 | Layer 1 | ✅ 已完成 | pre-push hook + check-skills CLI + install-hooks.sh |
-| Layer 2 | ✅ 已完成 | 23 条评估数据集 + regression CLI + 基线对比逻辑 + 27 个单元测试 |
-| Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge + 质量基线对比逻辑 |
+| Layer 2 | ✅ 已完成 | 5 条 smoke 数据集 + regression CLI + 基线对比逻辑 + 27 个单元测试 |
+| Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge；质量基线按需生成，不保存旧 live baseline |
 | 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
 
 **最近一次默认回归（2026-09-18）**：850 passed, 0 skipped, 0 failed；共收集 850 个测试。
@@ -34,7 +34,7 @@ Starlette/httpx2 弃用提示和 PyJWT 短密钥提示。
 |------|------|------|
 | 单元测试 | 850 个默认回归测试，pytest 框架 | 覆盖核心流程，已集成 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
-| 评估数据集 | eval_dataset.json（23 条 case） | 已扩展，覆盖 7 大场景 |
+| 评估数据集 | `src/matrix/evaluation/datasets/smoke.json`（5 条 case） | 保留核心 smoke 场景；旧 23 条 live dataset 已移除 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
 | Git hooks | pre-push hook 已安装并启用 | Layer 1 已完成 |
 | 基线管理 | baseline.py + test_baseline.py（27 个测试） | 已完成回归和质量基线对比 |
@@ -43,7 +43,7 @@ Starlette/httpx2 弃用提示和 PyJWT 短密钥提示。
 
 1. ~~**无自动触发**~~：✅ pre-push hook 已安装，每次 push 自动运行
 2. ~~**无基线对比**~~：✅ baseline.py 实现回归和质量基线对比
-3. ~~**用例不足**~~：✅ 已扩展到 23 条，覆盖 7 大场景
+3. ~~**用例不足**~~：✅ 保留 5 条核心 smoke case；高成本 23 条 live dataset 已退休
 4. ~~**skill 变更无校验**~~：✅ check-skills 命令校验所有 skill 格式
 
 ## 方案设计：三层质量门禁
@@ -61,10 +61,10 @@ Starlette/httpx2 弃用提示和 PyJWT 短密钥提示。
                        │ push 通过
                        ▼
 ┌─────────────────────────────────────────────┐
-│ Layer 2: Regression Eval (手动 CLI)          │
-│ ─ 确定性评估, 对比基线 pass rate              │
-│ ─ ~3min, 少量 LLM token                      │
-│ ─ 手动触发, 发布前必跑                        │
+│ Layer 2: Smoke Eval (手动 CLI)               │
+│ ─ 5 条核心 smoke case, 可选对比基线            │
+│ ─ 成本可控，默认不运行旧 23 条 live dataset     │
+│ ─ 手动触发，按需执行                           │
 └──────────────────────┬──────────────────────┘
                        │ 无回归
                        ▼
@@ -186,39 +186,18 @@ done
 ### 执行内容
 
 ```
-1. 加载评估数据集 (tests/baselines/eval_dataset.json, 23 条 case)
+1. 加载默认 smoke 数据集 (src/matrix/evaluation/datasets/smoke.json, 5 条 case)
 2. 启动 ChatService (需 .env 配置 LLM API key)
 3. 逐条运行 EvalRunner + DeterministicEvaluator
-4. 加载基线 (tests/baselines/regression_baseline.json)
+4. 如果指定 baseline，则加载对应基线
 5. 对比当前结果与基线
 6. 输出对比报告 + 退出码 (0=无回归, 1=有回归)
 ```
 
-### 基线文件格式
+### 基线文件
 
-`tests/baselines/regression_baseline.json`:
-
-当前 checked-in regression/quality baseline 各覆盖原有 20 条 case；新增的
-3 条 browser case 按“新增 case 无基线”规则记录但不阻断，直到下一次明确更新基线。
-
-```json
-{
-  "version": "2026-07-24-v1",
-  "created_at": "2026-07-24T10:00:00Z",
-  "git_commit": "abc1234",
-  "summary": {
-    "total": 20,
-    "passed": 19,
-    "failed": 1,
-    "pass_rate": 0.95
-  },
-  "case_results": {
-    "smoke_greeting": { "passed": true },
-    "smoke_holdings": { "passed": true },
-    "regress_finance_001": { "passed": false, "reason": "known_issue" }
-  }
-}
-```
+旧的 regression/quality baseline 与 23 条 live dataset 一起移除。
+如需恢复基线对比，应先在稳定、受控的环境中对 smoke dataset 重新生成。
 
 ### 回归判定规则
 
@@ -242,17 +221,15 @@ done
 
 ### 评估数据集设计
 
-已从 5 条扩展到 23 条，按维度覆盖：
+默认仅保留 5 条 smoke case：
 
 | 维度 | Case 数 | 示例 |
 |------|---------|------|
-| 基础对话 | 3 | 问候、能力询问、感谢 |
-| 投资查询 | 6 | 持仓查询、资产查找、快照历史、最近快照、桶配置、组合风险 |
-| 搜索工具 | 4 | web搜索、新闻搜索、天气查询、股票行情 |
-| 媒体生成 | 1 | 图片生成 |
-| 多步骤任务 | 2 | 持仓+新闻、组合分析+建议 |
-| 边界场景 | 4 | 无效股票、英文输入、超出范围、乱码输入 |
-| 浏览器任务 | 3 | 动态提取、搜索交互、Browser 与静态 fetch 选择 |
+| 基础对话 | 1 | 问候 |
+| 投资查询 | 1 | 当前持仓 |
+| 搜索工具 | 1 | 最新 AI 新闻 |
+| 组合分析 | 1 | 投资组合风险 |
+| 边界场景 | 1 | 无效股票代码 |
 
 每条 case 配置：
 - `case_id`: 唯一标识
@@ -286,37 +263,15 @@ done
 1. 加载评估数据集 (复用 Layer 2 的 dataset)
 2. 启动 ChatService
 3. 逐条运行 EvalRunner + DeterministicEvaluator + LLMEvaluator
-4. 加载质量基线 (tests/baselines/quality_baseline.json)
+4. 如果显式指定，则加载质量基线
 5. 对比当前质量分数与基线
 6. 输出质量报告 + 退出码
 ```
 
-### 质量基线格式
+### 质量基线
 
-`tests/baselines/quality_baseline.json`:
-
-```json
-{
-  "version": "2026-07-24-v1",
-  "created_at": "2026-07-24T10:00:00Z",
-  "git_commit": "abc1234",
-  "summary": {
-    "total": 20,
-    "pass_rate": 0.90,
-    "avg_quality_score": 0.82,
-    "dimensions": {
-      "accuracy": 0.85,
-      "completeness": 0.80,
-      "relevance": 0.88,
-      "conciseness": 0.76
-    }
-  },
-  "case_scores": {
-    "smoke_greeting": { "overall": 0.95, "dimensions": {...} },
-    "smoke_holdings": { "overall": 0.78, "dimensions": {...} }
-  }
-}
-```
+旧的 quality baseline 已移除，不再作为默认质量门禁。
+如需质量对比，应在受控环境中显式生成并通过 `--baseline` 指定。
 
 ### 质量回归判定
 
@@ -353,7 +308,7 @@ done
    update-baseline <type>  更新基线文件 (regression | quality)
    list-cases            列出当前数据集所有 case
  Options:
-   --dataset <path>      指定数据集文件 (默认 tests/baselines/eval_dataset.json)
+   --dataset <path>      指定数据集文件 (默认 src/matrix/evaluation/datasets/smoke.json)
    --baseline <path>     指定基线文件
    --no-baseline         跳过基线对比, 仅运行
    --format <fmt>        输出格式: console (默认) | json
@@ -370,9 +325,7 @@ personal-agent/
 │   └── baseline.py            # 基线加载、对比、更新逻辑
 ├── tests/
 │   └── baselines/
-│       ├── eval_dataset.json  # 评估数据集 (23 条)
-│       ├── regression_baseline.json  # Layer 2 基线
-│       └── quality_baseline.json     # Layer 3 基线
+│       └── .gitkeep
 ├── scripts/
 │   ├── hooks/
 │   │   └── pre-push
@@ -450,7 +403,7 @@ personal-agent/
 # 自动检测变更并运行对应评估
 bash scripts/smart-check.sh
 
-# 强制运行全部评估 (Layer 2 + Layer 3)
+# 强制运行 smoke 评估 (Layer 2 + Layer 3)
 bash scripts/smart-check.sh --force
 
 # 仅运行回归评估
@@ -501,9 +454,9 @@ cat .eval-last-run.log | tail -30
 # 1. 确保代码已推送
 git push
 
-# 2. 运行回归评估 (Layer 2)
+# 2. 按需运行 smoke 回归评估 (Layer 2)
 ./.venv/bin/python -m matrix.evaluation.cli regression
-# → 23 条 case 逐条运行
+# → 5 条 smoke case 逐条运行
 # → 对比基线, 检查有无回归
 # → 无回归 → 可以发布
 
@@ -518,10 +471,8 @@ git push
 ./.venv/bin/python -m matrix.evaluation.cli regression --no-baseline
 # → 看到该 case 现在 pass
 
-# 更新基线
+# 如需更新基线，先显式指定受控输出路径
 ./.venv/bin/python -m matrix.evaluation.cli update-baseline regression
-git add tests/baselines/regression_baseline.json
-git commit -m "chore: update regression baseline after fix"
 ```
 
 ### 场景 4：紧急推送跳过门禁
@@ -549,11 +500,11 @@ git push --no-verify
 
 | 步骤 | 文件 | 状态 |
 |------|------|------|
-| 扩展评估数据集到 23 条 | `tests/baselines/eval_dataset.json` | ✅ |
+| 保留 5 条 smoke dataset | `src/matrix/evaluation/datasets/smoke.json` | ✅ |
 | 实现 regression 命令 | `src/matrix/evaluation/cli.py` | ✅ |
 | 实现基线对比逻辑 | `src/matrix/evaluation/baseline.py` | ✅ |
 | 添加基线对比单元测试 | `tests/test_baseline.py`（27 个测试） | ✅ |
-| 首次运行, 生成初始基线 | `tests/baselines/regression_baseline.json` | ✅ 已生成 |
+| 旧 live regression baseline | `tests/baselines/regression_baseline.json` | ❌ 已移除 |
 
 ### 阶段 3：Layer 3 质量评估 ✅ 已完成
 
@@ -562,7 +513,7 @@ git push --no-verify
 | 实现 quality 命令 | `src/matrix/evaluation/cli.py` | ✅ |
 | 实现质量基线对比 | `src/matrix/evaluation/baseline.py` | ✅ |
 | 添加质量基线单元测试 | `tests/test_baseline.py` | ✅ |
-| 首次运行, 生成质量基线 | `tests/baselines/quality_baseline.json` | ✅ 已生成 |
+| 旧 quality baseline | `tests/baselines/quality_baseline.json` | ❌ 已移除 |
 
 ### 阶段 4：自动触发机制 ✅ 已完成
 

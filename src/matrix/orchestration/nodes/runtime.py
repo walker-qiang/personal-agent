@@ -49,7 +49,7 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     step = plan[current_step] if current_step < len(plan) else {}
     agent_id = step.get("agent_id", "commander")
     task = step.get("task", state.get("user_message", ""))
-    routing_task = f"{state.get('user_message', '')}\n{task}"
+    routing_task = str(cfg.get("user_message") or state.get("user_message") or task)
     agent_def = agent_registry.get(agent_id)
     if agent_def is None:
         return {"agent_results": [{"agent_id": agent_id, "task": task, "error": f"Agent not found: {agent_id}"}]}

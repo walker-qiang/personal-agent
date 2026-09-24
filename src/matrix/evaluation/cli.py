@@ -47,7 +47,7 @@ def _default_dataset_path() -> Path:
     from matrix.config import find_root
 
     root = find_root(Path.cwd())
-    return root / "tests" / "baselines" / "eval_dataset.json"
+    return root / "src" / "matrix" / "evaluation" / "datasets" / "smoke.json"
 
 
 def _default_baseline_path(baseline_type: str) -> Path:
