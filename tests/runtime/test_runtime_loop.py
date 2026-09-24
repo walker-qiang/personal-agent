@@ -68,6 +68,28 @@ def test_runtime_executes_tool_then_returns_follow_up_answer() -> None:
     assert len(tools.requests) == 1
 
 
+def test_runtime_replays_settled_effect_when_model_reuses_call_id() -> None:
+    model = FakeModel([
+        ModelResponse(
+            tool_calls=(tool_call("reused-call", "lookup", {"q": "x"}),),
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(
+            tool_calls=(tool_call("reused-call", "lookup", {"q": "x"}),),
+            finish_reason="tool_calls",
+        ),
+        ModelResponse(content="结果是 x"),
+    ])
+    tools = FakeToolExecutor({"lookup": lambda args: {"value": args["q"]}})
+    runtime = AgentRuntime(MemoryOperationStore(), model=model, tools=tools)
+
+    result = runtime.start(_request()).result()
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert result.final_message == "结果是 x"
+    assert len(tools.requests) == 1
+
+
 def test_runtime_enforces_max_tool_calls() -> None:
     model = FakeModel([
         ModelResponse(

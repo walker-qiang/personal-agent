@@ -90,6 +90,14 @@ class TestMustNotInclude:
         passed, _, _ = evaluator.evaluate(case, [], "all good")
         assert passed
 
+    def test_forbidden_word_does_not_match_identifier_substring(self, evaluator):
+        case = EvalCase(
+            case_id="t1", user_input="q",
+            expected=ExpectedBehavior(must_not_include=["error"]),
+        )
+        passed, _, _ = evaluator.evaluate(case, [], "处理 asyncio.CancelledError")
+        assert passed
+
     def test_empty_must_not_include(self, evaluator):
         case = EvalCase(case_id="t1", user_input="q")
         passed, _, _ = evaluator.evaluate(case, [], "error here")

@@ -62,6 +62,14 @@ def execute_operation(
     total_tool_calls = int(operation.state.get("runtime_tool_call_count", 0))
     usage: dict[str, Any] = {}
     started_at = time.monotonic()
+    replayable_effect_ids = {
+        str(effect.get("tool_call_id"))
+        for effect in store.list_tool_effects(
+            operation.owner_id, operation.operation_id,
+        )
+        if effect.get("status") in {"settled", "failed"}
+    }
+    force_final_answer = False
 
     if resume_approval_id:
         if current.phase is not OperationPhase.RESUMING:
@@ -123,12 +131,18 @@ def execute_operation(
                     arguments=pending_call.arguments,
                     approval_grant=approval_grant,
                 )
+                is_replayed = pending_call.call_id in replayable_effect_ids
                 result = _execute_tool_effect(
                     store,
                     tools,
                     tool_request,
                     tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+                    owner_id=current.owner_id,
                 )
+                if not result.is_error:
+                    replayable_effect_ids.add(pending_call.call_id)
+                if is_replayed:
+                    force_final_answer = True
                 _check_timeout(started_at, request.execution_options.timeout_seconds)
                 _debug(debug_trace, "tool_result", {
                     "name": pending_call.name, "call_id": pending_call.call_id,
@@ -176,8 +190,14 @@ def execute_operation(
             )
             current = _commit_phase(store, current, OperationPhase.REQUESTING_MODEL, None, events)
 
+            model_request = (
+                replace(request, tools=[])
+                if force_final_answer
+                else request
+            )
+            force_final_answer = False
             response, current = _complete_with_retry(
-                request=request,
+                request=model_request,
                 messages=messages,
                 model=model,
                 handle=handle,
@@ -518,6 +538,7 @@ def execute_operation(
                     arguments=tool_call.arguments,
                     approval_grant=approval_grant,
                 )
+                is_replayed = tool_call.call_id in replayable_effect_ids
                 _debug(debug_trace, "tool_request", {
                     "name": tool_request.name,
                     "call_id": tool_request.call_id,
@@ -528,7 +549,12 @@ def execute_operation(
                     tools,
                     tool_request,
                     tool_spec.recovery_policy if tool_spec else RecoveryPolicy.MANUAL,
+                    owner_id=current.owner_id,
                 )
+                if not result.is_error:
+                    replayable_effect_ids.add(tool_call.call_id)
+                if is_replayed:
+                    force_final_answer = True
                 _check_timeout(started_at, request.execution_options.timeout_seconds)
                 _debug(debug_trace, "tool_result", {
                     "name": tool_call.name, "call_id": tool_call.call_id,
@@ -825,8 +851,29 @@ def _execute_tool_effect(
     tools: ToolExecutorPort,
     request: ToolRequest,
     recovery_policy: RecoveryPolicy,
+    owner_id: str,
 ) -> ToolResult:
     """Execute one external tool call through the persistent effect journal."""
+
+    for effect in store.list_tool_effects(owner_id, request.operation_id):
+        if effect.get("tool_call_id") != request.call_id:
+            continue
+        status = effect.get("status")
+        if status in {"settled", "failed"}:
+            return ToolResult(
+                call_id=request.call_id,
+                name=request.name,
+                result=effect.get("result"),
+                error=str(effect.get("error", "")),
+                is_error=status == "failed",
+            )
+        if status == "recovery_required":
+            return ToolResult(
+                call_id=request.call_id,
+                name=request.name,
+                error="tool effect requires recovery before it can be replayed",
+                is_error=True,
+            )
 
     store.begin_tool_effect(request, recovery_policy)
     try:

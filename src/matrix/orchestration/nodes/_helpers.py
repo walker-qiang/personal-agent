@@ -504,18 +504,42 @@ def _focus_tools_for_task(
     lowered = task.lower()
     preferred: set[str] = set()
 
-    if any(term in lowered for term in ("天气", "温度", "下雨", "预报", "weather")):
-        preferred.add("weather")
-    elif any(term in lowered for term in ("快照", "snapshot")) and any(
-        term in lowered for term in ("最近", "最新", "记录", "recent", "latest")
-    ):
-        preferred.add("finance.recent_snapshots")
-    elif _requires_browser(task):
+    if _requires_browser(task):
         preferred = {
             _tool_name_for_llm(tool)
             for tool in tool_defs
             if _tool_name_for_llm(tool).startswith("mcp_browser_")
         }
+    elif any(term in lowered for term in ("天气", "温度", "下雨", "预报", "weather")):
+        preferred.add("weather")
+    elif any(
+        term in lowered
+        for term in (
+            "当前持仓",
+            "我的持仓",
+            "查询持仓",
+            "查看持仓",
+            "持仓汇总",
+            "current holdings",
+            "my holdings",
+            "holdings summary",
+            "positions",
+        )
+    ):
+        preferred.add("finance.holdings_summary")
+    elif any(term in lowered for term in ("快照", "snapshot")) and any(
+        term in lowered for term in ("最近", "最新", "记录", "recent", "latest")
+    ):
+        preferred.add("finance.recent_snapshots")
+    elif any(term in lowered for term in ("新闻", "news")) and any(
+        term in lowered for term in ("最新", "最近", "today", "latest", "recent")
+    ):
+        preferred.add("news_search")
+    elif any(
+        term in lowered
+        for term in ("搜索", "查资料", "搜索一下", "search", "look up")
+    ):
+        preferred.add("web_search")
 
     if not preferred:
         return tool_defs
@@ -526,6 +550,46 @@ def _focus_tools_for_task(
         tool for tool in tool_defs
         if _tool_name_for_llm(tool) in preferred
     ]
+
+
+def _focus_registry_for_task(
+    task: str,
+    tools: ToolRegistry,
+    circuit_breaker: CircuitBreaker | None = None,
+) -> ToolRegistry:
+    """Return a request-scoped registry with unambiguous tools focused."""
+
+    focused_defs = _focus_tools_for_task(task, tools.list_tools())
+    focused_names = {
+        _tool_name_for_llm(tool)
+        for tool in focused_defs
+    }
+    if focused_names == tools.tool_names():
+        if circuit_breaker is not None:
+            tools.set_circuit_breaker(circuit_breaker)
+        return tools
+
+    focused = tools.fork(focused_names)
+    if circuit_breaker is not None:
+        focused.set_circuit_breaker(circuit_breaker)
+    return focused
+
+
+def _public_answer_for_tool_results(
+    answer: str,
+    tool_results: list[dict[str, Any]],
+) -> str:
+    """Replace all-failed tool answers with a user-safe fallback."""
+
+    if tool_results and all(
+        _is_empty_tool_result(item)
+        for item in tool_results
+    ):
+        return (
+            "抱歉，当前未能获取到相关数据。请稍后重试，"
+            "或尝试换一种关键词搜索。"
+        )
+    return answer
 
 
 def _check_domain_tool_sufficiency(

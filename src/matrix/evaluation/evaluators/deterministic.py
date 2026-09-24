@@ -6,6 +6,7 @@ exact string matching and set operations. No LLM calls needed.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base import Evaluator
@@ -85,9 +86,24 @@ class DeterministicEvaluator(Evaluator):
         if not case.expected.must_not_include:
             return True
         answer_lower = answer.lower()
-        found = [kw for kw in case.expected.must_not_include if kw.lower() in answer_lower]
+        found = [
+            kw
+            for kw in case.expected.must_not_include
+            if self._contains_forbidden_text(answer_lower, kw.lower())
+        ]
         details["must_not_include"] = {"found": found}
         return len(found) == 0
+
+    @staticmethod
+    def _contains_forbidden_text(answer: str, keyword: str) -> bool:
+        """Match English single words without flagging identifier substrings."""
+
+        if keyword.isascii() and keyword.replace("_", "").isalnum():
+            return re.search(
+                rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])",
+                answer,
+            ) is not None
+        return keyword in answer
 
     def _check_required_tools(self, case: EvalCase, events: list[dict], details: dict) -> bool:
         if not case.expected.required_tools:

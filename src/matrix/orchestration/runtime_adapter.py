@@ -30,10 +30,19 @@ def run_nested_agent_runtime(
     prompt/context assembly remains at this boundary.  Runtime Core never
     needs to know about AgentRegistry, LangGraph, or the parent graph node.
     """
-    from .nodes._helpers import _build_history_context
+    from .nodes._helpers import (
+        _build_history_context,
+        _focus_registry_for_task,
+        _public_answer_for_tool_results,
+    )
 
     session_id = str(cfg.get("session_id") or f"agent-tool-{uuid.uuid4().hex}")
     owner_id = str(cfg.get("user_id") or "default")
+    agent_tools = _focus_registry_for_task(
+        task,
+        agent_tools,
+        cfg.get("circuit_breaker"),
+    )
     history = cfg.get("history", [])
     history_context = _build_history_context(history)
     message_text = history_context + f"请完成以下任务：{task}"
@@ -93,18 +102,22 @@ def run_nested_agent_runtime(
     handle = runtime.start(request)
     events = list(handle.events())
     result = handle.result()
+    tool_results = [
+        {
+            "name": item.name,
+            "result": item.result,
+            "error": item.error,
+            "call_id": item.call_id,
+        }
+        for item in result.tool_results
+    ]
     return {
-        "answer": result.final_message,
+        "answer": _public_answer_for_tool_results(
+            result.final_message,
+            tool_results,
+        ),
         "error": result.error,
-        "tool_results": [
-            {
-                "name": item.name,
-                "result": item.result,
-                "error": item.error,
-                "call_id": item.call_id,
-            }
-            for item in result.tool_results
-        ],
+        "tool_results": tool_results,
         "operation_id": handle.operation_id,
         "events": events,
     }
@@ -182,13 +195,21 @@ def build_agent_system_prompt(
 
 def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> RunRequest:
     """Resolve one DAG step at the application boundary, never in Runtime Core."""
+    from .nodes._helpers import _focus_registry_for_task
+
     agent_id = step.get("agent_id", "commander")
     agent_def = cfg["agent_registry"].get(agent_id)
     if agent_def is None:
         raise ValueError(f"Agent not found: {agent_id}")
-    registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
-    dependency_results = _dependency_results(state, step)
     task = step.get("task", "")
+    routing_task = f"{state.get('user_message', '')}\n{task}"
+    registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
+    registry = _focus_registry_for_task(
+        routing_task,
+        registry,
+        cfg.get("circuit_breaker"),
+    )
+    dependency_results = _dependency_results(state, step)
     message = f"请完成以下任务：{task}"
     if dependency_results:
         dependency_json = json.dumps(dependency_results, ensure_ascii=False, default=str)
@@ -231,9 +252,19 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
 
 
 def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    from .nodes._helpers import (
+        _focus_registry_for_task,
+        _public_answer_for_tool_results,
+    )
+
     request = build_dag_run_request(state, cfg, step)
     agent_id = request.agent_id
     registry = cfg["agent_registry"].build_tool_registry(agent_id, cfg["full_tools"])
+    registry = _focus_registry_for_task(
+        f"{state.get('user_message', '')}\n{step.get('task', '')}",
+        registry,
+        cfg.get("circuit_breaker"),
+    )
     runtime = AgentRuntime(
         cfg["runtime_store"], MatrixModelAdapter(cfg["llm"]),
         MatrixToolAdapter(
@@ -296,7 +327,19 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
             "step": step.get("step"),
             "output_key": step.get("output_key", ""),
             "agent_id": agent_id, "task": step.get("task", ""),
-            "result": result.final_message, "operation_id": handle.operation_id,
+            "result": _public_answer_for_tool_results(
+                result.final_message,
+                [
+                    {
+                        "name": item.name,
+                        "result": item.result,
+                        "error": item.error,
+                        "call_id": item.call_id,
+                    }
+                    for item in result.tool_results
+                ],
+            ),
+            "operation_id": handle.operation_id,
             **({"error": result.error} if result.error else {}),
         }],
         "tool_results": [

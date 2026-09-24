@@ -28,6 +28,8 @@ from matrix.orchestration.nodes import (
 from matrix.orchestration.nodes._helpers import (
     CircuitBreaker,
     _focus_tools_for_task,
+    _focus_registry_for_task,
+    _public_answer_for_tool_results,
     _prune_tools,
     _requires_browser,
 )
@@ -692,6 +694,7 @@ def test_explicit_tasks_focus_the_action_space():
     tools = [
         {"type": "function", "function": {"name": "weather"}},
         {"type": "function", "function": {"name": "web_search"}},
+        {"type": "function", "function": {"name": "finance.holdings_summary"}},
         {"type": "function", "function": {"name": "finance.recent_snapshots"}},
         {"type": "function", "function": {"name": "code.run_python"}},
         {"type": "function", "function": {"name": "mcp_browser_navigate"}},
@@ -708,8 +711,31 @@ def test_explicit_tasks_focus_the_action_space():
     ] == ["finance.recent_snapshots"]
     assert [
         t["function"]["name"]
+        for t in _focus_tools_for_task("查询我的当前持仓", tools)
+    ] == ["finance.holdings_summary"]
+    assert [
+        t["function"]["name"]
+        for t in _focus_tools_for_task("搜索Python异步编程最佳实践", tools)
+    ] == ["web_search"]
+    assert [
+        t["function"]["name"]
         for t in _focus_tools_for_task("打开 SPA 页面并提取内容", tools)
     ] == ["mcp_browser_navigate", "mcp_browser_extract"]
+
+    registry = _build_registry()
+    focused = _focus_registry_for_task("查询我的当前持仓", registry)
+    assert focused.tool_names() == {"finance.holdings_summary"}
+
+    safe_answer = _public_answer_for_tool_results(
+        "The search error was exposed",
+        [{
+            "name": "web_search",
+            "result": None,
+            "error": "[web_search] 搜索失败",
+        }],
+    )
+    assert "error" not in safe_answer.lower()
+    assert "稍后重试" in safe_answer
 
 
 class TestProgressEvents:

@@ -24,6 +24,8 @@ from ...runtime.domain.tools import ToolResult
 from ...runtime.testing.memory_store import MemoryOperationStore
 from ._helpers import (
     _build_history_context,
+    _focus_registry_for_task,
+    _public_answer_for_tool_results,
     _push_event,
     _push_runtime_event,
     _get_configurable,
@@ -47,14 +49,14 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     step = plan[current_step] if current_step < len(plan) else {}
     agent_id = step.get("agent_id", "commander")
     task = step.get("task", state.get("user_message", ""))
+    routing_task = f"{state.get('user_message', '')}\n{task}"
     agent_def = agent_registry.get(agent_id)
     if agent_def is None:
         return {"agent_results": [{"agent_id": agent_id, "task": task, "error": f"Agent not found: {agent_id}"}]}
 
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
     breaker = cfg.get("circuit_breaker")
-    if breaker is not None:
-        agent_tools.set_circuit_breaker(breaker)
+    agent_tools = _focus_registry_for_task(routing_task, agent_tools, breaker)
     history_context = _build_history_context(cfg.get("history", []))
     message_text = history_context + f"请完成以下任务：{task}"
     message_content = build_multimodal_content(
@@ -157,7 +159,10 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     agent_result = {
         "agent_id": agent_id,
         "task": task,
-        "result": result.final_message,
+        "result": _public_answer_for_tool_results(
+            result.final_message,
+            runtime_tool_results,
+        ),
         "tool_results": runtime_tool_results,
         "operation_id": handle.operation_id,
     }

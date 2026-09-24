@@ -34,6 +34,7 @@ _ALLOWED_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
     OperationPhase.PREPARING_NEXT_TURN: frozenset({
         OperationPhase.REQUESTING_MODEL,
         OperationPhase.COMPLETED,
+        OperationPhase.FAILED,
         OperationPhase.ABORTED,
         OperationPhase.RECOVERY_REQUIRED,
     }),
