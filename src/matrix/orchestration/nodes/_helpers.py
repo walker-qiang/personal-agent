@@ -512,34 +512,40 @@ def _focus_tools_for_task(
         }
     elif any(term in lowered for term in ("天气", "温度", "下雨", "预报", "weather")):
         preferred.add("weather")
-    elif any(
-        term in lowered
-        for term in (
-            "当前持仓",
-            "我的持仓",
-            "查询持仓",
-            "查看持仓",
-            "持仓汇总",
-            "current holdings",
-            "my holdings",
-            "holdings summary",
-            "positions",
-        )
-    ):
-        preferred.add("finance.holdings_summary")
-    elif any(term in lowered for term in ("快照", "snapshot")) and any(
-        term in lowered for term in ("最近", "最新", "记录", "recent", "latest")
-    ):
-        preferred.add("finance.recent_snapshots")
-    elif any(term in lowered for term in ("新闻", "news")) and any(
-        term in lowered for term in ("最新", "最近", "today", "latest", "recent")
-    ):
-        preferred.add("news_search")
-    elif any(
-        term in lowered
-        for term in ("搜索", "查资料", "搜索一下", "search", "look up")
-    ):
-        preferred.add("web_search")
+    else:
+        if any(
+            term in lowered
+            for term in (
+                "当前持仓",
+                "我的持仓",
+                "查询持仓",
+                "查看持仓",
+                "持仓汇总",
+                "current holdings",
+                "my holdings",
+                "holdings summary",
+                "positions",
+            )
+        ):
+            preferred.add("finance.holdings_summary")
+        if any(term in lowered for term in ("快照", "snapshot")) and any(
+            term in lowered for term in ("最近", "最新", "记录", "recent", "latest")
+        ):
+            preferred.add("finance.recent_snapshots")
+        if any(term in lowered for term in ("新闻", "news")) and any(
+            term in lowered for term in ("最新", "最近", "today", "latest", "recent")
+        ):
+            preferred.add("news_search")
+        if any(
+            term in lowered
+            for term in ("行情", "股价", "价格", "涨跌", "市值", "指数", "股市", "股票")
+        ):
+            preferred.add("finance_query")
+        if not preferred and any(
+            term in lowered
+            for term in ("搜索", "查资料", "搜索一下", "search", "look up")
+        ):
+            preferred.add("web_search")
 
     if not preferred:
         return tool_defs

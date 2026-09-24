@@ -601,6 +601,8 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
         })
         # Normalize revised plan: ensure depends_on and output_key fields
         for i, s in enumerate(revised_plan):
+            if not str(s.get("agent_id", "")).strip():
+                s["agent_id"] = "commander"
             if "step" not in s:
                 s["step"] = i + 1
             if "depends_on" not in s:
@@ -609,6 +611,27 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
                 s["output_key"] = f"step_{s.get('step', i + 1)}"
             if "skill_name" not in s:
                 s["skill_name"] = ""
+        valid_ids = {a["id"] for a in agent_registry.agents_for_commander()}
+        valid_ids.add("commander")
+        invalid_agents = sorted(
+            {
+                str(step.get("agent_id", "")).strip()
+                for step in revised_plan
+                if str(step.get("agent_id", "")).strip() not in valid_ids
+            }
+        )
+        if invalid_agents:
+            logger.warning(
+                "replan: dropping steps for unknown agents — %s",
+                invalid_agents,
+            )
+            revised_plan = [
+                step for step in revised_plan
+                if str(step.get("agent_id", "")).strip() in valid_ids
+            ]
+        if not revised_plan:
+            logger.warning("replan: revised plan has no valid agent steps, skipping")
+            return {"needs_replan": False}
         revised_plan = _normalize_plan_skills(revised_plan, agent_registry)
         return {
             "delegation_plan": revised_plan,
