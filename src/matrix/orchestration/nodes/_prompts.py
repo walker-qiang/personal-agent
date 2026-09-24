@@ -36,6 +36,7 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
   - 如需要行情数据，应选择拥有 market_data 能力的专家
   - 如需要生成图片，应选择拥有 image_generation 能力的专家
   - 如某个任务需要的能力没有专家覆盖，委派给 commander 自己处理
+- skill_name 只能填写所选专家 skills 字段中明确列出的技能名；无法匹配时必须填写空字符串
 - 投资/金融/持仓/配置分析类问题委派给 investment-analyst
 - 图片生成、视频生成、图像创作类问题委派给 media-generator
 - 跨领域问题：投资部分委派给 investment-analyst，媒体生成委派给 media-generator，其余指挥官自己处理

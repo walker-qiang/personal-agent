@@ -63,7 +63,10 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
         message_text,
         cfg.get("attachments", []),
     )
-    selected_skill_name = str(step.get("skill_name", "")).strip()
+    selected_skill_name = agent_registry.normalize_skill_name(
+        agent_id,
+        step.get("skill_name", ""),
+    )
     system_prompt = build_agent_system_prompt(
         agent_def=agent_def,
         task=task,

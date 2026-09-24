@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,6 +55,28 @@ from ..anti_hallucination import verify_all_claims, build_verified_output, _stri
 from ..state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
+
+_NUMERIC_SEARCH_INTENT_RE = re.compile(
+    r"\d|多少|几|价格|股价|市值|营收|利润|增长|涨幅|跌幅|百分比|"
+    r"最新|最近|今天|今日|当前|时间|日期|"
+    r"how much|price|market cap|revenue|profit|growth|percent|latest|today|when",
+    re.IGNORECASE,
+)
+
+
+def _should_run_numeric_verification(
+    question: str,
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    """Keep expensive numeric verification for data-bearing requests."""
+    tool_names = {
+        str(item.get("name", ""))
+        for item in tool_results
+        if item.get("name")
+    }
+    if tool_names != {"web_search"}:
+        return True
+    return _NUMERIC_SEARCH_INTENT_RE.search(question) is not None
 
 # ── Semantic router singleton (L1 routing) ──────────────────────────────────
 
@@ -136,6 +159,28 @@ def _build_skill_plan(user_msg: str, skill_name: str, agent_id: str) -> dict[str
         "current_step": 0,
         "plan_type": "agent",
     }
+
+
+def _normalize_plan_skills(
+    plan: list[dict[str, Any]],
+    agent_registry: AgentRegistry,
+) -> list[dict[str, Any]]:
+    """Drop skill names that are not assigned to the step's agent."""
+    for step in plan:
+        agent_id = str(step.get("agent_id", "")).strip()
+        requested = str(step.get("skill_name", "")).strip()
+        if not requested:
+            step["skill_name"] = ""
+            continue
+        normalized = agent_registry.normalize_skill_name(agent_id, requested)
+        if not normalized:
+            logger.warning(
+                "commander: clearing unassigned skill — agent=%s skill=%s",
+                agent_id,
+                requested,
+            )
+        step["skill_name"] = normalized
+    return plan
 
 
 def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
@@ -242,6 +287,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     valid_ids = {a["id"] for a in agent_registry.agents_for_commander()}
     valid_ids.add("commander")
     plan = [s for s in plan if s.get("agent_id", "") in valid_ids]
+    plan = _normalize_plan_skills(plan, agent_registry)
 
     logger.info("commander: raw_plan=%s", json.dumps(plan, ensure_ascii=False)[:500])
 
@@ -304,6 +350,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
                         s.get("agent_id", "") in valid_ids for s in adjusted
                     )
                     if adjusted_valid:
+                        adjusted = _normalize_plan_skills(adjusted, agent_registry)
                         logger.info(
                             "commander: PreFlect revised plan — issues: %s",
                             critique.get("issues", []),
@@ -494,6 +541,7 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     """
     cfg = _get_configurable(config)
     llm = cfg.get("pipeline_llm", cfg["llm"])
+    agent_registry: AgentRegistry = cfg["agent_registry"]
 
     plan = state.get("delegation_plan", [])
     completed = state.get("completed_steps", [])
@@ -561,6 +609,7 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
                 s["output_key"] = f"step_{s.get('step', i + 1)}"
             if "skill_name" not in s:
                 s["skill_name"] = ""
+        revised_plan = _normalize_plan_skills(revised_plan, agent_registry)
         return {
             "delegation_plan": revised_plan,
             "needs_replan": True,
@@ -763,9 +812,10 @@ def aggregate_node(state: AgentState, *, config: RunnableConfig) -> dict[str, An
                 final_answer = _strip_all_verification_tags(final_answer)
                 # P1 fallback: heuristic number check when no [VERIFICATION] blocks
                 # Use the configured main agent LLM for regex-based verification.
-                final_answer = _heuristic_number_check(
-                    final_answer, all_tool_results, cfg["llm"], user_msg,
-                )
+                if _should_run_numeric_verification(user_msg, all_tool_results):
+                    final_answer = _heuristic_number_check(
+                        final_answer, all_tool_results, cfg["llm"], user_msg,
+                    )
 
         # ── Guard: final_answer is empty (LLM returned empty, or
         # verification stripping removed all content) ──
@@ -843,6 +893,15 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         for issue in state.get("verification_issues", [])
         if str(issue).strip()
     ]
+    if not anchored_issues and len(state.get("agent_results", [])) == 1:
+        agent_result = state.get("agent_results", [])[0]
+        tool_names = {
+            str(item.get("name", ""))
+            for item in agent_result.get("tool_results", [])
+            if item.get("name")
+        }
+        if tool_names == {"web_search"} and not agent_result.get("error"):
+            return {"skip_reflection": True}
     verification_context = (
         "\n".join(f"- {issue}" for issue in anchored_issues)
         if anchored_issues

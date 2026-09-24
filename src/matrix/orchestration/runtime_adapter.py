@@ -220,7 +220,10 @@ def build_dag_run_request(state: Any, cfg: dict[str, Any], step: dict[str, Any])
             f"请完成以下任务：{task}"
         )
     message_content = build_multimodal_content(message, cfg.get("attachments", []))
-    selected_skill_name = str(step.get("skill_name", "")).strip()
+    selected_skill_name = cfg["agent_registry"].normalize_skill_name(
+        agent_id,
+        step.get("skill_name", ""),
+    )
     system_prompt = build_agent_system_prompt(
         agent_def=agent_def,
         task=task,

@@ -97,6 +97,14 @@ class AgentRegistry:
             info: dict[str, Any] = {
                 "id": a.id, "name": a.name, "description": a.description, "domain": a.domain,
             }
+            try:
+                assigned_skills = [
+                    skill.name for skill in self.load_skills_for_agent(a.id)
+                ]
+            except (FileNotFoundError, OSError):
+                assigned_skills = []
+            if assigned_skills:
+                info["skills"] = assigned_skills
             if full_tools is not None:
                 agent_tools = self.build_tool_registry(a.id, full_tools)
                 caps = agent_tools.get_capabilities_summary()
@@ -177,6 +185,13 @@ class AgentRegistry:
             ),
             None,
         )
+
+    def normalize_skill_name(self, agent_id: str, skill_name: str) -> str:
+        """Return a skill name only when it is assigned to the agent."""
+        normalized = str(skill_name or "").strip()
+        if not normalized:
+            return ""
+        return normalized if self.get_skill_for_agent(agent_id, normalized) else ""
 
     def list_all_skills(self) -> list[SkillDefinition]:
         """List all skills across all directories."""
