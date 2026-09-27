@@ -114,6 +114,14 @@ ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
 DEFAULT_PIPELINE_PROVIDER = "codex"
 DEFAULT_PIPELINE_MODEL = DEFAULT_CODEX_MODEL
 
+# Providers served by the OpenAI-compatible chat client. Agnes was retired as
+# a chat provider — it survives only as the image/video generation tool, which
+# is why AGNES_API_KEY is still read in the tools layer.
+_API_PROVIDERS = frozenset({"deepseek"})
+_API_PROVIDER_KEY_ENVS = {
+    "deepseek": ENV_DEEPSEEK_API_KEY,
+}
+
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -141,6 +149,14 @@ class AgentConfig:
     codex_reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT
     agnes_base_url: str = DEFAULT_AGNES_BASE_URL
     memory_max_turns: int = 8
+    # Long-term memory retrieval (Phase 1)
+    memory_prompt_budget_tokens: int = 800
+    memory_retrieval_top_k: int = 8
+    memory_full_dump: bool = False  # escape hatch: restore pre-Phase-1 behaviour
+    memory_semantic_enabled: bool = True
+    # Memory write policy (Phase 2)
+    memory_write_decisions: bool = True
+    memory_evolution_min_interval_sec: float = 3600.0
     rate_limit_per_sec: float = 5.0
     max_message_chars: int = 8000
     pipeline_provider: str = DEFAULT_PIPELINE_PROVIDER
@@ -170,22 +186,51 @@ class AgentConfig:
     def llm_available(self) -> bool:
         return self.llm_unavailable_reason == ""
 
-    @property
-    def llm_unavailable_reason(self) -> str:
-        if self.agent_provider == "codex":
+    def _provider_unavailable_reason(self, provider: str) -> str:
+        """Why a given provider cannot serve requests, or "" if it can."""
+        if provider == "codex":
             if shutil.which(self.codex_bin):
                 return ""
             return f"missing Codex CLI: {self.codex_bin}"
-        if self.agent_provider != "deepseek":
-            return f"unsupported AGENT_PROVIDER: {self.agent_provider} (supported: codex, deepseek)"
+        if provider not in _API_PROVIDERS:
+            return (
+                f"unsupported provider: {provider} "
+                f"(supported: codex, {', '.join(sorted(_API_PROVIDERS))})"
+            )
         if not self.active_api_key:
-            key_map = {
-                "deepseek": ENV_DEEPSEEK_API_KEY,
-                "agnes": ENV_AGNES_API_KEY,
-            }
-            key_name = key_map.get(self.agent_provider, "API key")
-            return f"missing {key_name}"
+            return f"missing {_API_PROVIDER_KEY_ENVS.get(provider, 'API key')}"
         return ""
+
+    @property
+    def llm_unavailable_reason(self) -> str:
+        return self._provider_unavailable_reason(self.agent_provider)
+
+    @property
+    def pipeline_llm_available(self) -> bool:
+        """Whether the pipeline LLM *after fallback* can serve requests."""
+        return self.resolved_pipeline_unavailable_reason == ""
+
+    @property
+    def pipeline_unavailable_reason(self) -> str:
+        """Why the configured pipeline provider cannot run (pre-fallback)."""
+        return self._provider_unavailable_reason(self.pipeline_provider)
+
+    @property
+    def resolved_pipeline_unavailable_reason(self) -> str:
+        return self._provider_unavailable_reason(self.resolved_pipeline_provider)
+
+    @property
+    def resolved_pipeline_provider(self) -> str:
+        """Pipeline provider actually used, after availability fallback.
+
+        The default pipeline provider is Codex CLI, but the binary is absent in
+        many deployments (CI, machines without the CLI). Internal pipeline tasks
+        — notably memory extraction — must not silently die in that case, so we
+        degrade onto the API provider instead.
+        """
+        if self.pipeline_unavailable_reason == "":
+            return self.pipeline_provider
+        return "deepseek"
 
 
 def load_config() -> AgentConfig:
@@ -337,6 +382,18 @@ def load_config() -> AgentConfig:
         agnes_base_url=os.environ.get(ENV_AGNES_BASE_URL, DEFAULT_AGNES_BASE_URL).strip()
         or DEFAULT_AGNES_BASE_URL,
         memory_max_turns=clamp_int_env(ENV_MEMORY_MAX_TURNS, 8, 1, 30),
+        memory_prompt_budget_tokens=clamp_int_env(
+            "MATRIX_MEMORY_PROMPT_BUDGET", 800, 100, 4000,
+        ),
+        memory_retrieval_top_k=clamp_int_env(
+            "MATRIX_MEMORY_TOP_K", 8, 1, 30,
+        ),
+        memory_full_dump=_env_flag("MATRIX_MEMORY_FULL_DUMP", False),
+        memory_semantic_enabled=_env_flag("MATRIX_MEMORY_SEMANTIC", True),
+        memory_write_decisions=_env_flag("MATRIX_MEMORY_WRITE_DECISIONS", True),
+        memory_evolution_min_interval_sec=clamp_float_env(
+            "MATRIX_MEMORY_EVOLUTION_INTERVAL", 3600.0, 0.0, 86400.0,
+        ),
         rate_limit_per_sec=clamp_float_env(ENV_RATE_LIMIT_PER_SEC, 5.0, 0.5, 60.0),
         max_message_chars=clamp_int_env(ENV_MAX_MESSAGE_CHARS, 8000, 500, 50000),
         pipeline_provider=os.environ.get(ENV_PIPELINE_PROVIDER, DEFAULT_PIPELINE_PROVIDER).strip().lower()
@@ -408,6 +465,17 @@ def clamp_float_env(name: str, default: float, minimum: float, maximum: float) -
     except ValueError:
         return default
     return min(max(value, minimum), maximum)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def parse_addr(raw: str, env_name: str = ENV_AGENT_ADDR) -> tuple[str, int]:

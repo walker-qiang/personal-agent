@@ -74,15 +74,22 @@ def _build_rag(config: AgentConfig, tools_registry: ToolRegistry) -> tuple[objec
             from ..rag.agentic_search import AgenticSearch
             from ..llm import build_llm_client
 
+            pipeline_provider = config.resolved_pipeline_provider
+            if pipeline_provider != config.pipeline_provider:
+                logger.warning(
+                    "pipeline_llm: falling back %s -> %s (%s)",
+                    config.pipeline_provider, pipeline_provider,
+                    config.pipeline_unavailable_reason,
+                )
             pipeline_llm = build_llm_client(
-                provider=config.pipeline_provider,
+                provider=pipeline_provider,
                 deepseek_api_key=config.deepseek_api_key,
                 anthropic_api_key=config.anthropic_api_key,
                 agnes_api_key=config.agnes_api_key,
                 model=config.pipeline_model,
                 deepseek_base_url=(
                     config.agnes_base_url
-                    if config.pipeline_provider == "agnes"
+                    if pipeline_provider == "agnes"
                     else config.deepseek_base_url
                 ),
                 codex_bin=config.codex_bin,
@@ -233,18 +240,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
     logger.info("matrix agent listening on http://%s:%s", config.host, config.port)
     logger.info("mode=read-only cache=%s trace=%s", config.cache_path, config.trace_path)
-    # Sync user profiles from personal-assets on startup
+    # Sync user profiles from personal-assets on startup.
+    # Every branch logs, including the skip path — a misconfigured
+    # MATRIX_MEMORY_SYNC_PATH used to be completely silent (defect B-3).
     sync_path = config.memory_sync_path
-    if sync_path and Path(sync_path).is_dir():
+    if not sync_path:
+        logger.warning("memory_sync: skipped, MATRIX_MEMORY_SYNC_PATH is empty")
+    elif not Path(sync_path).is_dir():
+        logger.warning("memory_sync: skipped, path is not a directory: %s", sync_path)
+    else:
+        files = sorted(Path(sync_path).glob("*.json"))
+        if not files:
+            logger.warning("memory_sync: no *.json files under %s", sync_path)
         synced = 0
-        for json_file in Path(sync_path).glob("*.json"):
+        loaded = 0
+        for json_file in files:
             uid = json_file.stem
             count = app.state.chat.store.sync_profile_from_file(uid, str(json_file))
+            # sync_profile_from_file logs the failure reason itself
+            logger.info(
+                "memory_sync: user=%s file=%s entries=%d",
+                uid, json_file.name, count,
+            )
             if count > 0:
-                logger.info("memory_sync: user=%s entries=%d", uid, count)
                 synced += 1
-        if synced:
-            logger.info("memory_sync: %d user(s) synced from %s", synced, sync_path)
+                loaded += count
+        logger.info(
+            "memory_sync: done path=%s files=%d users=%d entries=%d",
+            sync_path, len(files), synced, loaded,
+        )
 
     # Keep startup light; the product client requests warmup after its first load.
     app.state.retriever = None

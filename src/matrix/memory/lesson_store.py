@@ -52,6 +52,17 @@ _MAX_LESSONS = 200  # 教训数量上限
 _FORGET_BATCH = 20  # 超出上限时一次淘汰的数量
 _RELEVANCE_THRESHOLD = 0.15  # Jaccard 相似度阈值, 低于此值不返回
 _DEFAULT_TOP_K = 5  # 默认返回的教训数量
+# Candidate window for similarity matching. The previous code capped this at
+# 50/100 *rows*, so lessons beyond the most recent 50 could never match (B-4).
+# The table itself is bounded by _MAX_LESSONS, so scanning it all is bounded.
+_MATCH_CANDIDATES = 1000
+
+# Lesson kinds. "failure" is the original Reflexion-style negative experience;
+# "success" records a strategy that worked, so the agent can reuse it instead
+# of only knowing what to avoid.
+KIND_FAILURE = "failure"
+KIND_SUCCESS = "success"
+_VALID_KINDS = (KIND_FAILURE, KIND_SUCCESS)
 
 
 # ── 数据结构 ─────────────────────────────────────────────────────────────
@@ -81,6 +92,7 @@ class Lesson:
     agent_id: str = ""
     user_id: str = ""
     severity: str = "medium"
+    kind: str = KIND_FAILURE
     occurrence_count: int = 1
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -95,6 +107,7 @@ class Lesson:
             "lesson_text": self.lesson_text,
             "agent_id": self.agent_id,
             "severity": self.severity,
+            "kind": self.kind,
             "occurrence_count": self.occurrence_count,
         }
 
@@ -195,11 +208,31 @@ class LessonStore:
         return self._conn
 
     def _init_db(self) -> None:
-        """Initialize the lessons table."""
+        """Initialize the lessons table (and migrate older databases)."""
         with self._lock:
             conn = self._get_conn()
             conn.executescript(_LESSON_SCHEMA)
+            cols = [
+                r[1] for r in
+                conn.execute("PRAGMA table_info(agent_lessons)").fetchall()
+            ]
+            if "kind" not in cols:
+                conn.execute(
+                    "ALTER TABLE agent_lessons "
+                    f"ADD COLUMN kind TEXT NOT NULL DEFAULT '{KIND_FAILURE}'"
+                )
+            # Only safe to index once the column is guaranteed to exist.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_lessons_kind "
+                "ON agent_lessons(user_id, kind)"
+            )
             conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_lessons",
+            ).fetchone()[0]
+        logger.info(
+            "lesson_store: ready path=%s lessons=%d", self._db_path, count,
+        )
 
     # ── 写操作 ─────────────────────────────────────────────────────────
 
@@ -211,22 +244,27 @@ class LessonStore:
         agent_id: str = "",
         user_id: str = "",
         severity: str = "medium",
+        kind: str = KIND_FAILURE,
     ) -> int:
         """记录一条教训. 如果相似教训已存在, 累加 occurrence_count.
 
         Args:
             task_pattern: 用户任务的关键词摘要.
-            failure_type: 失败类型 (e.g., "missing_data", "wrong_tool", "hallucination").
+            failure_type: 失败类型 (e.g., "missing_data", "wrong_tool", "hallucination")
+                或成功策略的类型 (kind="success", e.g., "reusable_strategy").
             lesson_text: 教训正文.
             agent_id: 涉及的 agent.
             user_id: 用户 ID.
             severity: "low" | "medium" | "high".
+            kind: "failure" (负面经验) 或 "success" (可复用的成功策略).
 
         Returns:
             lesson_id (新记录的 ID, 或已存在记录的 ID).
         """
         if not lesson_text or not lesson_text.strip():
             return 0
+        if kind not in _VALID_KINDS:
+            kind = KIND_FAILURE
 
         task_pattern = task_pattern.strip()[:500]
         lesson_text = lesson_text.strip()[:2000]
@@ -237,7 +275,7 @@ class LessonStore:
 
             # 检查是否已有相似教训 (相同 agent + 相似 task_pattern)
             existing = self._find_similar(
-                conn, task_pattern, agent_id, user_id,
+                conn, task_pattern, agent_id, user_id, kind,
             )
 
             if existing:
@@ -267,10 +305,10 @@ class LessonStore:
             cursor = conn.execute(
                 """INSERT INTO agent_lessons
                    (task_pattern, failure_type, lesson_text, agent_id, user_id,
-                    severity, occurrence_count, created_at, updated_at, last_seen_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+                    severity, kind, occurrence_count, created_at, updated_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                 (task_pattern, failure_type, lesson_text, agent_id, user_id,
-                 severity, now, now, now),
+                 severity, kind, now, now, now),
             )
             conn.commit()
             lesson_id = cursor.lastrowid or 0
@@ -291,13 +329,20 @@ class LessonStore:
         task_pattern: str,
         agent_id: str,
         user_id: str,
+        kind: str = KIND_FAILURE,
     ) -> sqlite3.Row | None:
-        """查找相似教训 (相同 agent + Jaccard >= 0.5)."""
+        """查找相似教训 (相同 agent + 相同 kind + Jaccard >= 0.5).
+
+        The candidate window used to be ``LIMIT 50``, which silently excluded
+        every lesson past the 50 most recent — they could be re-recorded
+        forever but never merged. The table is bounded by ``_MAX_LESSONS``,
+        so the full scan is bounded too.
+        """
         rows = conn.execute(
             """SELECT * FROM agent_lessons
-               WHERE user_id=? AND agent_id=?
-               ORDER BY updated_at DESC LIMIT 50""",
-            (user_id, agent_id),
+               WHERE user_id=? AND agent_id=? AND kind=?
+               ORDER BY updated_at DESC LIMIT ?""",
+            (user_id, agent_id, kind, _MATCH_CANDIDATES),
         ).fetchall()
 
         for row in rows:
@@ -356,6 +401,7 @@ class LessonStore:
         agent_id: str = "",
         user_id: str = "",
         top_k: int = _DEFAULT_TOP_K,
+        kind: str = "",
     ) -> list[Lesson]:
         """获取与任务相关的教训.
 
@@ -366,6 +412,7 @@ class LessonStore:
             agent_id: 限定 agent (空字符串 = 所有 agent).
             user_id: 用户 ID.
             top_k: 最多返回的教训数量.
+            kind: 限定 "failure" / "success"；空字符串 = 不限.
 
         Returns:
             相关教训列表, 按 Jaccard 相似度降序.
@@ -373,20 +420,17 @@ class LessonStore:
         with self._lock:
             conn = self._get_conn()
 
+            sql = "SELECT * FROM agent_lessons WHERE user_id=?"
+            params: list[Any] = [user_id]
             if agent_id:
-                rows = conn.execute(
-                    """SELECT * FROM agent_lessons
-                       WHERE user_id=? AND agent_id=?
-                       ORDER BY updated_at DESC LIMIT 100""",
-                    (user_id, agent_id),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT * FROM agent_lessons
-                       WHERE user_id=?
-                       ORDER BY updated_at DESC LIMIT 100""",
-                    (user_id,),
-                ).fetchall()
+                sql += " AND agent_id=?"
+                params.append(agent_id)
+            if kind in _VALID_KINDS:
+                sql += " AND kind=?"
+                params.append(kind)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(_MATCH_CANDIDATES)
+            rows = conn.execute(sql, params).fetchall()
 
         if not rows:
             return []
@@ -414,26 +458,34 @@ class LessonStore:
         user_id: str = "",
         agent_id: str = "",
         limit: int = 50,
+        kind: str = "",
     ) -> list[Lesson]:
         """获取所有教训 (按更新时间降序)."""
         with self._lock:
             conn = self._get_conn()
+            sql = "SELECT * FROM agent_lessons WHERE user_id=?"
+            params: list[Any] = [user_id]
             if agent_id:
-                rows = conn.execute(
-                    """SELECT * FROM agent_lessons
-                       WHERE user_id=? AND agent_id=?
-                       ORDER BY updated_at DESC LIMIT ?""",
-                    (user_id, agent_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT * FROM agent_lessons
-                       WHERE user_id=?
-                       ORDER BY updated_at DESC LIMIT ?""",
-                    (user_id, limit),
-                ).fetchall()
+                sql += " AND agent_id=?"
+                params.append(agent_id)
+            if kind in _VALID_KINDS:
+                sql += " AND kind=?"
+                params.append(kind)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
 
         return [self._row_to_lesson(row) for row in rows]
+
+    def count_by_kind(self, user_id: str = "") -> dict[str, int]:
+        """Return {kind: count} for a user, for health checks and UI."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT kind, COUNT(*) FROM agent_lessons "
+                "WHERE user_id=? GROUP BY kind",
+                (user_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def delete_lesson(self, lesson_id: int, user_id: str = "") -> bool:
         """删除一条教训. Returns True if deleted."""
@@ -481,6 +533,7 @@ class LessonStore:
             agent_id=row["agent_id"],
             user_id=row["user_id"],
             severity=row["severity"],
+            kind=row["kind"] if "kind" in row.keys() else KIND_FAILURE,
             occurrence_count=row["occurrence_count"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

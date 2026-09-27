@@ -44,6 +44,7 @@ from ._prompts import (
     REFLEXION_PROMPT,
     REFLEXION_RETRY_PROMPT,
     LESSON_EXTRACTION_PROMPT,
+    PLAYBOOK_EXTRACTION_PROMPT,
     EVALUATOR_PROMPT,
 )
 from ._circuit_breaker import (
@@ -159,36 +160,59 @@ def _inject_lessons(
         return system_prompt
 
     user_id = cfg.get("user_id", "")
+    failures: list[Any] = []
+    successes: list[Any] = []
     try:
-        lessons = lesson_store.get_relevant_lessons(
+        failures = lesson_store.get_relevant_lessons(
             task=task,
             agent_id=agent_id,
             user_id=user_id,
             top_k=3,
+            kind="failure",
         )
     except Exception as exc:
-        logger.debug("lesson_inject: query failed: %s", exc)
-        return system_prompt
+        logger.debug("lesson_inject: failure query failed: %s", exc)
+    try:
+        successes = lesson_store.get_relevant_lessons(
+            task=task,
+            agent_id=agent_id,
+            user_id=user_id,
+            top_k=2,
+            kind="success",
+        )
+    except Exception as exc:
+        logger.debug("lesson_inject: success query failed: %s", exc)
 
-    if not lessons:
-        return system_prompt
+    def _render(items: list[Any]) -> str:
+        lines: list[str] = []
+        for lesson in items:
+            count_tag = (
+                f" (×{lesson.occurrence_count})"
+                if lesson.occurrence_count > 1 else ""
+            )
+            severity_tag = (
+                f" [{lesson.severity}]" if lesson.severity != "medium" else ""
+            )
+            lines.append(f"- {lesson.lesson_text}{count_tag}{severity_tag}")
+        return "\n".join(lines)
 
-    # Build lesson block
-    lines: list[str] = []
-    for lesson in lessons:
-        count_tag = f" (×{lesson.occurrence_count})" if lesson.occurrence_count > 1 else ""
-        severity_tag = f" [{lesson.severity}]" if lesson.severity != "medium" else ""
-        lines.append(f"- {lesson.lesson_text}{count_tag}{severity_tag}")
-
-    lesson_block = "\n".join(lines)
-    system_prompt += (
-        f"\n\n## Past Lessons (避免重复犯错)\n"
-        f"以下是从过去失败中总结的教训, 请在本任务中参考:\n"
-        f"{lesson_block}"
-    )
+    if failures:
+        system_prompt += (
+            "\n\n## Past Lessons (避免重复犯错)\n"
+            "以下是从过去失败中总结的教训, 请在本任务中参考:\n"
+            f"{_render(failures)}"
+        )
+    if successes:
+        system_prompt += (
+            "\n\n## Proven Strategies (优先复用已验证的做法)\n"
+            "以下策略在过去同类任务中有效, 优先考虑复用:\n"
+            f"{_render(successes)}"
+        )
 
     # Update last_seen for matched lessons
-    lesson_ids = [l.lesson_id for l in lessons if l.lesson_id]
+    lesson_ids = [
+        l.lesson_id for l in (failures + successes) if getattr(l, "lesson_id", 0)
+    ]
     if lesson_ids:
         try:
             lesson_store.update_last_seen(lesson_ids)

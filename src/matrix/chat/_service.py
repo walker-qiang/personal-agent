@@ -49,6 +49,12 @@ from ..runtime.adapters.context import MatrixContextAdapter
 from ..context import ToolResultRefStore, make_get_stored_data_tool
 from ..memory import EvolutionConfig, MemoryEvolution
 from ..memory.lesson_store import LessonStore
+from ..memory.decisions import MemoryDecisionEngine
+from ..memory.prompting import build_memory_block
+from ..memory.retriever import MemoryRetriever
+from ..memory.safety import MemorySafetyGuard
+from ..memory.temporal import humanize_span, parse_fact_time, resolve_time_range
+from ..memory.writer import MemoryWriteWorker
 from ..vault_client import VaultWriteError, sync_memory_profile
 from ._utils import(
     MEMORY_EXTRACTION_PROMPT,
@@ -1115,14 +1121,27 @@ class ChatService:
         # When an explicit LLM is injected (e.g. tests), reuse it as pipeline_llm
         if llm is not None:
             self._pipeline_llm = llm
+            self._pipeline_provider = config.pipeline_provider
         else:
+            provider = config.resolved_pipeline_provider
+            if provider != config.pipeline_provider:
+                logger.warning(
+                    "pipeline_llm: falling back %s -> %s (%s)",
+                    config.pipeline_provider, provider,
+                    config.pipeline_unavailable_reason,
+                )
+            self._pipeline_provider = provider
             self._pipeline_llm = build_llm_client(
-                provider=config.pipeline_provider,
+                provider=provider,
                 deepseek_api_key=config.deepseek_api_key,
                 anthropic_api_key=config.anthropic_api_key,
                 agnes_api_key=config.agnes_api_key,
-                model=config.pipeline_model,
-                deepseek_base_url=config.deepseek_base_url,
+                model=config.pipeline_model if provider == config.pipeline_provider
+                else (config.agent_model if provider == config.agent_provider else ""),
+                deepseek_base_url=(
+                    config.agnes_base_url if provider == "agnes"
+                    else config.deepseek_base_url
+                ),
                 codex_bin=config.codex_bin,
                 codex_workdir=config.codex_workdir,
                 codex_sandbox=config.codex_sandbox,
@@ -1147,14 +1166,43 @@ class ChatService:
         self._evolution = MemoryEvolution(
             self.store,
             config=EvolutionConfig(
-                enable_llm_consolidation=self.config.llm_available,
+                enable_llm_consolidation=self.config.pipeline_llm_available,
             ),
-            llm=self._pipeline_llm if self.config.llm_available else None,
+            llm=self._pipeline_llm if self.config.pipeline_llm_available else None,
         )
         # P3: Cross-session lesson store (failure experience persistence)
         self._lesson_store = LessonStore(
             config.root_path / "var" / "agent" / "lessons.db"
         )
+        # Hybrid retriever over long-term memory (Phase 1). The embedder is
+        # optional: without it the retriever runs lexical-only.
+        self._memory_retriever = self._build_memory_retriever()
+        # Write-time decision engine (Phase 2)
+        self._memory_decisions = MemoryDecisionEngine(
+            llm=self._pipeline_llm if self.config.pipeline_llm_available else None,
+            enabled=self.config.memory_write_decisions,
+        )
+        # Write-path guard: memory is replayed into every future prompt, so it
+        # needs screening the chat output guard never covered (Phase 5).
+        self._memory_safety = MemorySafetyGuard(
+            output_guard=getattr(self, "_output_guard", None),
+        )
+        self._evolution_last_run: dict[str, float] = {}
+        # Bounded background worker for memory extraction (replaces the raw
+        # daemon thread that silently dropped work on process exit).
+        self._memory_writer = MemoryWriteWorker(self._run_memory_extraction)
+        self._memory_writer.start()
+        logger.info(
+            "memory_writer: ready llm_available=%s pipeline_provider=%s "
+            "pipeline_llm_available=%s",
+            self.config.llm_available, self._pipeline_provider,
+            self.config.pipeline_llm_available,
+        )
+        if not self.config.llm_available:
+            logger.warning(
+                "memory_writer: agent LLM unavailable (%s)",
+                self.config.llm_unavailable_reason,
+            )
         self._register_internal_tools()
 
         # P3: Register agent-as-tool wrappers (hierarchical agent architecture)
@@ -1639,7 +1687,7 @@ class ChatService:
             return
 
         # Load conversation history for context injection into LLM calls
-        history = self._get_history(sid, user_id)
+        history = self._get_history(sid, user_id, question=text)
         call_id = str(uuid.uuid4())
 
         # Clean up stale checkpoint from previous call (P0-4: prevents reducer merge)
@@ -2493,7 +2541,37 @@ class ChatService:
         """Reload skills from disk (after CRUD)."""
         self.agent_registry.reload_skills()
 
-    def _get_history(self, session_id: str, user_id: str = "default") -> list[dict[str, Any]]:
+    def _build_memory_context(
+        self, user_id: str, question: str = "", session_id: str = "",
+    ) -> str:
+        """Build the memory block for the system prompt.
+
+        Uses hybrid retrieval so only memories relevant to the current turn are
+        injected, capped by a token budget. Falls back to the legacy full dump
+        when retrieval is unavailable or the caller passes no query.
+        """
+        try:
+            block = build_memory_block(
+                self.store,
+                user_id,
+                query=question,
+                retriever=self._memory_retriever,
+                budget_tokens=self.config.memory_prompt_budget_tokens,
+                top_k=self.config.memory_retrieval_top_k,
+                full_dump=self.config.memory_full_dump,
+                session_id=session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - memory never breaks chat
+            logger.warning("memory_block: failed, falling back to dump: %s", exc)
+            return self.store.get_profile_formatted(user_id)
+        logger.debug(
+            "memory_block: user=%s %s", user_id, block.to_dict(),
+        )
+        return block.text
+
+    def _get_history(
+        self, session_id: str, user_id: str = "default", question: str = "",
+    ) -> list[dict[str, Any]]:
         """Return conversation history with layered user profile injected as context."""
         legacy_history = self.store.get_history(
             session_id, self.config.memory_max_turns, user_id=user_id,
@@ -2506,7 +2584,7 @@ class ChatService:
             )
         else:
             history = legacy_history
-        formatted = self.store.get_profile_formatted(user_id)
+        formatted = self._build_memory_context(user_id, question, session_id)
         if formatted:
             history.insert(0, {"role": "system", "content": formatted})
         return history
@@ -2562,16 +2640,77 @@ class ChatService:
             user_id, session_id, "assistant", {"content": answer},
         )
         self.store.update_title(session_id, question[:30].strip(), user_id=user_id)
-        # Extract memories in background thread (non-blocking)
-        threading.Thread(
-            target=self._extract_memories,
-            args=(question, answer, user_id),
-            daemon=True,
-        ).start()
+        # Hand extraction to the bounded background worker, never the request path.
+        accepted = self._memory_writer.submit({
+            "session_id": session_id,
+            "question": question,
+            "answer": answer,
+            "user_id": user_id,
+        })
+        logger.info(
+            "memory_extract_submit: user=%s session=%s accepted=%s",
+            user_id, session_id, accepted,
+        )
 
-    def _extract_memories(self, question: str, answer: str, user_id: str) -> None:
-        """Extract key facts from conversation and store in user profile."""
+    def _build_memory_retriever(self) -> MemoryRetriever | None:
+        """Create the hybrid retriever, degrading gracefully without an embedder.
+
+        Loading a sentence-transformers model costs seconds on first use, so it
+        is attempted lazily and a failure downgrades retrieval to lexical-only
+        rather than taking down the service.
+        """
+        if not self.config.memory_semantic_enabled:
+            logger.info("memory_retriever: semantic disabled by config, lexical only")
+            return MemoryRetriever(self.store, embedder=None)
+        try:
+            from ..rag.embedder import LocalEmbedder
+
+            embedder = LocalEmbedder(model_name=self.config.rag_embed_model or None)
+            return MemoryRetriever(self.store, embedder=embedder)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "memory_retriever: embedder unavailable (%s), lexical only", exc,
+            )
+            return MemoryRetriever(self.store, embedder=None)
+
+    def _run_memory_extraction(self, payload: dict[str, Any]) -> None:
+        """Adapter so ``MemoryWriteWorker`` can call ``_extract_memories``."""
+        self._extract_memories(
+            question=str(payload.get("question", "")),
+            answer=str(payload.get("answer", "")),
+            user_id=str(payload.get("user_id", "default")),
+            session_id=str(payload.get("session_id", "")),
+        )
+
+    def _evolution_due(self, user_id: str) -> bool:
+        """Gate evolution so it is not an O(n²) pass on every single turn."""
+        interval = float(getattr(self.config, "memory_evolution_min_interval_sec", 0.0))
+        if interval <= 0:
+            return True
+        now = time.time()
+        last = self._evolution_last_run.get(user_id, 0.0)
+        if now - last < interval:
+            return False
+        self._evolution_last_run[user_id] = now
+        return True
+
+    def shutdown(self) -> None:
+        """Flush pending memory work. Call on server stop."""
+        flushed = self._memory_writer.close(timeout=5.0)
+        logger.info("memory_writer: shutdown completed=%d", flushed)
+
+    def _extract_memories(self, question: str, answer: str, user_id: str,
+                          session_id: str = "") -> None:
+        """Extract key facts from conversation and store in user profile.
+
+        Runs on the ``MemoryWriteWorker`` thread. Every exit path logs a
+        structured line so a silent pipeline is visible in ``matrix.log``.
+        """
+        started = time.time()
         durable_sync_needed = False
+        written = 0
+        screened_out = 0
+        indexed: list[tuple[str, str]] = []
         try:
             prompt = MEMORY_EXTRACTION_PROMPT.format(
                 question=question[:500], answer=answer[:1000],
@@ -2579,33 +2718,131 @@ class ChatService:
             data = self._pipeline_llm.complete_json(
                 prompt, [{"role": "user", "content": "Extract memories from this Q&A."}],
             )
-            for mem in data.get("memories", []):
-                key = mem["key"].strip()
-                value = mem["value"].strip()
-                mem_type = mem.get("type", "preference").strip()
+            raw_candidates = data.get("memories", []) if isinstance(data, dict) else []
+            if not isinstance(raw_candidates, list):
+                raw_candidates = []
+            candidates: list[dict[str, Any]] = []
+            for mem in raw_candidates:
+                if not isinstance(mem, dict):
+                    continue
+                key = str(mem.get("key", "")).strip()
+                value = str(mem.get("value", "")).strip()
+                mem_type = str(mem.get("type", "preference")).strip()
+                if mem_type not in ("preference", "policy"):
+                    mem_type = "preference"
                 if key and value:
-                    self.store.upsert_profile(user_id, key, value, memory_type=mem_type)
-                    logger.debug("memory_upsert: user=%s key=%s type=%s", user_id, key, mem_type)
+                    candidates.append(
+                        {"key": key, "value": value, "type": mem_type},
+                    )
+            logger.info(
+                "memory_extract_llm: user=%s session=%s candidates=%d",
+                user_id, session_id, len(candidates),
+            )
+
+            if candidates:
+                # Write-time decision (Phase 2): compare against what is
+                # already stored before touching the table.
+                existing = self.store.get_all_memories(user_id)
+                outcome = self._memory_decisions.decide(
+                    question, answer, candidates, existing,
+                )
+                logger.info(
+                    "memory_decision: user=%s session=%s ops=%s llm=%s reason=%s",
+                    user_id, session_id, outcome.counts(),
+                    outcome.llm_used, outcome.reason,
+                )
+                for decision in outcome.decisions:
+                    if decision.op in ("ADD", "UPDATE"):
+                        if not decision.key or not decision.value:
+                            continue
+                        screening = self._memory_safety.screen(
+                            decision.key, decision.value,
+                        )
+                        if not screening.allowed:
+                            screened_out += 1
+                            logger.warning(
+                                "memory_rejected: user=%s key=%s reason=%s",
+                                user_id, decision.key, screening.reason,
+                            )
+                            continue
+                        self.store.upsert_profile(
+                            user_id, decision.key, screening.value,
+                            memory_type=decision.memory_type,
+                            source_session_id=session_id,
+                            source_quote=question[:200],
+                            confidence=0.6 if outcome.llm_used else 0.4,
+                            fact_time=parse_fact_time(screening.value),
+                        )
+                        indexed.append((decision.key, screening.value))
+                        written += 1
+                        logger.info(
+                            "memory_upsert: user=%s op=%s key=%s type=%s session=%s",
+                            user_id, decision.op, decision.key,
+                            decision.memory_type, session_id,
+                        )
+                        durable_sync_needed = True
+                    elif decision.op == "DELETE":
+                        if not decision.key:
+                            continue
+                        removed = self.store.delete_profile_key(
+                            user_id, decision.key,
+                        )
+                        if removed:
+                            if self._memory_retriever is not None:
+                                self._memory_retriever.drop_keys(
+                                    user_id, [decision.key],
+                                )
+                            logger.info(
+                                "memory_retire: user=%s key=%s session=%s",
+                                user_id, decision.key, session_id,
+                            )
+                            durable_sync_needed = True
+
+                if indexed and self._memory_retriever is not None:
+                    try:
+                        self._memory_retriever.index_keys(user_id, indexed)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "memory_index: failed user=%s reason=%s", user_id, exc,
+                        )
+        except Exception as exc:
+            logger.warning(
+                "memory_extraction_failed: user=%s session=%s reason=%s:%s",
+                user_id, session_id, type(exc).__name__, exc, exc_info=True,
+            )
+
+        # Memory evolution is now a low-frequency janitor, not a per-turn pass.
+        try:
+            if self._evolution_due(user_id):
+                report = self._evolution.evolve(user_id)
+                if report.total_before != report.total_after:
+                    logger.info(
+                        "memory_evolved: user=%s %s", user_id, str(report),
+                    )
+                if (
+                    report.conflicts_resolved
+                    or report.memories_consolidated
+                    or report.memories_forgotten
+                ):
                     durable_sync_needed = True
         except Exception as exc:
-            logger.warning("memory_extraction failed: %s", exc, exc_info=True)
-            pass  # Memory extraction is best-effort
+            logger.warning(
+                "memory_evolution_failed: user=%s reason=%s:%s",
+                user_id, type(exc).__name__, exc,
+            )
 
-        # Run memory evolution (conflict resolution, consolidation, forgetting)
-        try:
-            report = self._evolution.evolve(user_id)
-            if report.total_before != report.total_after:
-                logger.info(
-                    "memory_evolved: user=%s %s", user_id, str(report),
-                )
-            if (
-                report.conflicts_resolved
-                or report.memories_consolidated
-                or report.memories_forgotten
-            ):
-                durable_sync_needed = True
-        except Exception:
-            pass  # Evolution is best-effort
+        if durable_sync_needed:
+            try:
+                sync_memory_profile(user_id, self.store.get_profile(user_id))
+                logger.info("memory_durable_sync: user=%s ok", user_id)
+            except VaultWriteError as exc:
+                logger.warning("memory_durable_sync_failed: user=%s reason=%s", user_id, exc)
+
+        logger.info(
+            "memory_extract_done: user=%s session=%s written=%d rejected=%d elapsed_ms=%.0f",
+            user_id, session_id, written, screened_out,
+            (time.time() - started) * 1000,
+        )
 
         if durable_sync_needed:
             try:

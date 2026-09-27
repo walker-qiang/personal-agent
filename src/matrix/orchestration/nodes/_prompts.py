@@ -318,6 +318,31 @@ Agent 回答: {answer}
 只返回 JSON, 不要其他文字."""
 
 
+# ── P4: Success playbook extraction prompt ────────────────────────────────
+#
+# Failures were the only thing the agent learned from. Recording what *worked*
+# turns the lesson store into a reusable playbook instead of a list of
+# mistakes.
+
+PLAYBOOK_EXTRACTION_PROMPT = """你是一个策略提取器. 从一次成功的 Agent 回答中提取可复用的做法.
+
+用户任务: {question}
+Agent 回答: {answer}
+
+提取一条简洁的策略 (max 2 句话), 帮助未来的 Agent 在遇到类似任务时直接复用这个做法.
+只提取真正可复用、与任务类型相关的做法；如果这只是一次性的问答, 返回空的 lesson_text.
+
+返回 JSON:
+{{
+  "task_pattern": "任务的关键词摘要 (10-30字, 用于匹配相似任务)",
+  "failure_type": "策略类型: reusable_strategy | tool_sequence | answer_format | verification_step",
+  "lesson_text": "策略正文 (自然语言, LLM 可读)；无可用策略时留空字符串",
+  "severity": "low | medium | high"
+}}
+
+只返回 JSON, 不要其他文字."""
+
+
 # ── Goal-driven Evaluator prompt ──────────────────────────────────────────────
 
 EVALUATOR_PROMPT = """你是一个任务完成度评估器。你的唯一工作是判断：当前收集的工具结果是否已经足够回答用户的问题。

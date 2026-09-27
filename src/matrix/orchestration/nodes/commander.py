@@ -45,6 +45,7 @@ from ._helpers import (
     MAX_PLAN_STEPS,
     MAX_REACT_ITERATIONS,
     MAX_SUBTASKS,
+    PLAYBOOK_EXTRACTION_PROMPT,
     PREFLECT_PROMPT,
     REFLECTION_PROMPT,
     REFLEXION_PROMPT,
@@ -957,6 +958,8 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         + [str(issue).strip() for issue in review_issues if str(issue).strip()]
     ))
     if not issues:
+        # ── P4: no problems found — record what worked as a reusable playbook
+        _extract_and_store_playbook(cfg, llm, user_msg, answer)
         return {}
 
     # ── P3: Extract cross-session lesson from failure ──────────────────
@@ -1024,6 +1027,69 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
         logger.warning("reflection_node revision failed: %s", type(e).__name__)
 
     return {}
+
+
+def _extract_and_store_playbook(
+    cfg: dict[str, Any],
+    llm: Any,
+    user_msg: str,
+    answer: str,
+) -> None:
+    """P4: Extract a reusable strategy from a *successful* answer.
+
+    The lesson store used to only learn from failures, so the agent knew what
+    to avoid but never what to repeat. This mirrors
+    ``_extract_and_store_lesson`` for the success path and writes with
+    ``kind="success"``. Best-effort, same as the failure path.
+    """
+    lesson_store = cfg.get("lesson_store")
+    if lesson_store is None:
+        return
+    if not answer or len(answer) < 40:
+        return  # Too short to contain a reusable strategy
+
+    try:
+        lesson_data = llm.complete_json(
+            PLAYBOOK_EXTRACTION_PROMPT.format(
+                question=user_msg[:500],
+                answer=answer[:1000],
+            ),
+            [{"role": "user", "content": "Extract the strategy."}],
+            temperature=0.0,
+        )
+        if not isinstance(lesson_data, dict):
+            return
+
+        lesson_text = str(lesson_data.get("lesson_text", "")).strip()
+        if not lesson_text:
+            return  # The model judged this non-reusable
+
+        task_pattern = str(lesson_data.get("task_pattern", "")).strip()
+        strategy_type = str(lesson_data.get("failure_type", "reusable_strategy")).strip()
+        severity = str(lesson_data.get("severity", "medium")).strip()
+
+        plan = cfg.get("delegation_plan", [])
+        agent_id = ""
+        if plan:
+            current_step = cfg.get("current_step", 0)
+            if current_step < len(plan):
+                agent_id = plan[current_step].get("agent_id", "")
+
+        lesson_store.record_lesson(
+            task_pattern=task_pattern or user_msg[:100],
+            failure_type=strategy_type,
+            lesson_text=lesson_text,
+            agent_id=agent_id,
+            user_id=cfg.get("user_id", ""),
+            severity=severity,
+            kind="success",
+        )
+        logger.info(
+            "playbook_extracted: type=%s agent=%s pattern=%s",
+            strategy_type, agent_id, task_pattern[:50],
+        )
+    except (LLMError, json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+        logger.debug("playbook_extraction failed: %s", type(e).__name__)
 
 
 def _extract_and_store_lesson(

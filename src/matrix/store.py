@@ -7,12 +7,34 @@ on sessions and messages for data isolation.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 import threading
 import uuid
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Tokens safe to hand to FTS5 MATCH (drops operators that mean something else).
+_TOKEN_SAFE = re.compile(r"[\w\u4e00-\u9fff]+")
+
+
+def _snippet(content: str, match_expr: str, width: int = 120) -> str:
+    """Return a short window of ``content`` around the first match."""
+    tokens = match_expr.split()
+    text = content or ""
+    position = -1
+    for token in tokens:
+        position = text.lower().find(token.lower())
+        if position >= 0:
+            break
+    if position < 0:
+        return text[:width]
+    start = max(0, position - width // 3)
+    return ("..." if start > 0 else "") + text[start:start + width]
 
 
 _SCHEMA = """
@@ -55,9 +77,57 @@ CREATE TABLE IF NOT EXISTS user_profile (
     memory_type TEXT NOT NULL DEFAULT 'preference',
     created_at  REAL NOT NULL DEFAULT 0,
     updated_at  REAL NOT NULL,
+    source_session_id TEXT NOT NULL DEFAULT '',
+    source_quote      TEXT NOT NULL DEFAULT '',
+    confidence        REAL NOT NULL DEFAULT 0.0,
+    valid_from        REAL NOT NULL DEFAULT 0,
+    valid_to          REAL NOT NULL DEFAULT 0,
+    fact_time         REAL NOT NULL DEFAULT 0,
+    access_count      INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at  REAL NOT NULL DEFAULT 0,
+    scope             TEXT NOT NULL DEFAULT 'user',
+    scope_id          TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, key)
+);
+
+-- NOTE: idx_profile_valid is created in _migrate(), not here. On a database
+-- created before the temporal columns existed, CREATE TABLE IF NOT EXISTS is a
+-- no-op, so this index would reference a column that has not been added yet
+-- and abort startup with "no such column: valid_to".
+
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    user_id     TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    model       TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL,
     PRIMARY KEY (user_id, key)
 );
 """
+
+
+# Additive columns applied to pre-existing user_profile tables. Order matters
+# only in that each entry is independent; SQLite ALTER is O(1) per column.
+_PROFILE_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("memory_type", "TEXT NOT NULL DEFAULT 'preference'"),
+    ("created_at", "REAL NOT NULL DEFAULT 0"),
+    ("source_session_id", "TEXT NOT NULL DEFAULT ''"),
+    ("source_quote", "TEXT NOT NULL DEFAULT ''"),
+    ("confidence", "REAL NOT NULL DEFAULT 0.0"),
+    ("valid_from", "REAL NOT NULL DEFAULT 0"),
+    ("valid_to", "REAL NOT NULL DEFAULT 0"),
+    ("fact_time", "REAL NOT NULL DEFAULT 0"),
+    ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_accessed_at", "REAL NOT NULL DEFAULT 0"),
+    ("scope", "TEXT NOT NULL DEFAULT 'user'"),
+    ("scope_id", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Memory scopes. "user" facts follow the person across every conversation;
+# "session" facts belong to one conversation and must not leak into others.
+SCOPE_USER = "user"
+SCOPE_SESSION = "session"
 
 
 class SessionStore:
@@ -71,6 +141,8 @@ class SessionStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
+        self._fts_checked = False
+        self._fts_enabled = False
 
     # ---- Connection management ----
 
@@ -102,16 +174,18 @@ class SessionStore:
         if "user_id" not in msg_cols:
             self._conn.execute("ALTER TABLE messages ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
 
-        # user_profile: add memory_type and created_at if missing
+        # user_profile: additive columns for typed, sourced, time-aware memory
         prof_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(user_profile)").fetchall()]
-        if "memory_type" not in prof_cols:
-            self._conn.execute(
-                "ALTER TABLE user_profile ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'preference'"
-            )
-        if "created_at" not in prof_cols:
-            self._conn.execute(
-                "ALTER TABLE user_profile ADD COLUMN created_at REAL NOT NULL DEFAULT 0"
-            )
+        for column, definition in _PROFILE_COLUMN_MIGRATIONS:
+            if column not in prof_cols:
+                self._conn.execute(
+                    f"ALTER TABLE user_profile ADD COLUMN {column} {definition}"
+                )
+        # Only safe once the temporal columns above are guaranteed to exist.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profile_valid "
+            "ON user_profile(user_id, valid_to)"
+        )
 
         # sessions: add hidden column if missing
         if "hidden" not in cols:
@@ -611,6 +685,171 @@ class SessionStore:
             conn.commit()
             return cur.rowcount > 0
 
+    # ---- Episodic recall: cross-session search over conversation history ----
+
+    def _ensure_fts(self) -> bool:
+        """Create the FTS index over messages once, then backfill it.
+
+        Tries the ``trigram`` tokenizer first: FTS5's default unicode61 treats
+        a whole CJK run as a single token, so "研究茅台" would never match
+        "茅台". Trigram splits by character triple, which works for Chinese
+        without a dictionary. Falls back to a plain LIKE scan if FTS5 is
+        unavailable — slower, but the feature still exists.
+        """
+        if self._fts_checked:
+            return self._fts_enabled
+        self._fts_checked = True
+        conn = self._get_conn()
+        for tokenizer in ("trigram", "unicode61"):
+            try:
+                conn.executescript(
+                    f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    session_id UNINDEXED, role UNINDEXED, content,
+    user_id UNINDEXED, created_at UNINDEXED,
+    tokenize='{tokenizer}'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, session_id, role, content, user_id, created_at)
+    VALUES (new.id, new.session_id, new.role, new.content, new.user_id, new.created_at);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+END;
+"""
+                )
+                conn.execute(
+                    "INSERT INTO messages_fts(rowid, session_id, role, content, "
+                    "user_id, created_at) "
+                    "SELECT id, session_id, role, content, user_id, created_at "
+                    "FROM messages WHERE id NOT IN (SELECT rowid FROM messages_fts)"
+                )
+                conn.commit()
+                self._fts_enabled = True
+                logger.info("store: episodic FTS ready tokenizer=%s", tokenizer)
+                return True
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "store: FTS unavailable (tokenizer=%s): %s", tokenizer, exc,
+                )
+                break
+        self._fts_enabled = False
+        return False
+
+    def search_conversations(
+        self,
+        user_id: str,
+        query: str,
+        limit: int = 10,
+        exclude_session_id: str = "",
+        time_from: float = 0.0,
+        time_to: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Recall past conversation turns across sessions (episodic memory).
+
+        Returns ``[{session_id, title, role, content, created_at, snippet}]``
+        ordered by recency. Used for "上次我们聊到哪" style questions that the
+        session-scoped history alone cannot answer.
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+        # FTS5 MATCH needs a bare query; keep only safe tokens.
+        match_expr = " ".join(_TOKEN_SAFE.findall(query))[:200].strip()
+        if not match_expr:
+            return []
+
+        time_filter = ""
+        params: list[Any] = [user_id]
+        if time_from:
+            time_filter += " AND m.created_at >= ?"
+            params.append(time_from)
+        if time_to:
+            time_filter += " AND m.created_at <= ?"
+            params.append(time_to)
+
+        # The trigram tokenizer cannot match queries shorter than 3 characters,
+        # so short CJK tokens ("茅台") need the LIKE path as a supplement.
+        needs_like = any(
+            re.search(r"[\u4e00-\u9fff]", token) and len(token) < 3
+            for token in match_expr.split()
+        )
+
+        with self._lock:
+            conn = self._get_conn()
+            rows: list[tuple] = []
+            seen: set[int] = set()
+            if self._ensure_fts():
+                sql = (
+                    "SELECT m.id, m.session_id, m.role, m.content, m.created_at, "
+                    "       COALESCE(s.title, '') AS title "
+                    "FROM messages_fts f "
+                    "JOIN messages m ON m.id = f.rowid "
+                    "LEFT JOIN sessions s ON s.id = m.session_id "
+                    "WHERE f.user_id = ? AND messages_fts MATCH ?"
+                    + time_filter +
+                    " ORDER BY m.created_at DESC LIMIT ?"
+                )
+                try:
+                    for row in conn.execute(sql, (*params, match_expr, limit)):
+                        if row[0] not in seen:
+                            seen.add(row[0])
+                            rows.append(row)
+                except sqlite3.Error as exc:
+                    logger.warning("store: FTS query failed, using LIKE: %s", exc)
+                    needs_like = True
+
+            if not self._fts_enabled or (needs_like and len(rows) < limit):
+                for row in self._search_conversations_like(
+                    conn, user_id, match_expr, limit, time_filter, params,
+                ):
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        rows.append(row)
+
+        rows.sort(key=lambda r: r[4], reverse=True)
+        results: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            _id, session_id, role, content, created_at, title = row
+            if exclude_session_id and session_id == exclude_session_id:
+                continue
+            results.append({
+                "session_id": session_id,
+                "title": title,
+                "role": role,
+                "content": content,
+                "created_at": created_at,
+                "snippet": _snippet(content, match_expr),
+            })
+        return results
+
+    @staticmethod
+    def _search_conversations_like(
+        conn: sqlite3.Connection,
+        user_id: str,
+        match_expr: str,
+        limit: int,
+        time_filter: str,
+        params: list[Any],
+    ) -> list[tuple]:
+        """LIKE fallback when FTS5 is unavailable."""
+        tokens = match_expr.split()
+        if not tokens:
+            return []
+        clauses = " AND ".join(["m.content LIKE ?"] * len(tokens))
+        like_params = [f"%{t}%" for t in tokens]
+        sql = (
+            "SELECT m.id, m.session_id, m.role, m.content, m.created_at, "
+            "       COALESCE(s.title, '') AS title "
+            "FROM messages m "
+            "LEFT JOIN sessions s ON s.id = m.session_id "
+            "WHERE m.user_id = ? AND (" + clauses + ")" + time_filter +
+            " ORDER BY m.created_at DESC LIMIT ?"
+        )
+        return conn.execute(
+            sql, (*params, *like_params, limit),
+        ).fetchall()
+
     def prune(self, max_age_days: int = 30) -> int:
         """Delete sessions older than max_age_days. Returns count deleted."""
         cutoff = time.time() - max_age_days * 86400
@@ -635,23 +874,45 @@ class SessionStore:
             return cur.rowcount
 
     def get_profile(self, user_id: str) -> dict[str, str]:
-        with self._lock:
-            rows = self._get_conn().execute(
-                "SELECT key, value FROM user_profile WHERE user_id=? ORDER BY updated_at DESC",
-                (user_id,),
-            ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        """Return active user-scoped memories as a flat {key: value} map.
 
-    def get_all_memories(self, user_id: str) -> list[dict]:
-        """Return all memories with full metadata for evolution processing.
-
-        Returns list of dicts with keys: key, value, memory_type, created_at, updated_at
+        Only ``scope='user'`` entries are returned: this feeds the vault sync,
+        and session-local facts must never be persisted as durable truth.
         """
         with self._lock:
             rows = self._get_conn().execute(
-                "SELECT key, value, memory_type, created_at, updated_at "
-                "FROM user_profile WHERE user_id=? ORDER BY updated_at DESC",
-                (user_id,),
+                "SELECT key, value FROM user_profile "
+                "WHERE user_id=? AND valid_to=0 AND scope=? "
+                "ORDER BY updated_at DESC",
+                (user_id, SCOPE_USER),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def get_all_memories(
+        self, user_id: str, include_retired: bool = False, scope: str = SCOPE_USER,
+    ) -> list[dict]:
+        """Return memories with full metadata for evolution and retrieval.
+
+        Returns list of dicts with keys: key, value, memory_type, created_at,
+        updated_at, source_session_id, source_quote, confidence, valid_from,
+        valid_to, fact_time, access_count, last_accessed_at, scope, scope_id.
+
+        Args:
+            include_retired: also return entries with a ``valid_to`` tombstone.
+            scope: ``"user"`` (default) or ``"session"``. Session-scoped facts
+                stay inside the conversation that produced them.
+        """
+        where = "user_id=? AND scope=?"
+        if not include_retired:
+            where += " AND valid_to=0"
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value, memory_type, created_at, updated_at, "
+                "       source_session_id, source_quote, confidence, "
+                "       valid_from, valid_to, fact_time, access_count, "
+                "       last_accessed_at, scope, scope_id "
+                f"FROM user_profile WHERE {where} ORDER BY updated_at DESC",
+                (user_id, scope),
             ).fetchall()
         return [
             {
@@ -660,38 +921,115 @@ class SessionStore:
                 "memory_type": r[2],
                 "created_at": r[3],
                 "updated_at": r[4],
+                "source_session_id": r[5],
+                "source_quote": r[6],
+                "confidence": r[7],
+                "valid_from": r[8],
+                "valid_to": r[9],
+                "fact_time": r[10],
+                "access_count": r[11],
+                "last_accessed_at": r[12],
+                "scope": r[13],
+                "scope_id": r[14],
             }
             for r in rows
         ]
 
-    def count_memories(self, user_id: str) -> int:
-        """Return total number of memories for a user."""
+    def get_session_memories(
+        self, user_id: str, session_id: str, include_retired: bool = False,
+    ) -> list[dict]:
+        """Return memories scoped to a single conversation."""
+        if not session_id:
+            return []
+        where = "user_id=? AND scope=? AND scope_id=?"
+        if not include_retired:
+            where += " AND valid_to=0"
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value, memory_type, created_at, updated_at, "
+                "       source_session_id, source_quote, confidence, "
+                "       valid_from, valid_to, fact_time, access_count, "
+                "       last_accessed_at, scope, scope_id "
+                f"FROM user_profile WHERE {where} ORDER BY updated_at DESC",
+                (user_id, SCOPE_SESSION, session_id),
+            ).fetchall()
+        return [
+            {
+                "key": r[0], "value": r[1], "memory_type": r[2],
+                "created_at": r[3], "updated_at": r[4],
+                "source_session_id": r[5], "source_quote": r[6],
+                "confidence": r[7], "valid_from": r[8], "valid_to": r[9],
+                "fact_time": r[10], "access_count": r[11],
+                "last_accessed_at": r[12], "scope": r[13], "scope_id": r[14],
+            }
+            for r in rows
+        ]
+
+    def count_memories(
+        self, user_id: str, include_retired: bool = False, scope: str = SCOPE_USER,
+    ) -> int:
+        """Return number of active memories for a user in the given scope."""
+        where = "user_id=? AND scope=?"
+        if not include_retired:
+            where += " AND valid_to=0"
         with self._lock:
             row = self._get_conn().execute(
-                "SELECT COUNT(*) FROM user_profile WHERE user_id=?",
-                (user_id,),
+                f"SELECT COUNT(*) FROM user_profile WHERE {where}",
+                (user_id, scope),
             ).fetchone()
         return row[0] if row else 0
 
-    def get_policies(self, user_id: str) -> dict[str, str]:
-        """Return policy-type memories (hard rules, highest priority)."""
+    def get_policies(
+        self, user_id: str, scope: str = SCOPE_USER, scope_id: str = "",
+    ) -> dict[str, str]:
+        """Return active policy-type memories (hard rules, highest priority)."""
+        where = "user_id=? AND memory_type='policy' AND valid_to=0 AND scope=?"
+        params: list[Any] = [user_id, scope]
+        if scope == SCOPE_SESSION:
+            where += " AND scope_id=?"
+            params.append(scope_id)
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT key, value FROM user_profile "
-                "WHERE user_id=? AND memory_type='policy' ORDER BY updated_at DESC",
-                (user_id,),
+                f"WHERE {where} ORDER BY updated_at DESC",
+                params,
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
-    def get_preferences(self, user_id: str) -> dict[str, str]:
-        """Return preference-type memories (user preferences, lower priority)."""
+    def get_preferences(
+        self, user_id: str, scope: str = SCOPE_USER, scope_id: str = "",
+    ) -> dict[str, str]:
+        """Return active preference-type memories (softer, lower priority)."""
+        where = "user_id=? AND memory_type='preference' AND valid_to=0 AND scope=?"
+        params: list[Any] = [user_id, scope]
+        if scope == SCOPE_SESSION:
+            where += " AND scope_id=?"
+            params.append(scope_id)
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT key, value FROM user_profile "
-                "WHERE user_id=? AND memory_type='preference' ORDER BY updated_at DESC",
-                (user_id,),
+                f"WHERE {where} ORDER BY updated_at DESC",
+                params,
             ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def mark_accessed(self, user_id: str, keys: list[str]) -> None:
+        """Bump access counters for memories that were injected into a prompt.
+
+        Feeds access-aware forgetting (Phase 3): a memory that keeps getting
+        retrieved stays hot regardless of how old it is.
+        """
+        if not keys:
+            return
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            conn.executemany(
+                "UPDATE user_profile SET access_count=access_count+1, last_accessed_at=? "
+                "WHERE user_id=? AND key=?",
+                [(now, user_id, key) for key in keys],
+            )
+            conn.commit()
 
     def get_profile_formatted(self, user_id: str) -> str:
         """Return profile as formatted text for system prompt injection.
@@ -742,20 +1080,30 @@ class SessionStore:
         """
         with self._lock:
             rows = self._get_conn().execute(
-                "SELECT key, value, updated_at FROM user_profile "
-                "WHERE user_id=? AND memory_type=? ORDER BY updated_at DESC",
+                "SELECT key, value, updated_at, fact_time, access_count "
+                "FROM user_profile "
+                "WHERE user_id=? AND memory_type=? AND valid_to=0 "
+                "ORDER BY updated_at DESC",
                 (user_id, memory_type),
             ).fetchall()
 
         results: list[tuple[str, str, float, float]] = []
-        for key, value, updated_at in rows:
+        for key, value, updated_at, fact_time, access_count in rows:
             age = now - updated_at
             if memory_type == "policy":
                 weight = 1.0  # Policies never decay
+            elif fact_time > 0:
+                # A dated fact ("research happened on 2026-08-16") is about a
+                # point in time, not a standing preference. Time does not make
+                # it less true, so it is exempt from decay.
+                weight = 1.0
             else:
                 weight = 2.0 ** (-age / self.MEMORY_HALF_LIFE)
                 if weight < 0.0625:  # 4 half-lives = 120 days
                     continue  # Exclude very stale memories
+                # Access-aware boost: repeatedly retrieved memories stay hot.
+                weight *= 1.0 + 0.05 * min(int(access_count or 0), 10)
+                weight = min(weight, 1.5)
             results.append((key, value, round(weight, 3), updated_at))
 
         results.sort(key=lambda x: x[2], reverse=True)
@@ -770,64 +1118,182 @@ class SessionStore:
             ).fetchone()
         return row[0] if row else 0.0
 
-    def upsert_profile(self, user_id: str, key: str, value: str,
-                       memory_type: str = "preference") -> None:
-        """Insert or update a profile entry with memory type."""
+    def upsert_profile(
+        self, user_id: str, key: str, value: str,
+        memory_type: str = "preference",
+        *,
+        source_session_id: str = "",
+        source_quote: str = "",
+        confidence: float = 0.0,
+        fact_time: float = 0.0,
+        scope: str = SCOPE_USER,
+        scope_id: str = "",
+    ) -> None:
+        """Insert or update a profile entry.
+
+        Provenance fields are only overwritten when the caller supplies a
+        value, so a legacy caller that omits them cannot erase an existing
+        audit trail. Re-writing a retired key clears its ``valid_to``
+        tombstone — a fact that comes back is restored, not left invisible.
+        """
         now = time.time()
         with self._lock:
+            conn = self._get_conn()
             # Get existing created_at so we don't overwrite it
-            existing = self._get_conn().execute(
+            existing = conn.execute(
                 "SELECT created_at FROM user_profile WHERE user_id=? AND key=?",
                 (user_id, key),
             ).fetchone()
             created_at = existing[0] if existing and existing[0] > 0 else now
 
-            self._get_conn().execute(
-                "INSERT INTO user_profile (user_id, key, value, memory_type, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
+            conn.execute(
+                "INSERT INTO user_profile ("
+                "  user_id, key, value, memory_type, created_at, updated_at,"
+                "  source_session_id, source_quote, confidence,"
+                "  valid_from, valid_to, fact_time, scope, scope_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?) "
                 "ON CONFLICT(user_id, key) DO UPDATE SET "
-                "value=excluded.value, memory_type=excluded.memory_type, updated_at=excluded.updated_at",
-                (user_id, key, value, memory_type, created_at, now),
+                "  value=excluded.value, "
+                "  memory_type=excluded.memory_type, "
+                "  updated_at=excluded.updated_at, "
+                "  source_session_id=CASE WHEN excluded.source_session_id <> '' "
+                "      THEN excluded.source_session_id ELSE user_profile.source_session_id END, "
+                "  source_quote=CASE WHEN excluded.source_quote <> '' "
+                "      THEN excluded.source_quote ELSE user_profile.source_quote END, "
+                "  confidence=CASE WHEN excluded.confidence > 0 "
+                "      THEN excluded.confidence ELSE user_profile.confidence END, "
+                "  fact_time=CASE WHEN excluded.fact_time > 0 "
+                "      THEN excluded.fact_time ELSE user_profile.fact_time END, "
+                "  valid_from=CASE WHEN user_profile.valid_from > 0 "
+                "      THEN user_profile.valid_from ELSE excluded.valid_from END, "
+                "  valid_to=0",
+                (
+                    user_id, key, value, memory_type, created_at, now,
+                    source_session_id, source_quote, confidence,
+                    now, fact_time, scope, scope_id,
+                ),
             )
-            self._get_conn().commit()
+            conn.commit()
 
-    def delete_profile_key(self, user_id: str, key: str) -> bool:
-        """Delete a profile entry. Returns True if deleted."""
+    def delete_profile_key(self, user_id: str, key: str, hard: bool = False) -> bool:
+        """Retire (default) or physically delete a profile entry.
+
+        Soft retirement sets ``valid_to`` so history survives for temporal
+        queries; ``hard=True`` is reserved for explicit user deletion requests.
+        Returns True when a row was affected.
+        """
         with self._lock:
-            cur = self._get_conn().execute(
-                "DELETE FROM user_profile WHERE user_id=? AND key=?",
-                (user_id, key),
-            )
-            self._get_conn().commit()
+            conn = self._get_conn()
+            if hard:
+                cur = conn.execute(
+                    "DELETE FROM user_profile WHERE user_id=? AND key=?",
+                    (user_id, key),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE user_profile SET valid_to=? "
+                    "WHERE user_id=? AND key=? AND valid_to=0",
+                    (time.time(), user_id, key),
+                )
+            conn.commit()
             return cur.rowcount > 0
 
+    def _get_memory_types(self, user_id: str) -> dict[str, str]:
+        """Return {key: memory_type} for a user, used to preserve types on re-sync."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, memory_type FROM user_profile WHERE user_id=?",
+                (user_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
     def sync_profile_from_file(self, user_id: str, json_path: str) -> int:
-        """Load profile from JSON file into SQLite. Returns count of entries synced."""
+        """Load profile from JSON file into SQLite. Returns count of entries synced.
+
+        Two value shapes are accepted::
+
+            {"语言": "中文"}                                         # legacy flat
+            {"不买亏损股": {"value": "...", "memory_type": "policy"}}  # typed
+
+        A legacy flat entry never downgrades an existing ``policy`` to
+        ``preference``: when the incoming record carries no explicit
+        ``memory_type``, the type already stored in SQLite wins. This is the
+        fix for B-1 — before, every vault re-sync silently turned hard rules
+        into decaying preferences.
+        """
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "profile_sync: read failed path=%s reason=%s", json_path, exc,
+            )
             return 0
         if not isinstance(data, dict):
+            logger.warning(
+                "profile_sync: invalid shape path=%s type=%s",
+                json_path, type(data).__name__,
+            )
             return 0
+
+        existing_types = self._get_memory_types(user_id)
         count = 0
         for key, value in data.items():
-            if isinstance(value, str) and key.strip() and value.strip():
-                self.upsert_profile(user_id, key.strip(), value.strip())
-                count += 1
+            if not isinstance(key, str) or not key.strip():
+                continue
+            mem_type = ""
+            if isinstance(value, dict):
+                raw = value.get("value")
+                if not isinstance(raw, str):
+                    continue
+                value_text = raw.strip()
+                mem_type = str(value.get("memory_type", "")).strip()
+            elif isinstance(value, str):
+                value_text = value.strip()
+            else:
+                continue
+            if not value_text:
+                continue
+            key = key.strip()
+            if mem_type not in ("preference", "policy"):
+                mem_type = existing_types.get(key) or "preference"
+            self.upsert_profile(user_id, key, value_text, memory_type=mem_type)
+            count += 1
+
+        logger.info(
+            "profile_sync: loaded path=%s user=%s entries=%d (existing=%d)",
+            json_path, user_id, count, len(existing_types),
+        )
         return count
 
-    def sync_profile_to_file(self, user_id: str, json_path: str) -> bool:
-        """Export SQLite profile to JSON file. Returns True on success."""
+    def sync_profile_to_file(
+        self, user_id: str, json_path: str, typed: bool = False,
+    ) -> bool:
+        """Export SQLite profile to JSON file. Returns True on success.
+
+        Args:
+            typed: when True, emit ``{"key": {"value": ..., "memory_type": ...}}``
+                so a round-trip preserves policy/preference. Default keeps the
+                legacy flat map for personal-os compatibility.
+        """
         profile = self.get_profile(user_id)
         if not profile:
             return False
+        if typed:
+            types = self._get_memory_types(user_id)
+            profile = {
+                key: {"value": value, "memory_type": types.get(key, "preference")}
+                for key, value in profile.items()
+            }
         try:
             Path(json_path).parent.mkdir(parents=True, exist_ok=True)
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(profile, f, ensure_ascii=False, indent=2)
             return True
-        except OSError:
+        except OSError as exc:
+            logger.warning(
+                "profile_sync: export failed path=%s reason=%s", json_path, exc,
+            )
             return False
 
 

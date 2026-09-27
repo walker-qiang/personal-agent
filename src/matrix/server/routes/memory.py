@@ -4,11 +4,13 @@ Exposes user memories (preferences/policies), cross-session lessons,
 and memory evolution triggers for API clients.
 
 Endpoints:
-  GET    /memory/list            — list all memories with metadata
+  GET    /memory/list            — list all memories with provenance metadata
   POST   /memory                 — create or update a memory
-  DELETE /memory/{key}           — delete a memory by key
+  DELETE /memory/{key}           — retire (or hard-delete) a memory by key
   POST   /memory/evolve          — manually trigger memory evolution
-  GET    /memory/lessons         — list all lessons
+  POST   /memory/recall          — cross-session conversation recall
+  GET    /memory/stats           — store + retriever + worker health
+  GET    /memory/lessons         — list all lessons (failure + success)
   DELETE /memory/lessons/{id}    — delete a lesson by id
 """
 
@@ -50,16 +52,18 @@ def _get_lesson_store(request: Request):
 
 
 @router.get("/memory/list")
-async def list_memories(request: Request):
+async def list_memories(request: Request, include_retired: bool = False):
     """List all memories for the authenticated user.
 
-    Returns:
-        {"memories": [{key, value, memory_type, created_at, updated_at}, ...],
-         "count": int, "max": 80}
+    Returns full provenance so a user can audit and trace any single entry:
+    source session, source quote, confidence, validity window, access count.
+
+    Query:
+        include_retired — also return entries with a ``valid_to`` tombstone.
     """
     store = _get_store(request)
     user_id = _get_user_id(request)
-    memories = store.get_all_memories(user_id)
+    memories = store.get_all_memories(user_id, include_retired=include_retired)
     count = store.count_memories(user_id)
     return {
         "memories": memories,
@@ -81,29 +85,64 @@ async def upsert_memory(request: Request):
     key = str(payload.get("key", "")).strip()
     value = str(payload.get("value", "")).strip()
     memory_type = str(payload.get("memory_type", "preference")).strip()
+    scope = str(payload.get("scope", "user")).strip()
+    scope_id = str(payload.get("scope_id", "")).strip()
 
     if not key or not value:
         raise HTTPException(status_code=400, detail="key and value are required")
     if memory_type not in ("preference", "policy"):
         raise HTTPException(status_code=400, detail="memory_type must be 'preference' or 'policy'")
+    if scope not in ("user", "session"):
+        raise HTTPException(status_code=400, detail="scope must be 'user' or 'session'")
+    if scope == "session" and not scope_id:
+        raise HTTPException(status_code=400, detail="scope_id is required when scope='session'")
 
-    profile = store.get_profile(user_id)
-    profile[key] = value
-    try:
-        sync_memory_profile(user_id, profile)
-    except VaultWriteError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    store.upsert_profile(user_id, key, value, memory_type=memory_type)
+    # Screen before persisting: this text will be replayed into future prompts.
+    chat = request.app.state.chat
+    guard = getattr(chat, "_memory_safety", None)
+    if guard is not None:
+        screening = guard.screen(key, value)
+        if not screening.allowed:
+            raise HTTPException(
+                status_code=422, detail=f"记忆内容未通过安全校验：{screening.reason}",
+            )
+        value = screening.value
 
-    logger.info("memory upsert: user=%s key=%s type=%s", user_id, key, memory_type)
-    return {"ok": True, "key": key, "memory_type": memory_type}
+    store.upsert_profile(
+        user_id, key, value, memory_type=memory_type,
+        scope=scope, scope_id=scope_id,
+    )
+
+    if scope == "user":
+        # Only durable user facts are mirrored to the vault.
+        profile = store.get_profile(user_id)
+        profile[key] = value
+        try:
+            sync_memory_profile(user_id, profile)
+        except VaultWriteError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    retriever = getattr(chat, "_memory_retriever", None)
+    if retriever is not None and scope == "user":
+        try:
+            retriever.index_keys(user_id, [(key, value)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory upsert: index failed: %s", exc)
+
+    logger.info(
+        "memory upsert: user=%s key=%s type=%s scope=%s",
+        user_id, key, memory_type, scope,
+    )
+    return {"ok": True, "key": key, "memory_type": memory_type, "scope": scope}
 
 
 @router.delete("/memory/{key:path}")
 async def delete_memory(request: Request, key: str):
-    """Delete a memory entry by key.
+    """Retire (default) or hard-delete a memory entry by key.
 
     For policy-type memories, requires ?confirm=true query param.
+    Add ?hard=true to physically remove the row instead of setting a
+    ``valid_to`` tombstone — hard deletion loses temporal history.
     """
     store = _get_store(request)
     user_id = _get_user_id(request)
@@ -128,10 +167,20 @@ async def delete_memory(request: Request, key: str):
         sync_memory_profile(user_id, profile)
     except VaultWriteError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    store.delete_profile_key(user_id, key)
+    hard = request.query_params.get("hard", "").lower() == "true"
+    store.delete_profile_key(user_id, key, hard=hard)
 
-    logger.info("memory delete: user=%s key=%s", user_id, key)
-    return {"ok": True, "key": key}
+    # Keep the retrieval index in step with the store.
+    chat = request.app.state.chat
+    retriever = getattr(chat, "_memory_retriever", None)
+    if retriever is not None:
+        try:
+            retriever.drop_keys(user_id, [key])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory delete: index drop failed: %s", exc)
+
+    logger.info("memory delete: user=%s key=%s hard=%s", user_id, key, hard)
+    return {"ok": True, "key": key, "hard": hard}
 
 
 # ── Memory Evolution ──────────────────────────────────────────────────────
@@ -168,6 +217,58 @@ async def trigger_evolution(request: Request):
     except Exception as exc:
         logger.error("memory evolve failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"evolution failed: {exc}")
+
+
+# ── Episodic recall & health ──────────────────────────────────────────────
+
+
+@router.post("/memory/recall")
+async def recall_conversations(request: Request):
+    """Search past conversations across sessions (episodic memory).
+
+    Body: {"query": str, "limit": int = 10, "exclude_session_id": str = ""}
+
+    Returns matching turns with session id, title and a snippet, newest first.
+    """
+    store = _get_store(request)
+    user_id = _get_user_id(request)
+    payload = await request.json()
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    limit = int(payload.get("limit", 10))
+    limit = max(1, min(limit, 50))
+    exclude = str(payload.get("exclude_session_id", "")).strip()
+
+    hits = store.search_conversations(
+        user_id, query, limit=limit, exclude_session_id=exclude,
+    )
+    return {"ok": True, "query": query, "count": len(hits), "results": hits}
+
+
+@router.get("/memory/stats")
+async def memory_stats(request: Request):
+    """Memory subsystem health: counts, retriever mode, write worker state."""
+    chat = request.app.state.chat
+    store = _get_store(request)
+    user_id = _get_user_id(request)
+    retriever = getattr(chat, "_memory_retriever", None)
+    worker = getattr(chat, "_memory_writer", None)
+    lesson_store = _get_lesson_store(request)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "active_memories": store.count_memories(user_id),
+        "retired_memories": store.count_memories(user_id, include_retired=True)
+        - store.count_memories(user_id),
+        "retriever": {
+            "available": retriever is not None,
+            "semantic": bool(retriever and retriever.semantic_enabled),
+        },
+        "writer": worker.snapshot() if worker is not None else None,
+        "lessons": lesson_store.count_by_kind(user_id=user_id),
+        "max_memories": 80,
+    }
 
 
 # ── Lessons ───────────────────────────────────────────────────────────────
