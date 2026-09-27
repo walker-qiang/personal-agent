@@ -38,3 +38,6 @@ config/mcp_servers.json
 
 # Browser state (contains cookies/session data)
 var/mcp/browser_state.json
+
+# Session-local agent notes (per-machine working memory, not project source)
+.workbuddy/
