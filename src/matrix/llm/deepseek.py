@@ -32,6 +32,70 @@ logger = logging.getLogger("matrix.llm.deepseek")
 # Maximum characters per message before truncation
 _DEFAULT_MAX_MESSAGE_CHARS = 16000
 
+# Placeholder fed to the model when a tool call produced no output at all.
+_NO_TOOL_OUTPUT = '{"error": "tool produced no output"}'
+
+
+def _ensure_tool_call_outputs(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Guarantee every assistant tool_call has a matching tool output.
+
+    The Responses API rejects the whole request with 400
+    ``No tool output found for tool call <id>`` when an assistant message
+    carries ``tool_calls`` whose results were never appended — a tool that
+    raised, was skipped, or whose output was dropped by context truncation.
+
+    Dropping the orphaned call would silently rewrite history, so we inject a
+    neutral placeholder instead and log it: the request stays valid, and the
+    warning points at the upstream gap that produced it.
+    """
+    pending: list[tuple[int, list[str]]] = []
+    satisfied: set[str] = set()
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            ids = [
+                str(tc.get("id", ""))
+                for tc in msg["tool_calls"]
+                if tc.get("id")
+            ]
+            if ids:
+                pending.append((i, ids))
+        elif msg.get("role") == "tool":
+            call_id = str(msg.get("tool_call_id", ""))
+            if call_id:
+                satisfied.add(call_id)
+
+    missing_by_index: dict[int, list[str]] = {}
+    for i, ids in pending:
+        gaps = [cid for cid in ids if cid not in satisfied]
+        if gaps:
+            missing_by_index[i] = gaps
+
+    if not missing_by_index:
+        return messages
+
+    total = sum(len(v) for v in missing_by_index.values())
+    logger.warning(
+        "llm.deepseek: %d tool call(s) missing output; injecting placeholders "
+        "assistant_indexes=%s",
+        total, sorted(missing_by_index),
+    )
+
+    result = list(messages)
+    # Insert back-to-front so earlier indexes keep their positions.
+    for i in sorted(missing_by_index, reverse=True):
+        placeholders = [
+            {
+                "role": "tool",
+                "tool_call_id": cid,
+                "content": _NO_TOOL_OUTPUT,
+            }
+            for cid in missing_by_index[i]
+        ]
+        result[i + 1:i + 1] = placeholders
+    return result
+
 
 class DeepSeekClient:
     """LLM client for DeepSeek Responses API."""
@@ -99,6 +163,7 @@ class DeepSeekClient:
         - {role: "assistant", tool_calls: [...]} → {type: "function_call", ...} items
         - {role: "tool", tool_call_id, content} → {type: "function_call_output", ...}
         """
+        messages = _ensure_tool_call_outputs(messages)
         items: list[dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role", "")
@@ -228,7 +293,24 @@ class DeepSeekClient:
         data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
         result = self._parse_response(data)
         if not result.content:
-            raise LLMError("DeepSeek response message content is empty")
+            # Reasoning models can burn the whole max_output_tokens budget on
+            # hidden reasoning before emitting any message item, leaving the
+            # output with reasoning only. Surface that instead of a bare
+            # "empty" so callers know to raise the token budget.
+            details: list[str] = []
+            if data.get("status") == "incomplete":
+                reason = (data.get("incomplete_details") or {}).get("reason", "")
+                if reason:
+                    details.append(f"status=incomplete ({reason})")
+            kinds = {item.get("type", "?") for item in data.get("output", [])}
+            if kinds:
+                details.append(f"output types: {', '.join(sorted(kinds))}")
+            suffix = f"; {', '.join(details)}" if details else ""
+            raise LLMError(
+                "DeepSeek response message content is empty"
+                f" (max_output_tokens={payload.get('max_output_tokens')}{suffix});"
+                " increase max_tokens if a reasoning model spent the budget on reasoning"
+            )
         return result.content
 
     def complete_json(

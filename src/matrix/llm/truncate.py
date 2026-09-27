@@ -16,6 +16,9 @@ from typing import Any
 _CHINESE_CHAR = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 _OTHER_CHAR = re.compile(r"[^\u4e00-\u9fff\u3400-\u4dbf\s]")
 
+# Smallest suffix kept when the budget cannot fit any message.
+_MIN_RECENT_MESSAGES = 6
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count from character count.
@@ -76,15 +79,20 @@ def truncate_messages(
     if not messages:
         return []
 
-    budget = max_tokens - reserve_tokens - estimate_tokens(system_prompt)
-    if budget <= 0:
-        # Budget exhausted by system prompt. Walk backward to find the most
-        # recent non-tool message (user or assistant). If only tool messages
-        # exist, keep the last one — better than total context loss.
-        for msg in reversed(messages):
-            if msg.get("role") != "tool":
-                return [msg]
-        return [messages[-1]]
+    message_budget = max_tokens - reserve_tokens
+    if message_budget <= 0:
+        return _recent_window(messages)
+
+    # The system prompt is sent in full no matter what this function returns,
+    # so charging it entirely against the message budget only starves the
+    # conversation. A starved history loses tool results, which makes the model
+    # repeat the same call forever and makes strict tool APIs reject the
+    # request outright ("No tool output found for tool call"). Reserve at most
+    # half of the message budget for the system prompt.
+    budget = max(
+        message_budget - estimate_tokens(system_prompt),
+        message_budget // 2,
+    )
 
     result: list[dict[str, Any]] = []
     used = 0
@@ -127,7 +135,33 @@ def truncate_messages(
     # the preceding assistant message was dropped by the budget limit.
     result = _remove_orphan_tool_messages(result)
 
+    # A single surviving message means every tool result was dropped. The model
+    # then re-issues the same call, so prefer a short recent window that still
+    # carries the latest tool exchange.
+    if len(result) < 2 and len(messages) > 1:
+        return _recent_window(messages)
+
     return result
+
+
+def _recent_window(
+    messages: list[dict[str, Any]],
+    keep: int = _MIN_RECENT_MESSAGES,
+) -> list[dict[str, Any]]:
+    """Keep a recent, structurally valid suffix of the history.
+
+    Used when the budget is exhausted before any message is inspected.
+    Collapsing the history to a single message dropped every tool result,
+    which both destroyed the conversation and produced requests that strict
+    tool APIs reject. A short recent window keeps the latest tool exchange
+    intact instead.
+    """
+    window = list(messages[-keep:]) if keep > 0 else list(messages[-1:])
+    while window and window[0].get("role") == "tool":
+        window.pop(0)
+    if not window:
+        window = [messages[-1]]
+    return _remove_orphan_tool_messages(window)
 
 
 def _remove_orphan_tool_messages(
