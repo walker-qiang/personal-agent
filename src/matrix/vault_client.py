@@ -14,7 +14,10 @@ class VaultWriteError(RuntimeError):
     """Raised when personal-os rejects or cannot complete a Vault write."""
 
 
-def sync_memory_profile(user_id: str, profile: dict[str, str]) -> dict[str, Any]:
+def sync_memory_profile(
+    user_id: str, profile: dict[str, dict[str, str] | str],
+) -> dict[str, Any]:
+    """Persist a typed profile; personal-os still accepts legacy flat values."""
     encoded = urllib.parse.quote(user_id, safe="")
     return _request("PUT", f"/api/vault/memory/{encoded}", {"profile": profile})
 

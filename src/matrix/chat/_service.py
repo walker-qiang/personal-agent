@@ -2833,7 +2833,7 @@ class ChatService:
 
         if durable_sync_needed:
             try:
-                sync_memory_profile(user_id, self.store.get_profile(user_id))
+                sync_memory_profile(user_id, self.store.get_profile_for_vault(user_id))
                 logger.info("memory_durable_sync: user=%s ok", user_id)
             except VaultWriteError as exc:
                 logger.warning("memory_durable_sync_failed: user=%s reason=%s", user_id, exc)
@@ -2846,7 +2846,7 @@ class ChatService:
 
         if durable_sync_needed:
             try:
-                sync_memory_profile(user_id, self.store.get_profile(user_id))
+                sync_memory_profile(user_id, self.store.get_profile_for_vault(user_id))
             except VaultWriteError as exc:
                 logger.warning("memory durable sync failed: %s", exc)
 

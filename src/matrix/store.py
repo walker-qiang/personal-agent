@@ -888,6 +888,20 @@ END;
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def get_profile_for_vault(self, user_id: str) -> dict[str, dict[str, str]]:
+        """Return the typed durable profile used by the Vault wire contract."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT key, value, memory_type FROM user_profile "
+                "WHERE user_id=? AND valid_to=0 AND scope=? "
+                "ORDER BY updated_at DESC",
+                (user_id, SCOPE_USER),
+            ).fetchall()
+        return {
+            row[0]: {"value": row[1], "memory_type": row[2]}
+            for row in rows
+        }
+
     def get_all_memories(
         self, user_id: str, include_retired: bool = False, scope: str = SCOPE_USER,
     ) -> list[dict]:
@@ -1274,17 +1288,14 @@ END;
         Args:
             typed: when True, emit ``{"key": {"value": ..., "memory_type": ...}}``
                 so a round-trip preserves policy/preference. Default keeps the
-                legacy flat map for personal-os compatibility.
+                legacy flat map for callers that still need it.
         """
-        profile = self.get_profile(user_id)
+        profile = (
+            self.get_profile_for_vault(user_id)
+            if typed else self.get_profile(user_id)
+        )
         if not profile:
             return False
-        if typed:
-            types = self._get_memory_types(user_id)
-            profile = {
-                key: {"value": value, "memory_type": types.get(key, "preference")}
-                for key, value in profile.items()
-            }
         try:
             Path(json_path).parent.mkdir(parents=True, exist_ok=True)
             with open(json_path, "w", encoding="utf-8") as f:

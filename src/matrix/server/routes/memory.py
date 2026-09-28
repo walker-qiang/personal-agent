@@ -115,8 +115,8 @@ async def upsert_memory(request: Request):
 
     if scope == "user":
         # Only durable user facts are mirrored to the vault.
-        profile = store.get_profile(user_id)
-        profile[key] = value
+        profile = store.get_profile_for_vault(user_id)
+        profile[key] = {"value": value, "memory_type": memory_type}
         try:
             sync_memory_profile(user_id, profile)
         except VaultWriteError as exc:
@@ -161,7 +161,7 @@ async def delete_memory(request: Request, key: str):
 
     if mem is None:
         raise HTTPException(status_code=404, detail=f"memory key '{key}' not found")
-    profile = store.get_profile(user_id)
+    profile = store.get_profile_for_vault(user_id)
     profile.pop(key, None)
     try:
         sync_memory_profile(user_id, profile)

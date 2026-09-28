@@ -23,9 +23,13 @@ Phase 0–5 均已实现，905 → 911 项测试通过。新增模块：
 
 新增 API：`POST /memory/recall`、`GET /memory/stats`，`/memory/list` 返回完整 provenance。
 
-已知限制：vault 的 wire format 仍是扁平 KV（personal-os 侧未改），因此 policy 类型
-只能在 SQLite 侧保留、无法由 vault 反向下发；`sync_profile_to_file(typed=True)`
-为类型化导出预留了出口。
+Vault wire format 已升级为 typed profile：`personal-os` 写入
+`{"value": "...", "memory_type": "policy|preference"}`，同时兼容读取旧扁平 KV；
+Agent 回灌和删除/演化同步均保留类型。旧格式只会按 preference 解释，但不会覆盖
+SQLite 中已有的 policy。
+
+2026-09-28 验证：Agent memory focused tests 66 项通过，personal-os API/AssetStore
+测试通过，隔离跨仓 E2E 通过；旧 flat payload 经 API 接收后会规范化为 typed JSON。
 
 ---
 
