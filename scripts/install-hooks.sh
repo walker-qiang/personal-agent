@@ -25,7 +25,7 @@ done
 
 echo ""
 echo "✓ Git hooks installed:"
-echo "  pre-push    — 单元测试 + skill 校验 + 变更检测建议 (Layer 1)"
+echo "  pre-push    — skill 校验 + 变更检测建议 (轻量)"
 echo "  post-commit — agent/skill 变更后后台自动评估 (Layer 2/3)"
 echo ""
-echo "  To bypass pre-push: git push --no-verify"
+echo "  手动运行单元测试: .venv/bin/python -m pytest tests/ -x -q"

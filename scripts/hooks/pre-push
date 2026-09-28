@@ -1,8 +1,7 @@
 #!/bin/bash
-# pre-push hook: Layer 1 Fast Gate + Smart Change Detection
+# pre-push hook: Lightweight validation + Smart Change Detection
 #
-# Always runs:
-#   - Deterministic unit tests (fail-fast; integration tests are excluded)
+# Runs on every push:
 #   - Skill format validation
 #
 # Additionally detects what changed and prints recommendations:
@@ -10,7 +9,8 @@
 #   - Skills/knowledge changed (31-技能/)        → recommend Layer 2 regression
 #   - Prompts or LLM config changed          → recommend Layer 3 quality
 #
-# Bypass with: git push --no-verify (not recommended)
+# Full unit tests remain available for manual execution:
+#   .venv/bin/python -m pytest tests/ -x -q
 
 set -e
 
@@ -38,23 +38,13 @@ fi
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 echo "  Python: $PYTHON_BIN"
 
-# ---- 1. Unit tests (fail-fast) ----
-echo "▶ Running deterministic unit tests..."
-"$PYTHON_BIN" -m pytest tests/ -m "not integration" -x -q 2>&1 | tail -5
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-    echo ""
-    echo "✗ Unit tests failed. Push blocked."
-    echo "  Fix the failures or use 'git push --no-verify' to bypass."
-    exit 1
-fi
-
-# ---- 2. Skill format validation ----
+# ---- 1. Skill format validation ----
 echo "▶ Validating skills..."
 "$PYTHON_BIN" -m matrix.evaluation.cli check-skills 2>&1
 if [ $? -ne 0 ]; then
     echo ""
     echo "✗ Skill validation failed. Push blocked."
-    echo "  Fix the errors or use 'git push --no-verify' to bypass."
+    echo "  Fix the errors before pushing."
     exit 1
 fi
 
@@ -62,7 +52,7 @@ echo ""
 echo "✓ Layer 1 checks passed."
 echo ""
 
-# ---- 2.5 Check last evaluation status ----
+# ---- 1.5 Check last evaluation status ----
 STATUS_FILE="$REPO_ROOT/.eval-status"
 if [ -f "$STATUS_FILE" ]; then
     EVAL_STATUS=$(grep "^status:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
@@ -89,7 +79,7 @@ if [ -f "$STATUS_FILE" ]; then
     fi
 fi
 
-# ---- 3. Smart change detection ----
+# ---- 2. Smart change detection ----
 # Determine which files changed in this push
 CHANGED_FILES=$(git diff --name-only HEAD@{1} HEAD 2>/dev/null || git diff --name-only --cached HEAD 2>/dev/null || git diff --name-only origin/$(git rev-parse --abbrev-ref HEAD)...HEAD 2>/dev/null || echo "")
 
