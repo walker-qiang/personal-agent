@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -191,7 +192,10 @@ class AgentConfig:
         if provider == "codex":
             if shutil.which(self.codex_bin):
                 return ""
-            return f"missing Codex CLI: {self.codex_bin}"
+            return (
+                f"missing Codex CLI: {self.codex_bin}; install Codex or fix CODEX_BIN "
+                "(set to codex for automatic discovery)"
+            )
         if provider not in _API_PROVIDERS:
             return (
                 f"unsupported provider: {provider} "
@@ -274,7 +278,7 @@ def load_config() -> AgentConfig:
     host, port = load_bind_addr()
     provider = os.environ.get(ENV_AGENT_PROVIDER, "codex").strip().lower() or "codex"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
-    codex_bin = os.environ.get(ENV_CODEX_BIN, "codex").strip() or "codex"
+    codex_bin = _resolve_codex_bin()
     codex_workdir = os.environ.get(ENV_CODEX_WORKDIR, "").strip()
     if not codex_workdir:
         codex_workdir = str(root.parent)
@@ -418,6 +422,34 @@ def load_config() -> AgentConfig:
         code_sandbox_max_output_chars=code_sandbox_max_output_chars,
         code_sandbox_network=code_sandbox_network,
     )
+
+
+def _resolve_codex_bin() -> str:
+    configured = os.environ.get(ENV_CODEX_BIN, "").strip() or "codex"
+    configured = os.path.expanduser(configured)
+    found = shutil.which(configured)
+    if found:
+        return os.path.abspath(found)
+    # An explicit override must not silently select a different executable.
+    if configured != "codex":
+        return configured
+
+    home = Path.home()
+    candidates = [home / ".local/bin/codex"]
+    if sys.platform == "darwin":
+        candidates.extend([Path("/opt/homebrew/bin/codex"), Path("/usr/local/bin/codex")])
+        for applications in (Path("/Applications"), home / "Applications"):
+            for app in ("Codex.app", "ChatGPT.app"):
+                resources = applications / app / "Contents/Resources"
+                candidates.extend([
+                    resources / "codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                    resources / "codex",
+                ])
+    for candidate in candidates:
+        found = shutil.which(str(candidate))
+        if found:
+            return os.path.abspath(found)
+    return "codex"
 
 
 def find_root(start: Path) -> Path:
