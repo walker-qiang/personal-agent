@@ -26,6 +26,7 @@ done
 echo ""
 echo "✓ Git hooks installed:"
 echo "  pre-push    — skill 校验 + 变更检测建议 (轻量)"
-echo "  post-commit — agent/skill 变更后后台自动评估 (Layer 2/3)"
+echo "  post-commit — 已关闭后台自动评估"
 echo ""
 echo "  手动运行单元测试: .venv/bin/python -m pytest tests/ -x -q"
+echo "  按需手动评估（可能调用模型）: bash scripts/smart-check.sh"

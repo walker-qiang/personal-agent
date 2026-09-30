@@ -52,32 +52,6 @@ echo ""
 echo "✓ Layer 1 checks passed."
 echo ""
 
-# ---- 1.5 Check last evaluation status ----
-STATUS_FILE="$REPO_ROOT/.eval-status"
-if [ -f "$STATUS_FILE" ]; then
-    EVAL_STATUS=$(grep "^status:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
-    EVAL_COMMIT=$(grep "^commit:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
-    EVAL_REGRESSION=$(grep "^regression:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
-    EVAL_QUALITY=$(grep "^quality:" "$STATUS_FILE" | cut -d: -f2- | tr -d ' ')
-
-    if [ "$EVAL_STATUS" = "failed" ]; then
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "  ⚠️  上次评估发现问题 (commit ${EVAL_COMMIT})"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if [ "$EVAL_REGRESSION" = "failed" ]; then
-            echo "  ✗ Layer 2 回归: 检测到回归"
-        fi
-        if [ "$EVAL_QUALITY" = "failed" ]; then
-            echo "  ✗ Layer 3 质量: 检测到质量下降"
-        fi
-        echo ""
-        echo "  查看详情: cat .eval-last-run.log | tail -30"
-        echo "  修复后重跑: bash scripts/smart-check.sh --force"
-        echo "  确认无需修复直接推送: git push --no-verify"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-    fi
-fi
 
 # ---- 2. Smart change detection ----
 # Determine which files changed in this push

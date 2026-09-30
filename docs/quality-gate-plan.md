@@ -9,6 +9,14 @@
 > 和 Anthropic Capability/Regression 二分法。
 > "三层质量门禁"是上述业界实践的个人用户适配版本。
 
+## 当前执行策略（2026-09-30）
+
+- `git commit` 不启动后台评估。保留无操作的 post-commit 文件，使重新安装 hooks 时能覆盖旧自动评估入口。
+- `git push` 仅执行 skill 格式校验并显示变更建议，不执行 pytest 或模型评估，也不读取 `.eval-status` 历史告警。
+- 单元测试按变更范围手动运行；regression / quality 仅在明确需要时手动执行，可能产生模型调用成本。
+- `bash scripts/smart-check.sh` 是手动执行评估，不是查看状态；查看已有结果使用 `cat .eval-status`。
+- 安装命令：`bash scripts/install-hooks.sh`。下文为历史设计和命令参考，旧自动触发流程及耗时估计不再代表当前策略。
+
 ## 实现状态
 
 | 层级 | 状态 | 实现内容 |
@@ -16,7 +24,7 @@
 | Layer 1 | ✅ 已完成 | pre-push hook + check-skills CLI + install-hooks.sh |
 | Layer 2 | ✅ 已完成 | 5 条 smoke 数据集 + regression CLI + 基线对比逻辑 + 27 个单元测试 |
 | Layer 3 | ✅ 已完成 | quality CLI + LLM-as-Judge；质量基线按需生成，不保存旧 live baseline |
-| 自动触发 | ✅ 已完成 | post-commit hook + smart-check.sh + 变更类型检测 |
+| 自动触发 | 已关闭 | post-commit 不执行评估；smart-check.sh 保留为手动入口 |
 
 **最近一次默认回归（2026-09-18）**：850 passed, 0 skipped, 0 failed；共收集 850 个测试。
 当前剩余 3 个第三方 `jieba` 的 `SyntaxWarning`，不影响测试结果；本轮已消除
@@ -32,7 +40,7 @@ Starlette/httpx2 弃用提示和 PyJWT 短密钥提示。
 
 | 能力 | 现状 | 评估 |
 |------|------|------|
-| 单元测试 | 850 个默认回归测试，pytest 框架 | 覆盖核心流程，已集成 pre-push hook |
+| 单元测试 | pytest 框架，历史测试数量见上文 | 按变更范围手动执行，已移出 pre-push hook |
 | 评估框架 | EvalCase → EvalRunner → Evaluator → Metrics → Reporter | 完整可用 |
 | 评估数据集 | `src/matrix/evaluation/datasets/smoke.json`（5 条 case） | 保留核心 smoke 场景；旧 23 条 live dataset 已移除 |
 | Skill 测试 | test_skills.py 验证加载和匹配 | 已实现 check-skills 通用校验 |
@@ -334,7 +342,7 @@ personal-agent/
 
 ---
 
-## 自动触发机制
+## 历史自动触发机制（已停用）
 
 > 解决问题：agent 代码或知识库变更后，如何自动执行检查，而不需要手动记住跑评估。
 
@@ -423,7 +431,7 @@ bash scripts/smart-check.sh --quality
 
 ---
 
-## 日常工作流
+## 历史日常工作流（自动步骤已停用）
 
 ### 场景 1：日常小改动（修 bug、调参数）
 

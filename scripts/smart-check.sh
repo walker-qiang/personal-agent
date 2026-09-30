@@ -1,5 +1,6 @@
 #!/bin/bash
-# smart-check.sh — 智能变更检测 + 自动评估
+# smart-check.sh — 手动触发的变更检测与评估（可能调用模型）
+# Git hooks 不调用本脚本；历史结果仅供手动查看，不作为推送门禁。
 #
 # 工作原理:
 #   1. 对比当前 HEAD 与上次评估基线记录的 commit
@@ -180,7 +181,7 @@ fi
 # ---- Update tracker ----
 echo "commit:$CURRENT_COMMIT" > "$TRACKER_FILE"
 
-# ---- Write status file (for pre-push hook to check) ----
+# ---- Write status file for manual inspection ----
 STATUS_FILE="$REPO_ROOT/.eval-status"
 if [ $OVERALL_EXIT -eq 0 ]; then
     echo "status:passed" > "$STATUS_FILE"
