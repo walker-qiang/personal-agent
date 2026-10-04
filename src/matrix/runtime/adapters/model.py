@@ -29,6 +29,7 @@ class MatrixModelAdapter(ModelPort):
                     call_id=tool_call.id,
                     name=tool_call.name,
                     arguments=tool_call.arguments,
+                    arguments_error=tool_call.arguments_error,
                 )
                 for tool_call in result.tool_calls
             ),
@@ -51,6 +52,7 @@ class MatrixModelAdapter(ModelPort):
                             call_id=tool.id,
                             name=tool.name,
                             arguments=tool.arguments,
+                            arguments_error=tool.arguments_error,
                         )
                         for tool in event.tool_calls
                     ),
@@ -74,6 +76,7 @@ class MatrixModelAdapter(ModelPort):
                         call_id=tool.id,
                         name=tool.name,
                         arguments=tool.arguments,
+                        arguments_error=tool.arguments_error,
                     )
                     for tool in result.tool_calls
                 ))

@@ -36,6 +36,24 @@ _DEFAULT_MAX_MESSAGE_CHARS = 16000
 _NO_TOOL_OUTPUT = '{"error": "tool produced no output"}'
 
 
+def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str]:
+    """Normalize provider tool arguments without silently erasing failures."""
+
+    if isinstance(value, dict):
+        return value, ""
+    if value is None or value == "":
+        # An empty object is valid for tools without required fields. Required
+        # field validation remains the registry's responsibility.
+        return {}, ""
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError) as exc:
+        return {}, f"工具参数不是有效 JSON: {exc}"
+    if not isinstance(parsed, dict):
+        return {}, "工具参数必须是 JSON 对象"
+    return parsed, ""
+
+
 def _ensure_tool_call_outputs(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -260,14 +278,12 @@ class DeepSeekClient:
             elif item_type == "function_call":
                 name = item.get("name", "")
                 args_str = item.get("arguments", "{}")
-                try:
-                    args = json.loads(args_str)
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
+                args, arguments_error = _parse_tool_arguments(args_str)
                 tool_calls.append(ToolCall(
                     id=item.get("call_id", ""),
                     name=name,
                     arguments=args,
+                    arguments_error=arguments_error,
                 ))
                 finish_reason = "tool_calls"
 
@@ -416,6 +432,33 @@ class DeepSeekClient:
         payload["stream"] = True
         finish_reason = "stop"
         usage: dict[str, Any] = {}
+        call_ids_by_index: dict[str, str] = {}
+        names_by_call: dict[str, str] = {}
+        argument_buffers: dict[str, str] = {}
+        call_order: list[str] = []
+
+        def resolve_call(
+            chunk: dict[str, Any],
+            item: dict[str, Any] | None = None,
+        ) -> tuple[str, str, str]:
+            item = item if isinstance(item, dict) else {}
+            raw_index = chunk.get("output_index", item.get("output_index", ""))
+            index = str(raw_index) if raw_index is not None else ""
+            raw_call_id = (
+                chunk.get("call_id")
+                or item.get("call_id")
+                or call_ids_by_index.get(index, "")
+            )
+            call_id = str(raw_call_id or (f"tool-{index}" if index else "tool-0"))
+            if index:
+                call_ids_by_index[index] = call_id
+            raw_name = chunk.get("name") or item.get("name") or ""
+            name = name_map.get(str(raw_name), str(raw_name))
+            if name:
+                names_by_call[call_id] = name
+            if call_id not in call_order:
+                call_order.append(call_id)
+            return call_id, name, index
 
         for event_type, raw in post_json_stream_events(
             url, payload, self._headers(), self.timeout_sec
@@ -438,33 +481,51 @@ class DeepSeekClient:
                 item = chunk.get("item", {})
                 if not isinstance(item, dict):
                     item = {}
-                call_id = str(
-                    chunk.get("call_id")
-                    or item.get("call_id")
-                    or chunk.get("output_index")
-                    or "tool-0"
-                )
-                raw_name = str(chunk.get("name") or item.get("name") or "")
+                call_id, name, index = resolve_call(chunk, item)
+                delta = chunk.get("delta", "")
+                if isinstance(delta, dict):
+                    delta = json.dumps(delta, ensure_ascii=False)
+                delta = str(delta)
+                argument_buffers[call_id] = argument_buffers.get(call_id, "") + delta
                 yield LLMStreamEvent(
                     kind="tool_call_delta",
                     metadata={
-                        "call_id": call_id,
-                        "name": name_map.get(raw_name, raw_name),
-                        "arguments_delta": str(chunk.get("delta", "")),
+                        # When only output_index is available, Runtime joins
+                        # this delta with the stable id from output_item.added.
+                        "call_id": str(
+                            chunk.get("call_id") or item.get("call_id") or ""
+                        ),
+                        "index": index,
+                        "name": name,
+                        "arguments_delta": delta,
                     },
                 )
+                finish_reason = "tool_calls"
+                continue
+            if kind.endswith("function_call_arguments.done"):
+                item = chunk.get("item", {})
+                if not isinstance(item, dict):
+                    item = {}
+                call_id, _, _ = resolve_call(chunk, item)
+                full_arguments = chunk.get("arguments", item.get("arguments"))
+                if full_arguments is not None:
+                    if isinstance(full_arguments, dict):
+                        full_text = json.dumps(full_arguments, ensure_ascii=False)
+                    else:
+                        full_text = str(full_arguments)
+                    argument_buffers[call_id] = full_text
                 finish_reason = "tool_calls"
                 continue
             if kind.endswith("output_item.added"):
                 item = chunk.get("item", {})
                 if isinstance(item, dict) and item.get("type") == "function_call":
-                    raw_name = str(item.get("name", ""))
+                    call_id, name, index = resolve_call(chunk, item)
                     yield LLMStreamEvent(
                         kind="tool_call_delta",
                         metadata={
                             "call_id": str(item.get("call_id", "")),
-                            "index": chunk.get("output_index", 0),
-                            "name": name_map.get(raw_name, raw_name),
+                            "index": index,
+                            "name": name,
                             "arguments_delta": "",
                         },
                     )
@@ -481,6 +542,21 @@ class DeepSeekClient:
                 elif kind == "response.failed":
                     finish_reason = "error"
 
+        for call_id in call_order:
+            arguments, arguments_error = _parse_tool_arguments(
+                argument_buffers.get(call_id, ""),
+            )
+            yield LLMStreamEvent(
+                kind="tool_calls",
+                tool_calls=(
+                    ToolCall(
+                        id=call_id,
+                        name=names_by_call.get(call_id, ""),
+                        arguments=arguments,
+                        arguments_error=arguments_error,
+                    ),
+                ),
+            )
         yield LLMStreamEvent(
             kind="message_end",
             metadata={"finish_reason": finish_reason, "usage": usage},
@@ -555,6 +631,7 @@ class DeepSeekClient:
                     id=tc.id,
                     name=name_map.get(tc.name, tc.name),
                     arguments=tc.arguments,
+                    arguments_error=tc.arguments_error,
                 )
                 for tc in result.tool_calls
             ]

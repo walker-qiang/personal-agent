@@ -78,6 +78,7 @@ class ToolCall:
     id: str = ""
     name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
+    arguments_error: str = ""
 
 
 @dataclass

@@ -16,6 +16,7 @@ class ToolCall:
     call_id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    arguments_error: str = ""
 
 
 @dataclass(frozen=True)

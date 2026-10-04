@@ -7,6 +7,7 @@ domain-agent lookup, reflection and LangGraph routing stay above it.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import time
 import uuid
 from typing import Any, Callable
@@ -62,6 +63,8 @@ def execute_operation(
     total_tool_calls = int(operation.state.get("runtime_tool_call_count", 0))
     usage: dict[str, Any] = {}
     started_at = time.monotonic()
+    last_argument_failure_key = ""
+    argument_failure_count = 0
     replayable_effect_ids = {
         str(effect.get("tool_call_id"))
         for effect in store.list_tool_effects(
@@ -370,6 +373,64 @@ def execute_operation(
                 tool_spec = next(
                     (spec for spec in request.tools if spec.name == tool_call.name), None
                 )
+                if tool_call.arguments_error:
+                    result = ToolResult(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        error=(
+                            f"工具参数解析失败: {tool_call.arguments_error}。"
+                            "请重新生成合法的 JSON 对象参数后再调用。"
+                        ),
+                        is_error=True,
+                    )
+                    _debug(debug_trace, "tool_argument_error", {
+                        "name": tool_call.name,
+                        "call_id": tool_call.call_id,
+                        "error": result.error,
+                    })
+                    current = _commit_state(
+                        store, current,
+                        _event(current, RuntimeEventType.TOOL_START, {
+                            "call_id": tool_call.call_id,
+                            "name": tool_call.name,
+                        }),
+                        events,
+                    )
+                    current = _commit_state(
+                        store, current,
+                        _event(current, RuntimeEventType.TOOL_END, {
+                            "call_id": result.call_id,
+                            "name": result.name,
+                            "result": result.result,
+                            "is_error": True,
+                            "error": result.error,
+                        }),
+                        events,
+                    )
+                    tool_results.append(result)
+                    messages.append(Message(
+                        role="tool",
+                        content=_tool_content(result),
+                        tool_call_id=tool_call.call_id,
+                    ))
+                    failure_key = _argument_failure_key(tool_call, result)
+                    if failure_key == last_argument_failure_key:
+                        argument_failure_count += 1
+                    else:
+                        last_argument_failure_key = failure_key
+                        argument_failure_count = 1
+                    if argument_failure_count >= 2:
+                        return _finish(
+                            store, current, events, RunOutcome.FAILED,
+                            (
+                                f"模型连续生成无效的 {tool_call.name} 工具参数，"
+                                "已停止重试：" + result.error
+                            ),
+                            tool_results,
+                            RuntimeEventType.RUN_FAILED,
+                            usage,
+                        )
+                    continue
                 requires_approval = requires_manual_approval(
                     tool_spec,
                     request.execution_policy,
@@ -577,6 +638,26 @@ def execute_operation(
                     }),
                     events,
                 )
+                failure_key = _argument_failure_key(tool_call, result)
+                if failure_key and failure_key == last_argument_failure_key:
+                    argument_failure_count += 1
+                elif failure_key:
+                    last_argument_failure_key = failure_key
+                    argument_failure_count = 1
+                else:
+                    last_argument_failure_key = ""
+                    argument_failure_count = 0
+                if argument_failure_count >= 2:
+                    return _finish(
+                        store, current, events, RunOutcome.FAILED,
+                        (
+                            f"模型连续生成无效的 {tool_call.name} 工具参数，"
+                            "已停止重试：" + result.error
+                        ),
+                        tool_results,
+                        RuntimeEventType.RUN_FAILED,
+                        usage,
+                    )
 
             current = _commit_phase(store, current, OperationPhase.PREPARING_NEXT_TURN, None, events)
 
@@ -674,7 +755,12 @@ def _complete_with_retry(
             _debug(debug_trace, "model_response", {
                 "content": response.content,
                 "tool_calls": [
-                    {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+                    {
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "arguments_error": call.arguments_error,
+                    }
                     for call in response.tool_calls
                 ],
                 "finish_reason": response.finish_reason,
@@ -745,6 +831,7 @@ def _stream_model(
                     "call_id": call.call_id,
                     "name": call.name,
                     "arguments": dict(call.arguments),
+                    "arguments_error": call.arguments_error,
                 }
                 operation = _commit_state(
                     store,
@@ -804,6 +891,7 @@ def _stream_model(
             call_id=str(value.get("call_id", "")),
             name=str(value.get("name", "")),
             arguments=arguments if isinstance(arguments, dict) else {},
+            arguments_error=str(value.get("arguments_error", "")),
         ))
 
     response = ModelResponse(
@@ -959,7 +1047,12 @@ def _message_debug_value(message: Message) -> dict[str, Any]:
         "content": message.content,
         "tool_call_id": message.tool_call_id,
         "tool_calls": [
-            {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+            {
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "arguments_error": call.arguments_error,
+            }
             for call in message.tool_calls
         ],
     }
@@ -1016,7 +1109,12 @@ def _messages_to_state(messages: list[Message]) -> list[dict[str, Any]]:
             "content": message.content,
             "tool_call_id": message.tool_call_id,
             "tool_calls": [
-                {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+                {
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "arguments_error": call.arguments_error,
+                }
                 for call in message.tool_calls
             ],
         }
@@ -1035,6 +1133,7 @@ def _messages_from_state(state: dict[str, Any]) -> list[Message]:
                 ToolCall(
                     call_id=item.get("call_id", ""), name=item.get("name", ""),
                     arguments=dict(item.get("arguments", {})),
+                    arguments_error=item.get("arguments_error", ""),
                 )
                 for item in value.get("tool_calls", [])
             ),
@@ -1106,3 +1205,26 @@ def _tool_content(result: ToolResult) -> str:
     if result.is_error:
         return result.error or "tool execution failed"
     return str(result.result)
+
+
+def _argument_failure_key(tool_call: ToolCall, result: ToolResult) -> str:
+    """Identify repeatable model-side argument failures, not tool failures."""
+
+    if not result.is_error:
+        return ""
+    if not tool_call.arguments_error and "参数验证失败" not in result.error:
+        return ""
+    try:
+        arguments = json.dumps(
+            tool_call.arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        arguments = repr(tool_call.arguments)
+    return "|".join((
+        tool_call.name,
+        arguments,
+        tool_call.arguments_error or result.error,
+    ))

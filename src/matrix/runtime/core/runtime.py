@@ -173,7 +173,12 @@ class AgentRuntime:
                         "role": message.role, "content": message.content,
                         "tool_call_id": message.tool_call_id,
                         "tool_calls": [
-                            {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
+                            {
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "arguments_error": call.arguments_error,
+                            }
                             for call in message.tool_calls
                         ],
                     }

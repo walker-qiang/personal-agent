@@ -260,6 +260,7 @@ def _messages_to_dict(messages: tuple[Message, ...]) -> list[dict[str, Any]]:
                     "call_id": call.call_id,
                     "name": call.name,
                     "arguments": dict(call.arguments),
+                    "arguments_error": call.arguments_error,
                 }
                 for call in message.tool_calls
             ],
@@ -296,6 +297,7 @@ def _tool_call_from_dict(value: dict[str, Any]):
         name=str(value.get("name", "")),
         arguments=dict(value.get("arguments", {}))
         if isinstance(value.get("arguments", {}), dict) else {},
+        arguments_error=str(value.get("arguments_error", "")),
     )
 
 
