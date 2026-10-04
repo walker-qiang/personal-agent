@@ -28,6 +28,27 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 助手：{answer}"""
 
 
+def _tool_event_key(
+    name: Any,
+    args: Any = None,
+    call_id: Any = "",
+) -> tuple[str, str]:
+    """Build a stable key shared by live and state-based tool events."""
+    normalized_name = str(name or "")
+    normalized_call_id = str(call_id or "")
+    if normalized_call_id:
+        return normalized_name, f"call:{normalized_call_id}"
+    normalized_args = args if isinstance(args, dict) else {}
+    return normalized_name, (
+        "args:" + json.dumps(
+            normalized_args,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    )
+
+
 def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) -> Iterator[dict[str, Any]]:
     """Drain all pending events from the queue and yield SSE events.
 
@@ -35,7 +56,6 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
     If tracked is provided, tool_call keys are added to prevent double emission
     from the state-based path.
     """
-    import json as _json
     while True:
         try:
             item = q.get_nowait()
@@ -54,8 +74,11 @@ def _drain_queue(q: queue.Queue, tracked: set[tuple[str, str]] | None = None) ->
 
             if evt_type == "tool_call":
                 if tracked is not None:
-                    args_key = _json.dumps(evt_data.get("args", {}), sort_keys=True)
-                    tracked.add((evt_data["name"], args_key))
+                    tracked.add(_tool_event_key(
+                        evt_data.get("name", ""),
+                        evt_data.get("args", {}),
+                        evt_data.get("call_id", ""),
+                    ))
                 yield {
                     "type": "tool_call",
                     "name": evt_data["name"],
@@ -152,7 +175,11 @@ def _runtime_event_to_ui(
         if not isinstance(args, dict):
             args = {}
         if tracked is not None:
-            tracked.add((name, json.dumps(args, sort_keys=True)))
+            tracked.add(_tool_event_key(
+                name,
+                args,
+                payload.get("call_id", ""),
+            ))
         yield {
             "type": "tool_call",
             "name": name,

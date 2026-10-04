@@ -59,6 +59,7 @@ from ..vault_client import VaultWriteError, sync_memory_profile
 from ._utils import(
     MEMORY_EXTRACTION_PROMPT,
     _drain_queue,
+    _tool_event_key,
     preview_json,
     result_count,
     timestamp,
@@ -2044,9 +2045,32 @@ class ChatService:
                 }
             for event in events:
                 if event.event_type.value == "tool_start":
-                    yield {"type": "tool_call", "name": event.payload.get("name", ""), "operation_id": operation_id}
+                    args = event.payload.get(
+                        "arguments", event.payload.get("args", {}),
+                    )
+                    if not isinstance(args, dict):
+                        args = {}
+                    yield {
+                        "type": "tool_call",
+                        "name": event.payload.get("name", ""),
+                        "args": args,
+                        "operation_id": operation_id,
+                    }
                 elif event.event_type.value == "tool_end":
-                    yield {"type": "tool_result", "name": event.payload.get("name", ""), "error": event.payload.get("error", ""), "operation_id": operation_id}
+                    raw_result = event.payload.get("result")
+                    raw_error = event.payload.get("error")
+                    yield {
+                        "type": "tool_result",
+                        "name": event.payload.get("name", ""),
+                        "result": raw_result,
+                        "error": raw_error,
+                        "operation_id": operation_id,
+                        "preview": preview_json(
+                            raw_result if raw_result is not None
+                            else (raw_error or ""),
+                            limit=2000,
+                        ),
+                    }
             if result.final_message:
                 yield {"type": "token", "content": result.final_message}
                 self._remember(session_id, "", result.final_message, user_id=user_id)
@@ -2382,9 +2406,14 @@ class ChatService:
         new_count = emitted_tool_count
         for i in range(emitted_tool_count, len(tool_results)):
             tr = tool_results[i]
+            new_count = i + 1
             if tr.get("duplicate") or tr.get("name") == "_knowledge":
                 continue
-            tr_key = (tr.get("name", ""), json.dumps(tr.get("arguments", {}), sort_keys=True))
+            tr_key = _tool_event_key(
+                tr.get("name", ""),
+                tr.get("arguments", {}),
+                tr.get("call_id", ""),
+            )
             if tr_key in queue_emitted:
                 continue
             yield {
@@ -2399,11 +2428,10 @@ class ChatService:
                 "error": tr.get("error"),
                 "elapsed_ms": tr.get("elapsed_ms"),
                 "preview": preview_json(
-                    tr.get("error", tr.get("result", {})),
+                    tr.get("error") or tr.get("result", {}),
                     limit=2000,
                 ),
             }
-            new_count += 1
         return new_count
 
     def _build_graph_config(

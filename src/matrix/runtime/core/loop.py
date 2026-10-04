@@ -125,6 +125,7 @@ def execute_operation(
                     _event(current, RuntimeEventType.TOOL_START, {
                         "call_id": pending_call.call_id,
                         "name": pending_call.name,
+                        "arguments": dict(pending_call.arguments),
                     }),
                     events,
                 )
@@ -393,6 +394,7 @@ def execute_operation(
                         _event(current, RuntimeEventType.TOOL_START, {
                             "call_id": tool_call.call_id,
                             "name": tool_call.name,
+                            "arguments": dict(tool_call.arguments),
                         }),
                         events,
                     )
@@ -452,7 +454,9 @@ def execute_operation(
                     current = _commit_state(
                         store, current,
                         _event(current, RuntimeEventType.TOOL_START, {
-                            "call_id": tool_call.call_id, "name": tool_call.name,
+                            "call_id": tool_call.call_id,
+                            "name": tool_call.name,
+                            "arguments": dict(tool_call.arguments),
                         }), events,
                     )
                     current = _commit_state(
@@ -589,6 +593,7 @@ def execute_operation(
                     _event(current, RuntimeEventType.TOOL_START, {
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
+                        "arguments": dict(tool_call.arguments),
                     }),
                     events,
                 )
