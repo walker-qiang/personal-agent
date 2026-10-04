@@ -16,7 +16,7 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
 用户问题：{question}
 
 请制定执行计划，以 JSON 数组格式返回。每个步骤：
-{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "depends_on": [], "output_key": "结果标识", "skill_name": "", "purpose": "为什么需要这个专家"}}
+{{"step": 1, "agent_id": "专家ID", "task": "委派给该专家的具体任务（用中文）", "depends_on": [], "output_key": "result_key", "skill_name": "", "purpose": "为什么需要这个专家"}}
 
 规则：
 - 只有闲聊/打招呼（如"你好""谢谢"）返回空数组 []
@@ -31,7 +31,7 @@ COMMANDER_PLAN_PROMPT = """你是指挥官 Agent。请制定委派计划来回�
   - 有依赖的步骤会等待前置步骤全部完成后才执行
   - 如 Step3 依赖 Step1 和 Step2，则 depends_on = [1, 2]
   - 如 Step2 依赖 Step1 的结果才能执行，则 depends_on = [1]
-- output_key 字段：为该步骤的输出起一个简短英文标识，供后续依赖步骤引用
+- output_key 字段：为该步骤的输出起一个简短 ASCII 标识，只能使用英文字母、数字和下划线，且必须以英文字母开头，供后续依赖步骤引用
 - 选择专家时，参考其 capabilities 字段判断该专家是否能完成对应任务
   - 如需要行情数据，应选择拥有 market_data 能力的专家
   - 如需要生成图片，应选择拥有 image_generation 能力的专家

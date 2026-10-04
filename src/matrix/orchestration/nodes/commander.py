@@ -53,6 +53,11 @@ from ._helpers import (
     REVISE_PROMPT,
 )
 from ..anti_hallucination import verify_all_claims, build_verified_output, _strip_all_verification_tags
+from ..plan_validator import (
+    PlanValidationError,
+    completed_steps_for_revision,
+    compile_dag_plan,
+)
 from ..state import AgentState
 
 logger = logging.getLogger("matrix.orchestration")
@@ -162,6 +167,48 @@ def _build_skill_plan(user_msg: str, skill_name: str, agent_id: str) -> dict[str
     }
 
 
+def _compile_plan_for_state(
+    plan: Any,
+    state: AgentState,
+    *,
+    plan_revision: int | None = None,
+) -> list[dict[str, Any]]:
+    """Compile a plan against the graph's current revision metadata."""
+    revision = (
+        state.get("plan_revision", 0)
+        if plan_revision is None
+        else plan_revision
+    )
+    return compile_dag_plan(
+        plan,
+        plan_revision=revision,
+        completed_step_refs=state.get("completed_step_refs", []),
+    )
+
+
+def _fallback_plan(user_msg: str, state: AgentState) -> list[dict[str, Any]]:
+    """Return a valid commander-owned plan after rejecting an LLM candidate."""
+    return _compile_plan_for_state(
+        [{
+            "step": 1,
+            "agent_id": "commander",
+            "task": user_msg,
+            "purpose": "直接回答",
+        }],
+        state,
+    )
+
+
+def _log_rejected_plan(source: str, exc: PlanValidationError) -> None:
+    logger.warning(
+        "%s: rejecting invalid plan code=%s message=%s details=%s",
+        source,
+        exc.code,
+        exc,
+        exc.details,
+    )
+
+
 def _normalize_plan_skills(
     plan: list[dict[str, Any]],
     agent_registry: AgentRegistry,
@@ -199,10 +246,9 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     user_msg = state["user_message"]
 
     if not user_msg.strip():
+        plan = _fallback_plan("回复空消息", state)
         return {
-            "delegation_plan": [
-                {"step": 1, "agent_id": "commander", "task": "回复空消息", "purpose": "直接回答"}
-            ],
+            "delegation_plan": plan,
             "current_step": 0,
         }
 
@@ -240,7 +286,12 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
                 "commander: L0 keyword match — skill=%s, agent=%s",
                 l0_match.name, owner,
             )
-            return _build_skill_plan(user_msg, l0_match.name, owner)
+            skill_plan = _build_skill_plan(user_msg, l0_match.name, owner)
+            skill_plan["delegation_plan"] = _compile_plan_for_state(
+                skill_plan["delegation_plan"],
+                state,
+            )
+            return skill_plan
         logger.warning("commander: L0 skill %s matched but no agent owns it", l0_match.name)
 
     # ── L1: semantic match ──
@@ -256,7 +307,12 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
                         "commander: L1 semantic match — skill=%s, score=%.3f, agent=%s",
                         best.skill_name, best.score, owner,
                     )
-                    return _build_skill_plan(user_msg, best.skill_name, owner)
+                    skill_plan = _build_skill_plan(user_msg, best.skill_name, owner)
+                    skill_plan["delegation_plan"] = _compile_plan_for_state(
+                        skill_plan["delegation_plan"],
+                        state,
+                    )
+                    return skill_plan
                 logger.warning(
                     "commander: L1 skill %s matched (score=%.3f) but no agent owns it",
                     best.skill_name, best.score,
@@ -287,10 +343,18 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
 
     valid_ids = {a["id"] for a in agent_registry.agents_for_commander()}
     valid_ids.add("commander")
-    plan = [s for s in plan if s.get("agent_id", "") in valid_ids]
+    plan = [
+        s for s in plan
+        if isinstance(s, dict) and s.get("agent_id", "") in valid_ids
+    ]
     plan = _normalize_plan_skills(plan, agent_registry)
 
     logger.info("commander: raw_plan=%s", json.dumps(plan, ensure_ascii=False)[:500])
+    try:
+        plan = _compile_plan_for_state(plan, state)
+    except PlanValidationError as exc:
+        _log_rejected_plan("commander", exc)
+        plan = []
 
     # DAG plans have explicit depends_on relationships that must be preserved.
     # Only merge consecutive same-agent steps without depends_on (legacy optimization).
@@ -322,11 +386,18 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
         plan = plan[:MAX_PLAN_STEPS]
 
     if not plan:
-        plan = [
-            {"step": 1, "agent_id": "commander", "task": user_msg, "purpose": "直接回答"}
-        ]
+        plan = _fallback_plan(user_msg, state)
         plan_type = "agent"
 
+    plan_limit = MAX_SUBTASKS if plan_type == "subtask" else MAX_PLAN_STEPS
+    try:
+        plan = _compile_plan_for_state(plan[:plan_limit], state)
+    except PlanValidationError as exc:
+        _log_rejected_plan("commander finalization", exc)
+        plan = _fallback_plan(user_msg, state)
+        plan_type = "agent"
+
+    agent_ids_in_plan = {s.get("agent_id", "") for s in plan}
     logger.info("commander: plan_type=%s steps=%d agents=%s", plan_type, len(plan), agent_ids_in_plan)
 
     # ── PreFlect: pre-execution critique for multi-step plans ──────────────
@@ -348,20 +419,26 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
                 if isinstance(adjusted, list) and adjusted:
                     # Validate adjusted plan: same agent_ids
                     adjusted_valid = all(
-                        s.get("agent_id", "") in valid_ids for s in adjusted
+                        isinstance(s, dict) and s.get("agent_id", "") in valid_ids
+                        for s in adjusted
                     )
                     if adjusted_valid:
                         adjusted = _normalize_plan_skills(adjusted, agent_registry)
-                        logger.info(
-                            "commander: PreFlect revised plan — issues: %s",
-                            critique.get("issues", []),
-                        )
-                        plan = adjusted[:MAX_PLAN_STEPS]
-                        # Recompute plan_type
-                        adjusted_agent_ids = {s.get("agent_id", "") for s in plan}
-                        is_subtask = len(plan) > 1 and len(adjusted_agent_ids) == 1
-                        plan_type = "subtask" if is_subtask else "agent"
-                        prelect_revised = True
+                        try:
+                            adjusted = _compile_plan_for_state(adjusted, state)
+                        except PlanValidationError as exc:
+                            _log_rejected_plan("commander PreFlect", exc)
+                        else:
+                            logger.info(
+                                "commander: PreFlect revised plan — issues: %s",
+                                critique.get("issues", []),
+                            )
+                            plan = adjusted[:MAX_PLAN_STEPS]
+                            # Recompute plan_type
+                            adjusted_agent_ids = {s.get("agent_id", "") for s in plan}
+                            is_subtask = len(plan) > 1 and len(adjusted_agent_ids) == 1
+                            plan_type = "subtask" if is_subtask else "agent"
+                            prelect_revised = True
                     else:
                         logger.warning(
                             "commander: PreFlect adjusted plan has invalid agent_ids, keeping original"
@@ -404,6 +481,16 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
         except Exception as e:
             logger.warning("commander: ToT plan selection failed: %s", type(e).__name__)
 
+    plan_limit = MAX_SUBTASKS if plan_type == "subtask" else MAX_PLAN_STEPS
+    try:
+        plan = _compile_plan_for_state(plan[:plan_limit], state)
+    except PlanValidationError as exc:
+        _log_rejected_plan("commander post-review", exc)
+        plan = _fallback_plan(user_msg, state)
+        plan_type = "agent"
+
+    agent_ids_in_plan = {s.get("agent_id", "") for s in plan}
+
     # P2: Emit plan creation progress event
     if len(plan) > 1:
         _push_event(cfg, "progress", {
@@ -417,16 +504,6 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             ],
             "message": f"已制定 {len(plan)} 步执行计划，开始执行...",
         })
-
-    for i, step in enumerate(plan):
-        if "step" not in step:
-            step["step"] = i + 1
-        if "skill_name" not in step:
-            step["skill_name"] = ""
-        if "depends_on" not in step:
-            step["depends_on"] = []
-        if "output_key" not in step:
-            step["output_key"] = f"step_{step.get('step', i + 1)}"
 
     return {
         "delegation_plan": plan,
@@ -503,22 +580,18 @@ def _get_ready_steps(
     A step is "ready" if all steps in its depends_on list have been completed.
     Steps that are already in completed_steps are excluded.
     """
-    completed_set = set(completed)
-    revision_prefix = f"{plan_revision}:"
-    revision_completed = {
-        int(ref.split(":", 1)[1])
-        for ref in (completed_refs or [])
-        if ref.startswith(revision_prefix)
-        and ref.split(":", 1)[1].isdigit()
-    }
-    if revision_completed:
-        completed_set = revision_completed
-    elif completed_refs:
-        # A new plan revision has no completed steps yet. Do not reuse
-        # step numbers from an older revision.
-        completed_set = set()
+    compiled_plan = compile_dag_plan(
+        plan,
+        plan_revision=plan_revision,
+        completed_step_refs=completed_refs,
+    )
+    completed_set = completed_steps_for_revision(
+        completed,
+        completed_refs,
+        plan_revision,
+    )
     ready = []
-    for s in plan:
+    for s in compiled_plan:
         step_num = s.get("step", 0)
         if step_num in completed_set:
             continue
@@ -544,7 +617,11 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     llm = cfg.get("pipeline_llm", cfg["llm"])
     agent_registry: AgentRegistry = cfg["agent_registry"]
 
-    plan = state.get("delegation_plan", [])
+    plan_revision = state.get("plan_revision", 0)
+    plan = _compile_plan_for_state(
+        state.get("delegation_plan", []),
+        state,
+    )
     completed = state.get("completed_steps", [])
     results = state.get("agent_results", [])
     replan_attempts = state.get("replan_attempts", 0)
@@ -592,6 +669,9 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     revised_plan = assessment.get("revised_plan", [])
 
     if needs_revision and revised_plan:
+        if not isinstance(revised_plan, list):
+            logger.warning("replan: revised_plan is not an array, rejecting candidate")
+            return {"needs_replan": False}
         logger.info("replan: plan needs revision — %s", assessment.get("reason", "no reason given"))
         # P2: Emit replan progress event
         _push_event(cfg, "progress", {
@@ -601,6 +681,9 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             "message": f"执行计划需要修正（第 {replan_attempts + 1} 次），正在重新规划...",
         })
         # Normalize revised plan: ensure depends_on and output_key fields
+        if not all(isinstance(step, dict) for step in revised_plan):
+            logger.warning("replan: revised_plan contains a non-object step, rejecting candidate")
+            return {"needs_replan": False}
         for i, s in enumerate(revised_plan):
             if not str(s.get("agent_id", "")).strip():
                 s["agent_id"] = "commander"
@@ -634,11 +717,21 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
             logger.warning("replan: revised plan has no valid agent steps, skipping")
             return {"needs_replan": False}
         revised_plan = _normalize_plan_skills(revised_plan, agent_registry)
+        next_revision = plan_revision + 1
+        try:
+            revised_plan = compile_dag_plan(
+                revised_plan,
+                plan_revision=next_revision,
+                completed_step_refs=state.get("completed_step_refs", []),
+            )
+        except PlanValidationError as exc:
+            _log_rejected_plan("replan", exc)
+            return {"needs_replan": False}
         return {
             "delegation_plan": revised_plan,
             "needs_replan": True,
             "replan_attempts": replan_attempts + 1,
-            "plan_revision": replan_attempts + 1,
+            "plan_revision": next_revision,
         }
 
     if needs_revision:

@@ -241,7 +241,14 @@ class AgentRuntime:
         approvals = self.store.list_approval_set(owner_id, approval_set_id)
         if not approvals:
             raise OperationConflictError("approval set has no approval requests")
-        approval_ids = approval_ids or [item.approval_id for item in approvals]
+        approval_member_ids = {item.approval_id for item in approvals}
+        if approval_ids:
+            if any(item not in approval_member_ids for item in approval_ids):
+                raise OperationConflictError(
+                    "approval does not belong to approval set"
+                )
+        else:
+            approval_ids = [item.approval_id for item in approvals]
         decisions_payload = payload.get("decisions")
         decisions: dict[str, str] = {}
         if isinstance(decisions_payload, dict):
@@ -252,8 +259,10 @@ class AgentRuntime:
             }
         if not decisions:
             raise OperationConflictError("decisions are required")
-        if any(item not in {approval.approval_id for approval in approvals} for item in decisions):
-            raise OperationConflictError("approval does not belong to approval set")
+        if any(item not in approval_ids for item in decisions):
+            raise OperationConflictError(
+                "decision does not belong to requested approval ids"
+            )
         expected_version = payload.get("expected_operation_version")
         if expected_version is not None and int(expected_version) != operation.version:
             raise OperationConflictError(

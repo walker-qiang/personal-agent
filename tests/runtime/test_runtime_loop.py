@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 import time
 
+import pytest
+
 from matrix.runtime.core.runtime import AgentRuntime
 from matrix.runtime.domain.approvals import ApprovalStatus
+from matrix.runtime.domain.errors import OperationConflictError
 from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
 from matrix.runtime.domain.operations import OperationPhase
@@ -324,3 +327,70 @@ def test_expired_approval_aborts_without_executing_tool() -> None:
     assert tools.requests == []
     assert store.approvals[approval_id].status is ApprovalStatus.EXPIRED
     assert store.load("user-a", operation_id).phase is OperationPhase.ABORTED
+
+
+def test_resume_rejects_decision_outside_explicit_approval_ids() -> None:
+    store = MemoryOperationStore()
+    runtime = AgentRuntime(
+        store,
+        model=FakeModel([
+            ModelResponse(
+                tool_calls=(
+                    tool_call("call-a", "lookup-a"),
+                    tool_call("call-b", "lookup-b"),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]),
+        tools=FakeToolExecutor({
+            "lookup-a": lambda args: {"value": "a"},
+            "lookup-b": lambda args: {"value": "b"},
+        }),
+    )
+    request = RunRequest(
+        owner_id="user-a",
+        session_id="approval-id-contract",
+        agent_id="assistant",
+        messages=[Message(role="user", content="run both")],
+        tools=[
+            ToolSpec(
+                name="lookup-a",
+                requires_approval=True,
+                recovery_policy=RecoveryPolicy.MANUAL,
+            ),
+            ToolSpec(
+                name="lookup-b",
+                requires_approval=True,
+                recovery_policy=RecoveryPolicy.MANUAL,
+            ),
+        ],
+    )
+
+    suspended = runtime.start(request).result()
+    assert suspended.suspension is not None
+    approvals = store.list_approval_set(
+        "user-a", suspended.suspension.approval_set_id,
+    )
+
+    with pytest.raises(
+        OperationConflictError,
+        match="decision does not belong to requested approval ids",
+    ):
+        runtime.resume(
+            "user-a",
+            suspended.operation_id,
+            ResumeInput(
+                kind="approval",
+                payload={
+                    "approval_set_id": suspended.suspension.approval_set_id,
+                    "approval_ids": [approvals[0].approval_id],
+                    "decisions": {approvals[1].approval_id: "approve"},
+                },
+            ),
+        )
+
+    assert [
+        item.status for item in store.list_approval_set(
+            "user-a", suspended.suspension.approval_set_id,
+        )
+    ] == [ApprovalStatus.PENDING, ApprovalStatus.PENDING]

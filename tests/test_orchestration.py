@@ -1094,13 +1094,13 @@ class TestDAGRouting:
         assert result[0].arg["current_step"] == 0
 
     def test_route_dag_first_no_ready_steps(self, base_state):
-        """All steps blocked → aggregate (shouldn't happen normally)."""
+        """Unfinished blocked steps must fail closed instead of aggregating."""
         plan = [
             {"step": 1, "depends_on": [999], "task": "task1"},
             {"step": 2, "depends_on": [1], "task": "task2"},
         ]
-        result = _route_dag_first(base_state(delegation_plan=plan, completed_steps=[]))
-        assert result == "aggregate"
+        with pytest.raises(ValueError, match="unknown step"):
+            _route_dag_first(base_state(delegation_plan=plan, completed_steps=[]))
 
     def test_route_after_replan_triggers_replan(self, base_state):
         """needs_replan=True → commander_plan."""

@@ -8,7 +8,7 @@ import pytest
 from matrix.runtime import AgentRuntime, ResumeInput, RunRequest
 from matrix.runtime.adapters.sqlite_store import SQLiteRuntimeStore
 from matrix.runtime.core.reducer import with_next_phase
-from matrix.runtime.domain.approvals import ApprovalStatus
+from matrix.runtime.domain.approvals import Approval, ApprovalSet, ApprovalStatus
 from matrix.runtime.domain.errors import OperationConflictError
 from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
@@ -193,6 +193,195 @@ def test_sqlite_approval_resume_is_durable_and_effect_is_settled(tmp_path) -> No
             ),
         )
     store.close()
+
+
+def test_sqlite_multi_approval_resume_survives_restart_and_is_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "runtime-multi-approval.db"
+    initial_store = SQLiteRuntimeStore(db_path)
+    initial_model = FakeModel([
+        ModelResponse(
+            tool_calls=(
+                tool_call("call-a", "write-a", {"value": "a"}),
+                tool_call("call-b", "write-b", {"value": "b"}),
+            ),
+            finish_reason="tool_calls",
+        ),
+    ])
+    initial_tools = FakeToolExecutor({
+        "write-a": lambda args: {"ok": "a"},
+        "write-b": lambda args: {"ok": "b"},
+    })
+    request = RunRequest(
+        owner_id="owner-a",
+        session_id="sqlite-multi-approval",
+        agent_id="assistant",
+        messages=[Message(role="user", content="write both")],
+        system_prompt="persisted system prompt",
+        model="persisted-model",
+        tools=[
+            ToolSpec(
+                name="write-a",
+                requires_approval=True,
+                recovery_policy=RecoveryPolicy.MANUAL,
+            ),
+            ToolSpec(
+                name="write-b",
+                requires_approval=True,
+                recovery_policy=RecoveryPolicy.MANUAL,
+            ),
+        ],
+    )
+
+    suspended = AgentRuntime(
+        initial_store, initial_model, initial_tools,
+    ).start(request).result()
+    assert suspended.outcome is RunOutcome.SUSPENDED
+    assert suspended.suspension is not None
+    operation = initial_store.load("owner-a", suspended.operation_id)
+    assert operation is not None
+    approval_set_id = suspended.suspension.approval_set_id
+    approvals = initial_store.list_approval_set("owner-a", approval_set_id)
+    assert len(approvals) == 2
+    assert operation.state["request_snapshot"]["system_prompt"] == "persisted system prompt"
+    assert operation.state["request_snapshot"]["model"] == "persisted-model"
+    initial_store.close()
+
+    partial_store = SQLiteRuntimeStore(db_path)
+    partial_operation = partial_store.load("owner-a", suspended.operation_id)
+    assert partial_operation is not None
+    partial_set = partial_store.get_approval_set("owner-a", approval_set_id)
+    assert partial_set is not None
+    partial = AgentRuntime(
+        partial_store, FakeModel(), FakeToolExecutor(),
+    ).resume(
+        "owner-a",
+        suspended.operation_id,
+        ResumeInput(
+            kind="approval",
+            payload={
+                "approval_set_id": approval_set_id,
+                "approval_ids": [approvals[0].approval_id],
+                "decisions": {approvals[0].approval_id: "approve"},
+                "expected_operation_version": partial_operation.version,
+                "expected_approval_set_version": partial_set.version,
+                "idempotency_key": "partial-approval",
+            },
+        ),
+    ).result()
+    assert partial.outcome is RunOutcome.SUSPENDED
+    assert [
+        item.status for item in partial_store.list_approval_set(
+            "owner-a", approval_set_id,
+        )
+    ] == [ApprovalStatus.APPROVED, ApprovalStatus.PENDING]
+    partial_operation = partial_store.load("owner-a", suspended.operation_id)
+    partial_set = partial_store.get_approval_set("owner-a", approval_set_id)
+    assert partial_operation is not None
+    assert partial_set is not None
+    partial_store.close()
+
+    replay_store = SQLiteRuntimeStore(db_path)
+    replay = AgentRuntime(
+        replay_store, FakeModel(), FakeToolExecutor(),
+    ).resume(
+        "owner-a",
+        suspended.operation_id,
+        ResumeInput(
+            kind="approval",
+            payload={
+                "approval_set_id": approval_set_id,
+                "approval_ids": [approvals[0].approval_id],
+                "decisions": {approvals[0].approval_id: "approve"},
+                "expected_operation_version": partial_operation.version,
+                "expected_approval_set_version": partial_set.version,
+                "idempotency_key": "partial-approval",
+            },
+        ),
+    ).result()
+    assert replay.outcome is RunOutcome.SUSPENDED
+    assert replay.suspension is not None
+    assert replay.suspension.approval_ids == [approvals[1].approval_id]
+    replay_operation = replay_store.load("owner-a", suspended.operation_id)
+    replay_set = replay_store.get_approval_set("owner-a", approval_set_id)
+    assert replay_operation is not None
+    assert replay_set is not None
+    replay_store.close()
+
+    final_store = SQLiteRuntimeStore(db_path)
+    final_model = FakeModel([ModelResponse(content="done")])
+    final_tools = FakeToolExecutor({
+        "write-a": lambda args: {"ok": "a"},
+        "write-b": lambda args: {"ok": "b"},
+    })
+    final = AgentRuntime(
+        final_store, final_model, final_tools,
+    ).resume(
+        "owner-a",
+        suspended.operation_id,
+        ResumeInput(
+            kind="approval",
+            payload={
+                "approval_set_id": approval_set_id,
+                "approval_ids": [approvals[1].approval_id],
+                "decisions": {approvals[1].approval_id: "skip"},
+                "expected_operation_version": replay_operation.version,
+                "expected_approval_set_version": replay_set.version,
+                "idempotency_key": "final-approval",
+            },
+        ),
+    ).result()
+    assert final.outcome is RunOutcome.COMPLETED
+    assert final.final_message == "done"
+    assert [request.call_id for request in final_tools.requests] == ["call-a"]
+    assert final_model.requests[0].system_prompt == "persisted system prompt"
+    assert final_model.requests[0].model == "persisted-model"
+    assert final_store.load("owner-a", suspended.operation_id).phase is OperationPhase.COMPLETED
+    final_store.close()
+
+
+def test_sqlite_lists_all_dag_waiting_approval_operations_for_session(tmp_path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime-dag-approvals.db")
+    for step_id in ("1", "2"):
+        operation = replace(
+            _operation(f"dag-op-{step_id}"),
+            session_id="dag-session",
+            phase=OperationPhase.WAITING_APPROVAL,
+            orchestration_run_id="dag-run",
+            operation_scope="dag_step",
+            step_id=step_id,
+        )
+        store.create(operation)
+        approval_set_id = f"set-{step_id}"
+        store.create_approval_set(
+            ApprovalSet(
+                approval_set_id=approval_set_id,
+                owner_id="user-a",
+                operation_id=operation.operation_id,
+                orchestration_run_id="dag-run",
+            )
+        )
+        store.create_approval(
+            Approval(
+                approval_id=f"approval-{step_id}",
+                owner_id="user-a",
+                operation_id=operation.operation_id,
+                tool_call_id=f"call-{step_id}",
+                tool_name="write",
+                approval_set_id=approval_set_id,
+            )
+        )
+
+    waiting = store.list_waiting_approvals("user-a", "dag-session")
+
+    assert {item.operation_id for item in waiting} == {"dag-op-1", "dag-op-2"}
+    assert all(item.operation_scope == "dag_step" for item in waiting)
+    store.close()
+
+    reopened = SQLiteRuntimeStore(tmp_path / "runtime-dag-approvals.db")
+    assert reopened.recover_incomplete(reason="test_restart") == []
+    restored = reopened.list_waiting_approvals("user-a", "dag-session")
+    assert {item.operation_id for item in restored} == {"dag-op-1", "dag-op-2"}
+    reopened.close()
 
 
 def test_sqlite_expired_approval_never_executes_effect(tmp_path) -> None:

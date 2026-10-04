@@ -17,6 +17,11 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 
+from .plan_validator import (
+    PlanValidationError,
+    completed_steps_for_revision,
+    compile_dag_plan,
+)
 from .nodes import (
     _get_ready_steps,
     aggregate_node,
@@ -148,9 +153,14 @@ def _route_dag_first(state: AgentState):
     Multi-step plans with DAG dependencies:
       → [Send("runtime_delegate", ...)] for each ready step
         (depends_on all satisfied).
-      If no ready steps (shouldn't happen on first call), → "aggregate".
+      If all steps are complete, → "aggregate"; otherwise fail closed.
     """
-    plan = state.get("delegation_plan", [])
+    plan_revision = state.get("plan_revision", 0)
+    plan = compile_dag_plan(
+        state.get("delegation_plan", []),
+        plan_revision=plan_revision,
+        completed_step_refs=state.get("completed_step_refs", []),
+    )
     if len(plan) <= 1:
         return "runtime_agent"
 
@@ -159,11 +169,29 @@ def _route_dag_first(state: AgentState):
         plan,
         completed,
         state.get("completed_step_refs", []),
-        state.get("plan_revision", 0),
+        plan_revision,
     )
 
     if not ready:
-        return "aggregate"
+        completed_for_revision = completed_steps_for_revision(
+            completed,
+            state.get("completed_step_refs", []),
+            plan_revision,
+        )
+        step_ids = {step["step"] for step in plan}
+        if step_ids.issubset(completed_for_revision):
+            return "aggregate"
+        raise PlanValidationError(
+            "dag_stalled",
+            (
+                "DAG plan has no ready steps while unfinished steps remain: "
+                f"{sorted(step_ids - completed_for_revision)}"
+            ),
+            details={
+                "unfinished_steps": sorted(step_ids - completed_for_revision),
+                "plan_revision": plan_revision,
+            },
+        )
 
     return [
         Send("runtime_delegate", {
@@ -187,23 +215,45 @@ def _route_after_replan(state: AgentState):
 
     needs_replan → "commander_plan" (regenerate plan)
     more steps ready → [Send("runtime_delegate", ...)] for next batch
-    all done → "aggregate"
+    all done → "aggregate"; stalled plans fail closed
     """
+    plan_revision = state.get("plan_revision", 0)
+    plan = compile_dag_plan(
+        state.get("delegation_plan", []),
+        plan_revision=plan_revision,
+        completed_step_refs=state.get("completed_step_refs", []),
+    )
     if state.get("needs_replan"):
         return "commander_plan"
 
-    plan = state.get("delegation_plan", [])
     completed = state.get("completed_steps", [])
     ready = _get_ready_steps(
         plan,
         completed,
         state.get("completed_step_refs", []),
-        state.get("plan_revision", 0),
+        plan_revision,
     )
 
     if not ready:
-        # All steps done or no more executable steps
-        return "aggregate"
+        completed_for_revision = completed_steps_for_revision(
+            completed,
+            state.get("completed_step_refs", []),
+            plan_revision,
+        )
+        step_ids = {step["step"] for step in plan}
+        if step_ids.issubset(completed_for_revision):
+            return "aggregate"
+        raise PlanValidationError(
+            "dag_stalled",
+            (
+                "DAG plan has no ready steps while unfinished steps remain: "
+                f"{sorted(step_ids - completed_for_revision)}"
+            ),
+            details={
+                "unfinished_steps": sorted(step_ids - completed_for_revision),
+                "plan_revision": plan_revision,
+            },
+        )
 
     return [
         Send("runtime_delegate", {
