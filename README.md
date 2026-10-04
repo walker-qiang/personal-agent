@@ -127,6 +127,9 @@ cp .env.example .env
 | `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件 |
 | `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
 | `/memory/list` | GET | 查询用户记忆 |
+| `/memory/candidates` | GET | 查询待确认或已审核的记忆候选 |
+| `/memory/candidates/{id}/approve` | POST | 确认候选并写入 policy（需要 `confirm: true`） |
+| `/memory/candidates/{id}/reject` | POST | 拒绝记忆候选 |
 | `/memory` | POST | 创建用户记忆 |
 | `/memory/{key}` | DELETE | 删除用户记忆 |
 | `/memory/evolve` | POST | 手动触发记忆演化 |

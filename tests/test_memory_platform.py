@@ -67,6 +67,30 @@ class TestPolicyPreservation:
             other.sync_profile_from_file("u", path)
         assert other.get_policies("u") == {"硬约束": "不买加密货币"}
 
+    def test_memory_candidate_stays_out_of_profile_until_reviewed(self, store):
+        candidate = store.create_memory_candidate(
+            "u",
+            "硬约束",
+            "不买亏损股",
+            source_session_id="session-1",
+            source_quote="以后不要买亏损股",
+            confidence=0.6,
+        )
+
+        assert store.get_profile("u") == {}
+        assert store.list_memory_candidates("u")[0]["id"] == candidate["id"]
+        assert store.create_memory_candidate(
+            "u", "硬约束", "不买亏损股",
+        )["id"] == candidate["id"]
+
+        assert store.review_memory_candidate(
+            "u", candidate["id"], status="approved", reviewed_by="u",
+        )
+        reviewed = store.get_memory_candidate("u", candidate["id"])
+        assert reviewed is not None
+        assert reviewed["status"] == "approved"
+        assert store.list_memory_candidates("u") == []
+
 
 # ── Phase 0: bounded write worker (B-2) ──────────────────────────────────
 

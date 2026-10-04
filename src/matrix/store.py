@@ -104,6 +104,26 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     updated_at  REAL NOT NULL,
     PRIMARY KEY (user_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           TEXT NOT NULL,
+    key               TEXT NOT NULL,
+    value             TEXT NOT NULL,
+    memory_type       TEXT NOT NULL DEFAULT 'policy',
+    source_session_id TEXT NOT NULL DEFAULT '',
+    source_quote      TEXT NOT NULL DEFAULT '',
+    confidence        REAL NOT NULL DEFAULT 0.0,
+    status            TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(status IN ('pending', 'approved', 'rejected')),
+    created_at        REAL NOT NULL,
+    reviewed_at       REAL NOT NULL DEFAULT 0,
+    reviewed_by       TEXT NOT NULL DEFAULT '',
+    review_note       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_user_status
+    ON memory_candidates(user_id, status, created_at DESC);
 """
 
 
@@ -128,6 +148,15 @@ _PROFILE_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 # "session" facts belong to one conversation and must not leak into others.
 SCOPE_USER = "user"
 SCOPE_SESSION = "session"
+
+MEMORY_CANDIDATE_PENDING = "pending"
+MEMORY_CANDIDATE_APPROVED = "approved"
+MEMORY_CANDIDATE_REJECTED = "rejected"
+_MEMORY_CANDIDATE_STATUSES = frozenset({
+    MEMORY_CANDIDATE_PENDING,
+    MEMORY_CANDIDATE_APPROVED,
+    MEMORY_CANDIDATE_REJECTED,
+})
 
 
 class SessionStore:
@@ -992,6 +1021,164 @@ END;
                 (user_id, scope),
             ).fetchone()
         return row[0] if row else 0
+
+    @staticmethod
+    def _memory_candidate_from_row(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "key": row[2],
+            "value": row[3],
+            "memory_type": row[4],
+            "source_session_id": row[5],
+            "source_quote": row[6],
+            "confidence": row[7],
+            "status": row[8],
+            "created_at": row[9],
+            "reviewed_at": row[10],
+            "reviewed_by": row[11],
+            "review_note": row[12],
+        }
+
+    def create_memory_candidate(
+        self,
+        user_id: str,
+        key: str,
+        value: str,
+        *,
+        memory_type: str = "policy",
+        source_session_id: str = "",
+        source_quote: str = "",
+        confidence: float = 0.0,
+    ) -> dict[str, Any]:
+        """Create or reuse a pending candidate for explicit user review."""
+        if memory_type not in ("preference", "policy"):
+            raise ValueError("memory_type must be 'preference' or 'policy'")
+        now = time.time()
+        with self._lock:
+            conn = self._get_conn()
+            existing = conn.execute(
+                "SELECT id FROM memory_candidates "
+                "WHERE user_id=? AND key=? AND value=? AND status=? "
+                "ORDER BY id DESC LIMIT 1",
+                (user_id, key, value, MEMORY_CANDIDATE_PENDING),
+            ).fetchone()
+            if existing:
+                row = conn.execute(
+                    "SELECT id, user_id, key, value, memory_type, "
+                    "source_session_id, source_quote, confidence, status, "
+                    "created_at, reviewed_at, reviewed_by, review_note "
+                    "FROM memory_candidates WHERE id=?",
+                    (existing[0],),
+                ).fetchone()
+                assert row is not None
+                return self._memory_candidate_from_row(row)
+
+            cursor = conn.execute(
+                "INSERT INTO memory_candidates ("
+                "user_id, key, value, memory_type, source_session_id, "
+                "source_quote, confidence, status, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id, key, value, memory_type, source_session_id,
+                    source_quote, confidence, MEMORY_CANDIDATE_PENDING, now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT id, user_id, key, value, memory_type, "
+                "source_session_id, source_quote, confidence, status, "
+                "created_at, reviewed_at, reviewed_by, review_note "
+                "FROM memory_candidates WHERE id=?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            assert row is not None
+            return self._memory_candidate_from_row(row)
+
+    def get_memory_candidate(
+        self, user_id: str, candidate_id: int,
+    ) -> dict[str, Any] | None:
+        """Return one candidate owned by the user, regardless of review status."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT id, user_id, key, value, memory_type, "
+                "source_session_id, source_quote, confidence, status, "
+                "created_at, reviewed_at, reviewed_by, review_note "
+                "FROM memory_candidates WHERE id=? AND user_id=?",
+                (candidate_id, user_id),
+            ).fetchone()
+        return self._memory_candidate_from_row(row) if row else None
+
+    def list_memory_candidates(
+        self,
+        user_id: str,
+        *,
+        status: str = MEMORY_CANDIDATE_PENDING,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List candidates for a user, newest first."""
+        if status != "all" and status not in _MEMORY_CANDIDATE_STATUSES:
+            raise ValueError("invalid memory candidate status")
+        limit = max(1, min(int(limit), 200))
+        where = "user_id=?"
+        params: list[Any] = [user_id]
+        if status != "all":
+            where += " AND status=?"
+            params.append(status)
+        params.append(limit)
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT id, user_id, key, value, memory_type, "
+                "source_session_id, source_quote, confidence, status, "
+                "created_at, reviewed_at, reviewed_by, review_note "
+                f"FROM memory_candidates WHERE {where} "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._memory_candidate_from_row(row) for row in rows]
+
+    def review_memory_candidate(
+        self,
+        user_id: str,
+        candidate_id: int,
+        *,
+        status: str,
+        reviewed_by: str,
+        review_note: str = "",
+    ) -> bool:
+        """Move a pending candidate to an explicit terminal review state."""
+        if status not in (MEMORY_CANDIDATE_APPROVED, MEMORY_CANDIDATE_REJECTED):
+            raise ValueError("review status must be approved or rejected")
+        with self._lock:
+            cur = self._get_conn().execute(
+                "UPDATE memory_candidates SET status=?, reviewed_at=?, "
+                "reviewed_by=?, review_note=? "
+                "WHERE id=? AND user_id=? AND status=?",
+                (
+                    status, time.time(), reviewed_by, review_note,
+                    candidate_id, user_id, MEMORY_CANDIDATE_PENDING,
+                ),
+            )
+            self._get_conn().commit()
+            return cur.rowcount > 0
+
+    def count_memory_candidates(
+        self, user_id: str, *, status: str = MEMORY_CANDIDATE_PENDING,
+    ) -> int:
+        """Count pending or reviewed candidates for a user."""
+        if status != "all" and status not in _MEMORY_CANDIDATE_STATUSES:
+            raise ValueError("invalid memory candidate status")
+        where = "user_id=?"
+        params: list[Any] = [user_id]
+        if status != "all":
+            where += " AND status=?"
+            params.append(status)
+        with self._lock:
+            row = self._get_conn().execute(
+                f"SELECT COUNT(*) FROM memory_candidates WHERE {where}",
+                params,
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def get_policies(
         self, user_id: str, scope: str = SCOPE_USER, scope_id: str = "",

@@ -5,6 +5,9 @@ and memory evolution triggers for API clients.
 
 Endpoints:
   GET    /memory/list            — list all memories with provenance metadata
+  GET    /memory/candidates      — list pending/reviewed memory candidates
+  POST   /memory/candidates/{id}/approve — confirm a candidate as policy
+  POST   /memory/candidates/{id}/reject  — reject a candidate
   POST   /memory                 — create or update a memory
   DELETE /memory/{key}           — retire (or hard-delete) a memory by key
   POST   /memory/evolve          — manually trigger memory evolution
@@ -48,6 +51,13 @@ def _get_lesson_store(request: Request):
     return request.app.state.chat._lesson_store
 
 
+def _public_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Do not repeat the authenticated user id in a user-facing response."""
+    return {
+        key: value for key, value in candidate.items() if key != "user_id"
+    }
+
+
 # ── User Memory CRUD ──────────────────────────────────────────────────────
 
 
@@ -69,6 +79,175 @@ async def list_memories(request: Request, include_retired: bool = False):
         "memories": memories,
         "count": count,
         "max": 80,
+    }
+
+
+@router.get("/memory/candidates")
+async def list_memory_candidates(
+    request: Request,
+    status: str = "pending",
+    limit: int = 100,
+):
+    """List memory candidates awaiting explicit user review."""
+    store = _get_store(request)
+    user_id = _get_user_id(request)
+    try:
+        candidates = store.list_memory_candidates(
+            user_id, status=status, limit=limit,
+        )
+        pending_count = store.count_memory_candidates(user_id, status="pending")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "candidates": [_public_candidate(candidate) for candidate in candidates],
+        "count": len(candidates),
+        "pending_count": pending_count,
+        "max": 200,
+    }
+
+
+@router.post("/memory/candidates/{candidate_id}/approve")
+async def approve_memory_candidate(request: Request, candidate_id: int):
+    """Approve a candidate and persist it as a durable hard policy."""
+    store = _get_store(request)
+    user_id = _get_user_id(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict) or payload.get("confirm") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="批准 policy 候选需要 body 中显式提供 confirm: true。",
+        )
+
+    candidate = store.get_memory_candidate(user_id, candidate_id)
+    if candidate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"memory candidate '{candidate_id}' not found",
+        )
+    if candidate["status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"memory candidate '{candidate_id}' has already been reviewed",
+        )
+    if candidate["memory_type"] != "policy":
+        raise HTTPException(
+            status_code=400,
+            detail="only policy candidates can be approved by this endpoint",
+        )
+
+    chat = request.app.state.chat
+    guard = getattr(chat, "_memory_safety", None)
+    value = candidate["value"]
+    if guard is not None:
+        screening = guard.screen(candidate["key"], value)
+        if not screening.allowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"记忆候选未通过安全校验：{screening.reason}",
+            )
+        value = screening.value
+
+    store.upsert_profile(
+        user_id,
+        candidate["key"],
+        value,
+        memory_type="policy",
+        source_session_id=candidate["source_session_id"],
+        source_quote=candidate["source_quote"],
+        confidence=candidate["confidence"],
+    )
+    profile = store.get_profile_for_vault(user_id)
+    try:
+        sync_memory_profile(user_id, profile)
+    except VaultWriteError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    reviewed = store.review_memory_candidate(
+        user_id,
+        candidate_id,
+        status="approved",
+        reviewed_by=user_id,
+    )
+    if not reviewed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"memory candidate '{candidate_id}' was reviewed concurrently",
+        )
+
+    retriever = getattr(chat, "_memory_retriever", None)
+    if retriever is not None:
+        try:
+            retriever.index_keys(user_id, [(candidate["key"], value)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory candidate approve: index failed: %s", exc)
+
+    logger.info(
+        "memory candidate approved: user=%s id=%s key=%s",
+        user_id, candidate_id, candidate["key"],
+    )
+    return {
+        "ok": True,
+        "candidate": _public_candidate(
+            store.get_memory_candidate(user_id, candidate_id) or candidate,
+        ),
+        "memory": {
+            "key": candidate["key"],
+            "value": value,
+            "memory_type": "policy",
+        },
+    }
+
+
+@router.post("/memory/candidates/{candidate_id}/reject")
+async def reject_memory_candidate(request: Request, candidate_id: int):
+    """Reject a pending memory candidate without writing it to memory."""
+    store = _get_store(request)
+    user_id = _get_user_id(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    note = str(payload.get("note", "")).strip()[:500]
+
+    candidate = store.get_memory_candidate(user_id, candidate_id)
+    if candidate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"memory candidate '{candidate_id}' not found",
+        )
+    if candidate["status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"memory candidate '{candidate_id}' has already been reviewed",
+        )
+
+    reviewed = store.review_memory_candidate(
+        user_id,
+        candidate_id,
+        status="rejected",
+        reviewed_by=user_id,
+        review_note=note,
+    )
+    if not reviewed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"memory candidate '{candidate_id}' was reviewed concurrently",
+        )
+
+    logger.info(
+        "memory candidate rejected: user=%s id=%s key=%s",
+        user_id, candidate_id, candidate["key"],
+    )
+    return {
+        "ok": True,
+        "candidate": _public_candidate(
+            store.get_memory_candidate(user_id, candidate_id) or candidate,
+        ),
     }
 
 

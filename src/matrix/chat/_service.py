@@ -2691,6 +2691,7 @@ class ChatService:
         durable_sync_needed = False
         written = 0
         screened_out = 0
+        pending_candidates = 0
         indexed: list[tuple[str, str]] = []
         try:
             prompt = MEMORY_EXTRACTION_PROMPT.format(
@@ -2703,26 +2704,49 @@ class ChatService:
             if not isinstance(raw_candidates, list):
                 raw_candidates = []
             candidates: list[dict[str, Any]] = []
+            policy_candidates: list[dict[str, Any]] = []
             for mem in raw_candidates:
                 if not isinstance(mem, dict):
                     continue
                 key = str(mem.get("key", "")).strip()
                 value = str(mem.get("value", "")).strip()
                 raw_type = str(mem.get("type", "preference")).strip().lower()
-                mem_type = "preference"
-                if raw_type == "policy":
-                    logger.info(
-                        "memory_extract_policy_downgraded: user=%s session=%s key=%s",
-                        user_id, session_id, key,
-                    )
                 if key and value:
-                    candidates.append(
-                        {"key": key, "value": value, "type": mem_type},
-                    )
+                    candidate = {"key": key, "value": value}
+                    if raw_type == "policy":
+                        policy_candidates.append(candidate)
+                    else:
+                        candidates.append({**candidate, "type": "preference"})
             logger.info(
-                "memory_extract_llm: user=%s session=%s candidates=%d",
-                user_id, session_id, len(candidates),
+                "memory_extract_llm: user=%s session=%s candidates=%d policy_candidates=%d",
+                user_id, session_id, len(candidates), len(policy_candidates),
             )
+
+            for candidate in policy_candidates:
+                screening = self._memory_safety.screen(
+                    candidate["key"], candidate["value"],
+                )
+                if not screening.allowed:
+                    screened_out += 1
+                    logger.warning(
+                        "memory_candidate_rejected: user=%s key=%s reason=%s",
+                        user_id, candidate["key"], screening.reason,
+                    )
+                    continue
+                pending = self.store.create_memory_candidate(
+                    user_id,
+                    candidate["key"],
+                    screening.value,
+                    memory_type="policy",
+                    source_session_id=session_id,
+                    source_quote=question[:200],
+                    confidence=0.6,
+                )
+                pending_candidates += 1
+                logger.info(
+                    "memory_candidate_pending: user=%s id=%s key=%s session=%s",
+                    user_id, pending["id"], candidate["key"], session_id,
+                )
 
             if candidates:
                 # Write-time decision (Phase 2): compare against what is
@@ -2855,8 +2879,9 @@ class ChatService:
                 logger.warning("memory_durable_sync_failed: user=%s reason=%s", user_id, exc)
 
         logger.info(
-            "memory_extract_done: user=%s session=%s written=%d rejected=%d elapsed_ms=%.0f",
-            user_id, session_id, written, screened_out,
+            "memory_extract_done: user=%s session=%s written=%d "
+            "pending_candidates=%d rejected=%d elapsed_ms=%.0f",
+            user_id, session_id, written, pending_candidates, screened_out,
             (time.time() - started) * 1000,
         )
 

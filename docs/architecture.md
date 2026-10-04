@@ -395,6 +395,11 @@ Matrix 采用多层记忆架构，结合 MemoryEvolution 管线自动维护记�
 | 语义记忆 | RAG (ChromaDB + BM25) | 长期知识检索 |
 | 程序记忆 | Skills（目录化 `SKILL.md` + YAML frontmatter） | 可复用的执行流程 |
 | 用户画像 | `user_profile` 表 | 用户偏好、策略 |
+| 记忆候选 | `memory_candidates` 表 | 自动抽取的硬规则，需用户确认后才升级为 policy |
+
+硬规则的自动抽取不会直接进入 `user_profile` 或提示词，而是先进入 `pending`
+候选区。用户通过候选审批接口确认后，系统才写入 `policy`、同步 Vault 并更新
+记忆检索索引；拒绝候选只记录审核结果，不产生长期记忆。
 
 #### MemoryEvolution 4 阶段管线
 
@@ -544,6 +549,9 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/api/runtime/operations/{id}/events` | GET | 查询 operation 事件，支持 `after_sequence` 增量补拉 |
 | `/api/runtime/operations/{id}/retry-context` | GET | 获取 recovery-required operation 的安全重试上下文 |
 | `/memory/list` | GET | 查询用户记忆 |
+| `/memory/candidates` | GET | 查询待确认或已审核的记忆候选 |
+| `/memory/candidates/{id}/approve` | POST | 确认候选并写入 policy（需要 `confirm: true`） |
+| `/memory/candidates/{id}/reject` | POST | 拒绝记忆候选 |
 | `/memory` | POST | 创建用户记忆 |
 | `/memory/{key}` | DELETE | 删除用户记忆 |
 | `/memory/evolve` | POST | 手动触发记忆演化 |

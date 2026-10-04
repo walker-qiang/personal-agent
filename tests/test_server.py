@@ -327,6 +327,65 @@ class TestMemoryPolicyConfirmation:
 
         assert resp.status_code == 409
 
+    def test_memory_candidate_can_be_listed_approved_and_synced(
+        self, client, auth_token, monkeypatch,
+    ):
+        from matrix.server.routes import memory as memory_routes
+
+        candidate = client.app.state.chat.store.create_memory_candidate(
+            "admin",
+            "hard-rule",
+            "不买亏损股",
+            source_session_id="candidate-session",
+            source_quote="以后不要买亏损股",
+            confidence=0.6,
+        )
+        listed = client.get(
+            "/memory/candidates",
+            headers=_auth_headers(auth_token),
+        )
+        assert listed.status_code == 200
+        assert listed.json()["pending_count"] == 1
+        assert listed.json()["candidates"][0]["id"] == candidate["id"]
+
+        missing_confirm = client.post(
+            f"/memory/candidates/{candidate['id']}/approve",
+            json={},
+            headers=_auth_headers(auth_token),
+        )
+        assert missing_confirm.status_code == 409
+
+        monkeypatch.setattr(
+            memory_routes,
+            "sync_memory_profile",
+            lambda user_id, profile: {"ok": True},
+        )
+        approved = client.post(
+            f"/memory/candidates/{candidate['id']}/approve",
+            json={"confirm": True},
+            headers=_auth_headers(auth_token),
+        )
+        assert approved.status_code == 200
+        assert approved.json()["memory"]["memory_type"] == "policy"
+        stored = client.app.state.chat.store.get_all_memories("admin")
+        assert stored[0]["memory_type"] == "policy"
+        assert stored[0]["source_session_id"] == "candidate-session"
+
+    def test_memory_candidate_can_be_rejected_without_writing(self, client, auth_token):
+        candidate = client.app.state.chat.store.create_memory_candidate(
+            "admin", "temporary-rule", "暂不执行", source_session_id="s",
+        )
+
+        rejected = client.post(
+            f"/memory/candidates/{candidate['id']}/reject",
+            json={"note": "用户未确认"},
+            headers=_auth_headers(auth_token),
+        )
+
+        assert rejected.status_code == 200
+        assert rejected.json()["candidate"]["status"] == "rejected"
+        assert client.app.state.chat.store.get_profile("admin") == {}
+
 
 class TestReset:
     def test_reset_returns_ok(self, client, auth_token):

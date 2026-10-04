@@ -11,15 +11,15 @@ from ..runtime.domain.events import RuntimeEvent, RuntimeEventType
 
 MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，以 JSON 格式返回。
 -只提取明确陈述的事实，不要推测。
--自动抽取只能返回 "preference"；硬性规则/约束必须由用户通过显式确认写入，不能由对话自动升级为 policy。
--返回格式：{{"memories": [{{"key": "简短键名", "value": "事实描述", "type": "preference"}}]}}
+-硬性规则/约束可以标记为 "policy"，但只能进入待确认候选区，不能直接写入长期记忆。
+-返回格式：{{"memories": [{{"key": "简短键名", "value": "事实描述", "type": "policy|preference"}}]}}
 
 可提取的信息类型：
 - 用户偏好（如"喜欢简洁回答"、"使用中文"）→ type: preference
 - 关键实体（如"我持有腾讯股票"、"我的投资目标是XX"）→ type: preference
 - 常用指令（如"每天早上查看持仓"）→ type: preference
 - 个人信息（如"我是软件工程师"、"我在北京"）→ type: preference
-- 硬性约束（如"不买亏损股票"、"最大回撤不超过 10%"）→ 仍返回 type: preference，等待用户显式确认
+- 硬性约束（如"不买亏损股票"、"最大回撤不超过 10%"）→ type: policy，等待用户显式确认
 
 如果没有新信息，返回 {{"memories": []}}。
 
