@@ -32,6 +32,7 @@ from .nodes import (
     runtime_confirm_node,
     runtime_delegate_node,
 )
+from .runtime_adapter import failed_dag_steps_for_revision
 from .state import AgentState
 
 
@@ -165,11 +166,16 @@ def _route_dag_first(state: AgentState):
         return "runtime_agent"
 
     completed = state.get("completed_steps", [])
+    failed_steps = failed_dag_steps_for_revision(
+        state.get("agent_results", []),
+        plan_revision,
+    )
     ready = _get_ready_steps(
         plan,
         completed,
         state.get("completed_step_refs", []),
         plan_revision,
+        failed_steps,
     )
 
     if not ready:
@@ -180,6 +186,8 @@ def _route_dag_first(state: AgentState):
         )
         step_ids = {step["step"] for step in plan}
         if step_ids.issubset(completed_for_revision):
+            return "aggregate"
+        if failed_steps:
             return "aggregate"
         raise PlanValidationError(
             "dag_stalled",
@@ -227,11 +235,16 @@ def _route_after_replan(state: AgentState):
         return "commander_plan"
 
     completed = state.get("completed_steps", [])
+    failed_steps = failed_dag_steps_for_revision(
+        state.get("agent_results", []),
+        plan_revision,
+    )
     ready = _get_ready_steps(
         plan,
         completed,
         state.get("completed_step_refs", []),
         plan_revision,
+        failed_steps,
     )
 
     if not ready:
@@ -242,6 +255,8 @@ def _route_after_replan(state: AgentState):
         )
         step_ids = {step["step"] for step in plan}
         if step_ids.issubset(completed_for_revision):
+            return "aggregate"
+        if failed_steps:
             return "aggregate"
         raise PlanValidationError(
             "dag_stalled",

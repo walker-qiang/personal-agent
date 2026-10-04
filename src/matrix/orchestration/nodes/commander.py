@@ -574,6 +574,7 @@ def _get_ready_steps(
     completed: list[int],
     completed_refs: list[str] | None = None,
     plan_revision: int = 0,
+    failed_steps: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Find steps whose dependencies are all satisfied.
 
@@ -590,10 +591,11 @@ def _get_ready_steps(
         completed_refs,
         plan_revision,
     )
+    failed_set = failed_steps or set()
     ready = []
     for s in compiled_plan:
         step_num = s.get("step", 0)
-        if step_num in completed_set:
+        if step_num in completed_set or step_num in failed_set:
             continue
         deps = s.get("depends_on", [])
         if all(d in completed_set for d in deps):
@@ -624,10 +626,18 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
     )
     completed = state.get("completed_steps", [])
     results = state.get("agent_results", [])
+    failed_results = [
+        item for item in results
+        if isinstance(item, dict)
+        and (
+            item.get("status") == "failed"
+            or bool(item.get("error"))
+        )
+    ]
     replan_attempts = state.get("replan_attempts", 0)
 
     # Safety: if no plan or no completed steps, skip replan
-    if not plan or not completed:
+    if not plan or (not completed and not failed_results):
         return {"needs_replan": False}
 
     # Safety: prevent infinite replan loops
@@ -637,16 +647,30 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
 
     # Build summary of completed steps
     completed_summary = []
+    results_by_step = {
+        int(item["step"]): item
+        for item in results
+        if isinstance(item, dict)
+        and item.get("step") is not None
+    }
     for s in plan:
         sn = s.get("step", 0)
-        if sn in completed:
-            # Find matching result
-            matched = [r for r in results if r.get("task") == s.get("task")]
+        matched = results_by_step.get(sn)
+        if sn in completed or matched is not None:
             completed_summary.append({
                 "step": sn,
                 "task": s.get("task", ""),
-                "result_preview": (matched[0].get("result", "")[:200] + "...") if matched else "(no result)",
-                "error": matched[0].get("error", "") if matched else "",
+                "status": (
+                    matched.get("status", "completed")
+                    if matched
+                    else "completed"
+                ),
+                "result_preview": (
+                    (matched.get("result", "")[:200] + "...")
+                    if matched and matched.get("result")
+                    else "(no result)"
+                ),
+                "error": matched.get("error", "") if matched else "",
             })
 
     try:

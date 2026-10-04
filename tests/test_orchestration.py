@@ -23,6 +23,7 @@ from matrix.orchestration.nodes import (
     commander_plan_node,
     reflection_node,
     replan_node,
+    runtime_agent_node,
     _run_domain_agent_react,
 )
 from matrix.orchestration.nodes._helpers import (
@@ -35,7 +36,9 @@ from matrix.orchestration.nodes._helpers import (
 )
 from matrix.orchestration.state import AgentState
 from matrix.orchestration.runtime_adapter import build_dag_run_request
+from matrix.orchestration.runtime_adapter import run_dag_step
 from matrix.runtime.testing.memory_store import MemoryOperationStore
+from matrix.runtime.domain.results import RunOutcome, RunResult
 from matrix.tools import ToolRegistry, ToolDefinition
 from matrix.llm import FunctionCallResult, LLMError, ToolCall
 from matrix.agent import AgentRegistry
@@ -256,6 +259,135 @@ def test_runtime_dag_next_batch_carries_completed_results():
     assert routed[0].arg["agent_results"] == [
         {"step": 1, "result": "dependency-marker"},
     ]
+
+
+def test_failed_dag_step_does_not_unlock_dependents(full_tools, agent_registry, monkeypatch):
+    class FailedHandle:
+        operation_id = "op-failed"
+
+        def events(self):
+            return []
+
+        def result(self):
+            return RunResult(
+                outcome=RunOutcome.FAILED,
+                operation_id=self.operation_id,
+                error="upstream unavailable",
+            )
+
+    class FailedRuntime:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def start(self, request):
+            del request
+            return FailedHandle()
+
+    monkeypatch.setattr(
+        "matrix.orchestration.runtime_adapter.AgentRuntime",
+        FailedRuntime,
+    )
+    state = AgentState(
+        user_message="analyze",
+        session_id="runtime-dag",
+        orchestration_run_id="run-1",
+    )
+    cfg = make_config(FakeLLM([]), full_tools, agent_registry)["configurable"]
+    result = run_dag_step(
+        state,
+        cfg,
+        {
+            "step": 1,
+            "agent_id": "investment-analyst",
+            "task": "collect source",
+            "depends_on": [],
+            "output_key": "source",
+        },
+    )
+
+    assert result["agent_results"][0]["status"] == "failed"
+    assert result["agent_results"][0]["runtime_outcome"] == "failed"
+    assert "completed_steps" not in result
+    assert "completed_step_refs" not in result
+
+
+def test_failed_single_step_does_not_mark_completion(
+    base_state,
+    full_tools,
+    agent_registry,
+    monkeypatch,
+):
+    class FailedHandle:
+        operation_id = "op-failed-single"
+
+        def events(self):
+            return []
+
+        def result(self):
+            return RunResult(
+                outcome=RunOutcome.FAILED,
+                operation_id=self.operation_id,
+                error="agent unavailable",
+            )
+
+    class FailedRuntime:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def start(self, request):
+            del request
+            return FailedHandle()
+
+    monkeypatch.setattr(
+        "matrix.orchestration.nodes.runtime.AgentRuntime",
+        FailedRuntime,
+    )
+    result = runtime_agent_node(
+        base_state(
+            delegation_plan=[{
+                "step": 1,
+                "agent_id": "investment-analyst",
+                "task": "analyze",
+                "depends_on": [],
+                "output_key": "analysis",
+            }],
+        ),
+        config=make_config(FakeLLM([]), full_tools, agent_registry),
+    )
+
+    assert result["agent_results"][0]["status"] == "failed"
+    assert "completed_steps" not in result
+
+
+def test_failed_dag_routes_to_aggregate_when_no_revision(
+    base_state,
+    full_tools,
+    agent_registry,
+):
+    llm = FakeLLM([
+        '{"needs_revision": false, "reason": "", "revised_plan": []}',
+    ])
+    state = base_state(
+        delegation_plan=[
+            {"step": 1, "depends_on": [], "task": "task1", "output_key": "source"},
+            {"step": 2, "depends_on": [1], "task": "task2", "output_key": "analysis"},
+        ],
+        completed_steps=[],
+        agent_results=[{
+            "step": 1,
+            "status": "failed",
+            "runtime_outcome": "failed",
+            "task": "task1",
+            "error": "source unavailable",
+        }],
+    )
+
+    result = replan_node(
+        state,
+        config=make_config(llm, full_tools, agent_registry),
+    )
+    assert result["needs_replan"] is False
+    assert _route_after_replan(state) == "aggregate"
 
 
 # ---- Commander Plan ----

@@ -34,6 +34,7 @@ from ..state import AgentState
 from ..runtime_adapter import (
     build_agent_system_prompt,
     build_multimodal_content,
+    dag_step_status,
     run_dag_step,
 )
 
@@ -52,7 +53,15 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     routing_task = str(cfg.get("user_message") or state.get("user_message") or task)
     agent_def = agent_registry.get(agent_id)
     if agent_def is None:
-        return {"agent_results": [{"agent_id": agent_id, "task": task, "error": f"Agent not found: {agent_id}"}]}
+        return {
+            "agent_results": [{
+                "agent_id": agent_id,
+                "task": task,
+                "status": "failed",
+                "runtime_outcome": "failed",
+                "error": f"Agent not found: {agent_id}",
+            }],
+        }
 
     agent_tools = agent_registry.build_tool_registry(agent_id, full_tools)
     breaker = cfg.get("circuit_breaker")
@@ -162,6 +171,9 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     agent_result = {
         "agent_id": agent_id,
         "task": task,
+        "plan_revision": state.get("plan_revision", 0),
+        "status": dag_step_status(result.outcome),
+        "runtime_outcome": result.outcome.value,
         "result": _public_answer_for_tool_results(
             result.final_message,
             runtime_tool_results,
@@ -171,15 +183,17 @@ def runtime_agent_node(state: AgentState, *, config: RunnableConfig) -> dict[str
     }
     if result.outcome is not RunOutcome.COMPLETED:
         agent_result["error"] = result.error or result.outcome.value
-    return {
+    result_data: dict[str, Any] = {
         "agent_results": [agent_result],
         "tool_results": runtime_tool_results,
         "tool_call_count": len(runtime_tool_results),
-        "completed_steps": [step.get("step", current_step + 1)],
-        "completed_step_refs": [
-            f"{state.get('plan_revision', 0)}:{step.get('step', current_step + 1)}"
-        ],
     }
+    if result.outcome is RunOutcome.COMPLETED:
+        result_data["completed_steps"] = [step.get("step", current_step + 1)]
+        result_data["completed_step_refs"] = [
+            f"{state.get('plan_revision', 0)}:{step.get('step', current_step + 1)}"
+        ]
+    return result_data
 
 
 def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
@@ -220,6 +234,9 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
             agent_result = {
                 "agent_id": operation.agent_id,
                 "task": task,
+                "plan_revision": state.get("plan_revision", 0),
+                "status": "completed",
+                "runtime_outcome": RunOutcome.COMPLETED.value,
                 "result": _runtime_final_message(operation),
                 "operation_id": operation_id,
             }
@@ -304,6 +321,9 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
         agent_result: dict[str, Any] = {
             "agent_id": operation.agent_id,
             "task": task,
+            "plan_revision": state.get("plan_revision", 0),
+            "status": dag_step_status(result.outcome),
+            "runtime_outcome": result.outcome.value,
             "result": result.final_message,
             "operation_id": operation_id,
         }
@@ -311,6 +331,8 @@ def runtime_confirm_node(state: AgentState, *, config: RunnableConfig) -> dict[s
             agent_result["step"] = step_number
         if result.error:
             agent_result["error"] = result.error
+        elif result.outcome not in {RunOutcome.COMPLETED, RunOutcome.SUSPENDED}:
+            agent_result["error"] = result.outcome.value
         agent_results.append(agent_result)
         tool_results.extend(_tool_result_dict(item) for item in result.tool_results)
         runtime_operation_ids.append({"step": step_number, "operation_id": operation_id})

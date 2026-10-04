@@ -12,7 +12,37 @@ from ..runtime.adapters.tools import tool_specs
 from ..runtime.adapters.model import MatrixModelAdapter
 from ..runtime.adapters.tools import MatrixToolAdapter
 from ..runtime.adapters.context import MatrixContextAdapter
+from ..runtime.domain.results import RunOutcome
 from ..runtime import AgentRuntime
+
+
+def dag_step_status(outcome: RunOutcome) -> str:
+    """Map Runtime outcomes to the orchestration step status contract."""
+    if outcome is RunOutcome.COMPLETED:
+        return "completed"
+    if outcome is RunOutcome.SUSPENDED:
+        return "suspended"
+    return "failed"
+
+
+def failed_dag_steps_for_revision(
+    results: list[dict[str, Any]],
+    plan_revision: int,
+) -> set[int]:
+    """Return failed step ids belonging to the active plan revision."""
+    failed: set[int] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "failed" and not item.get("error"):
+            continue
+        recorded_revision = item.get("plan_revision")
+        if recorded_revision is not None and recorded_revision != plan_revision:
+            continue
+        step = item.get("step")
+        if isinstance(step, int) and not isinstance(step, bool):
+            failed.add(step)
+    return failed
 
 
 def run_nested_agent_runtime(
@@ -291,7 +321,7 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
             except Exception:
                 pass
     result = handle.result()
-    if result.outcome.value == "suspended" and result.suspension is not None:
+    if result.outcome is RunOutcome.SUSPENDED and result.suspension is not None:
         action_values = result.suspension.payload.get("actions", [])
         actions = [
             {
@@ -325,11 +355,13 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
                 "operation_id": handle.operation_id,
             }],
         }
-    return {
-        "agent_results": [{
+    agent_result = {
             "step": step.get("step"),
             "output_key": step.get("output_key", ""),
             "agent_id": agent_id, "task": step.get("task", ""),
+            "plan_revision": state.get("plan_revision", 0),
+            "status": dag_step_status(result.outcome),
+            "runtime_outcome": result.outcome.value,
             "result": _public_answer_for_tool_results(
                 result.final_message,
                 [
@@ -343,18 +375,26 @@ def run_dag_step(state: Any, cfg: dict[str, Any], step: dict[str, Any]) -> dict[
                 ],
             ),
             "operation_id": handle.operation_id,
-            **({"error": result.error} if result.error else {}),
-        }],
+        }
+    if result.error:
+        agent_result["error"] = result.error
+    elif result.outcome is not RunOutcome.COMPLETED:
+        agent_result["error"] = result.outcome.value
+
+    result_data: dict[str, Any] = {
+        "agent_results": [agent_result],
         "tool_results": [
             {"name": item.name, "result": item.result, "error": item.error, "call_id": item.call_id}
             for item in result.tool_results
         ],
-        "completed_steps": [step.get("step")],
-        "completed_step_refs": [
-            f"{state.get('plan_revision', 0)}:{step.get('step')}"
-        ],
         "runtime_operation_ids": [{"step": step.get("step"), "operation_id": handle.operation_id}],
     }
+    if result.outcome is RunOutcome.COMPLETED:
+        result_data["completed_steps"] = [step.get("step")]
+        result_data["completed_step_refs"] = [
+            f"{state.get('plan_revision', 0)}:{step.get('step')}"
+        ]
+    return result_data
 
 
 def _dependency_results(state: Any, step: dict[str, Any]) -> list[dict[str, Any]]:
