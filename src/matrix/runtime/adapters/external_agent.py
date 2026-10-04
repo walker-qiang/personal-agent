@@ -81,7 +81,7 @@ class ExternalAgentHandle:
                 phase=OperationPhase.REQUESTING_MODEL,
                 event_type=RuntimeEventType.RUN_START,
                 payload={"agent_id": current.agent_id, "external_agent": True},
-                ui_event={"type": "classify", "intent": "codex-direct"},
+                ui_event={"type": "classify", "intent": "external-agent"},
             )
             current, emitted = item
             self._events.append(emitted)

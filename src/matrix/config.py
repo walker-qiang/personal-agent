@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import shutil
-import sys
 from pathlib import Path
 
 
@@ -36,10 +34,6 @@ ENV_AGNES_API_KEY = "AGNES_API_KEY"
 ENV_AGENT_MODEL = "AGENT_MODEL"
 ENV_AGENT_MAX_TOKENS = "AGENT_MAX_TOKENS"
 ENV_AGENT_MODEL_TIMEOUT_SEC = "AGENT_MODEL_TIMEOUT_SEC"
-ENV_CODEX_BIN = "CODEX_BIN"
-ENV_CODEX_WORKDIR = "CODEX_WORKDIR"
-ENV_CODEX_SANDBOX = "MATRIX_CODEX_SANDBOX"
-ENV_CODEX_REASONING_EFFORT = "CODEX_REASONING_EFFORT"
 ENV_DEEPSEEK_BASE_URL = "DEEPSEEK_BASE_URL"
 ENV_AGNES_BASE_URL = "AGNES_BASE_URL"
 ENV_MEMORY_MAX_TURNS = "MEMORY_MAX_TURNS"
@@ -75,20 +69,13 @@ ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
 
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_CODEX_MODEL = "codex-cli"
-DEFAULT_CODEX_SANDBOX = "read-only"
-DEFAULT_CODEX_REASONING_EFFORT = "medium"
-
 # Known models per provider (text/chat models only)
 KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
-    "codex": [
-        {"id": "codex-cli", "name": "本地 Codex", "desc": "本机 Agent"},
-    ],
     "deepseek": [
         {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "快速 · 1M上下文"},
         {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
     ],
-    }
+}
 
 # Agnes base URL (used for image/video generation only, not text LLM)
 DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
@@ -112,8 +99,8 @@ VIDEO_MODELS: dict[str, list[dict[str, str]]] = {
 # planning and evaluation can be tuned without changing the Runtime contract.
 ENV_PIPELINE_PROVIDER = "PIPELINE_PROVIDER"
 ENV_PIPELINE_MODEL = "PIPELINE_MODEL"
-DEFAULT_PIPELINE_PROVIDER = "codex"
-DEFAULT_PIPELINE_MODEL = DEFAULT_CODEX_MODEL
+DEFAULT_PIPELINE_PROVIDER = "deepseek"
+DEFAULT_PIPELINE_MODEL = DEFAULT_DEEPSEEK_MODEL
 
 # Providers served by the OpenAI-compatible chat client. Agnes was retired as
 # a chat provider — it survives only as the image/video generation tool, which
@@ -144,10 +131,6 @@ class AgentConfig:
     anthropic_api_key: str = ""
     agnes_api_key: str = ""
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
-    codex_bin: str = "codex"
-    codex_workdir: str = ""
-    codex_sandbox: str = DEFAULT_CODEX_SANDBOX
-    codex_reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT
     agnes_base_url: str = DEFAULT_AGNES_BASE_URL
     memory_max_turns: int = 8
     # Long-term memory retrieval (Phase 1)
@@ -189,17 +172,10 @@ class AgentConfig:
 
     def _provider_unavailable_reason(self, provider: str) -> str:
         """Why a given provider cannot serve requests, or "" if it can."""
-        if provider == "codex":
-            if shutil.which(self.codex_bin):
-                return ""
-            return (
-                f"missing Codex CLI: {self.codex_bin}; install Codex or fix CODEX_BIN "
-                "(set to codex for automatic discovery)"
-            )
         if provider not in _API_PROVIDERS:
             return (
                 f"unsupported provider: {provider} "
-                f"(supported: codex, {', '.join(sorted(_API_PROVIDERS))})"
+                f"(supported: {', '.join(sorted(_API_PROVIDERS))})"
             )
         if not self.active_api_key:
             return f"missing {_API_PROVIDER_KEY_ENVS.get(provider, 'API key')}"
@@ -227,10 +203,8 @@ class AgentConfig:
     def resolved_pipeline_provider(self) -> str:
         """Pipeline provider actually used, after availability fallback.
 
-        The default pipeline provider is Codex CLI, but the binary is absent in
-        many deployments (CI, machines without the CLI). Internal pipeline tasks
-        — notably memory extraction — must not silently die in that case, so we
-        degrade onto the API provider instead.
+        Internal pipeline tasks — notably memory extraction — use the API
+        provider when the configured provider is unavailable.
         """
         if self.pipeline_unavailable_reason == "":
             return self.pipeline_provider
@@ -276,16 +250,8 @@ def load_config() -> AgentConfig:
         skills_base_dir = root / ".." / "personal-assets" / "31-技能"
 
     host, port = load_bind_addr()
-    provider = os.environ.get(ENV_AGENT_PROVIDER, "codex").strip().lower() or "codex"
+    provider = os.environ.get(ENV_AGENT_PROVIDER, "deepseek").strip().lower() or "deepseek"
     model = os.environ.get(ENV_AGENT_MODEL, default_model(provider)).strip() or default_model(provider)
-    codex_bin = _resolve_codex_bin()
-    codex_workdir = os.environ.get(ENV_CODEX_WORKDIR, "").strip()
-    if not codex_workdir:
-        codex_workdir = str(root.parent)
-    codex_sandbox = os.environ.get(ENV_CODEX_SANDBOX, DEFAULT_CODEX_SANDBOX).strip() or DEFAULT_CODEX_SANDBOX
-    codex_reasoning_effort = os.environ.get(
-        ENV_CODEX_REASONING_EFFORT, DEFAULT_CODEX_REASONING_EFFORT
-    ).strip() or DEFAULT_CODEX_REASONING_EFFORT
 
     # Log level: map string to int
     level_str = os.environ.get(ENV_LOG_LEVEL, "INFO").strip().upper()
@@ -379,10 +345,6 @@ def load_config() -> AgentConfig:
         agnes_api_key=os.environ.get(ENV_AGNES_API_KEY, "").strip(),
         deepseek_base_url=os.environ.get(ENV_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_BASE_URL).strip()
         or DEFAULT_DEEPSEEK_BASE_URL,
-        codex_bin=codex_bin,
-        codex_workdir=codex_workdir,
-        codex_sandbox=codex_sandbox,
-        codex_reasoning_effort=codex_reasoning_effort,
         agnes_base_url=os.environ.get(ENV_AGNES_BASE_URL, DEFAULT_AGNES_BASE_URL).strip()
         or DEFAULT_AGNES_BASE_URL,
         memory_max_turns=clamp_int_env(ENV_MEMORY_MAX_TURNS, 8, 1, 30),
@@ -424,34 +386,6 @@ def load_config() -> AgentConfig:
     )
 
 
-def _resolve_codex_bin() -> str:
-    configured = os.environ.get(ENV_CODEX_BIN, "").strip() or "codex"
-    configured = os.path.expanduser(configured)
-    found = shutil.which(configured)
-    if found:
-        return os.path.abspath(found)
-    # An explicit override must not silently select a different executable.
-    if configured != "codex":
-        return configured
-
-    home = Path.home()
-    candidates = [home / ".local/bin/codex"]
-    if sys.platform == "darwin":
-        candidates.extend([Path("/opt/homebrew/bin/codex"), Path("/usr/local/bin/codex")])
-        for applications in (Path("/Applications"), home / "Applications"):
-            for app in ("Codex.app", "ChatGPT.app"):
-                resources = applications / app / "Contents/Resources"
-                candidates.extend([
-                    resources / "codex-cli/CodexCLI.app/Contents/MacOS/codex",
-                    resources / "codex",
-                ])
-    for candidate in candidates:
-        found = shutil.which(str(candidate))
-        if found:
-            return os.path.abspath(found)
-    return "codex"
-
-
 def find_root(start: Path) -> Path:
     """Find the project root by locating pyproject.toml."""
     current = start.resolve()
@@ -472,8 +406,6 @@ def load_bind_addr() -> tuple[str, int]:
 
 
 def default_model(provider: str) -> str:
-    if provider == "codex":
-        return DEFAULT_CODEX_MODEL
     return DEFAULT_DEEPSEEK_MODEL
 
 

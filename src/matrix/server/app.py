@@ -92,10 +92,6 @@ def _build_rag(config: AgentConfig, tools_registry: ToolRegistry) -> tuple[objec
                     if pipeline_provider == "agnes"
                     else config.deepseek_base_url
                 ),
-                codex_bin=config.codex_bin,
-                codex_workdir=config.codex_workdir,
-                codex_sandbox=config.codex_sandbox,
-                codex_reasoning_effort=config.codex_reasoning_effort,
                 max_tokens=config.agent_max_tokens,
                 timeout_sec=config.agent_model_timeout_sec,
             )

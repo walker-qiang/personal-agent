@@ -162,11 +162,9 @@ class TestLoadConfig:
 
 
 class TestProviderAvailability:
-    """Provider availability, and pipeline degradation when Codex CLI is absent.
+    """Provider availability and pipeline degradation.
 
-    Agnes was retired as a chat provider; deepseek is the only API provider
-    left, so an unusable pipeline must degrade onto deepseek rather than
-    silently dying (which is what left user_profile empty for months).
+    Agnes is retired as a chat provider; DeepSeek is the only text provider.
     """
 
     def _load(self, monkeypatch, **env):
@@ -189,33 +187,20 @@ class TestProviderAvailability:
         assert cfg.llm_available is False
         assert "unsupported provider" in cfg.llm_unavailable_reason
 
-    def test_pipeline_degrades_to_deepseek_when_codex_missing(self, monkeypatch):
-        monkeypatch.setattr("matrix.config.shutil.which", lambda _b: None)
+    def test_pipeline_defaults_to_deepseek(self, monkeypatch):
         cfg = self._load(
             monkeypatch,
             AGENT_PROVIDER="deepseek",
             DEEPSEEK_API_KEY="sk-test",
-            PIPELINE_PROVIDER="codex",
         )
-        # Configured provider is dead -> reason recorded...
-        assert "Codex CLI" in cfg.pipeline_unavailable_reason
-        # ...and the pipeline degrades onto the API provider.
         assert cfg.resolved_pipeline_provider == "deepseek"
         assert cfg.pipeline_llm_available is True
 
-    def test_pipeline_keeps_codex_when_binary_present(self, monkeypatch):
-        monkeypatch.setattr("matrix.config.shutil.which", lambda _b: "/usr/bin/codex")
-        cfg = self._load(monkeypatch, PIPELINE_PROVIDER="codex")
-        assert cfg.pipeline_unavailable_reason == ""
-        assert cfg.pipeline_llm_available is True
-        assert cfg.resolved_pipeline_provider == "codex"
-
     def test_pipeline_unusable_when_no_provider_works(self, monkeypatch):
-        """No Codex CLI and no API key -> flagged unavailable, not silently OK."""
-        monkeypatch.setattr("matrix.config.shutil.which", lambda _b: None)
+        """No DeepSeek API key -> flagged unavailable."""
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         cfg = self._load(
-            monkeypatch, AGENT_PROVIDER="deepseek", PIPELINE_PROVIDER="codex",
+            monkeypatch, AGENT_PROVIDER="deepseek", PIPELINE_PROVIDER="deepseek",
         )
         assert cfg.pipeline_llm_available is False
         assert cfg.resolved_pipeline_unavailable_reason != ""

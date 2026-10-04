@@ -29,7 +29,7 @@ def test_external_agent_maps_events_without_owning_the_inner_loop():
         {"type": "done"},
     ])
     handle = ExternalAgentAdapter(store, client).start(
-        owner_id="owner-a", session_id="session-a", agent_id="codex-direct",
+        owner_id="owner-a", session_id="session-a", agent_id="external-agent",
         system="system", messages=[{"role": "user", "content": "hello"}],
     )
 
@@ -51,7 +51,7 @@ def test_external_agent_cancel_is_durable_and_does_not_run_again():
     store = MemoryOperationStore()
     client = FakeExternalAgent([{"type": "message", "content": "never"}])
     handle = ExternalAgentAdapter(store, client).start(
-        owner_id="owner-a", session_id="session-cancel", agent_id="codex-direct",
+        owner_id="owner-a", session_id="session-cancel", agent_id="external-agent",
         system="system", messages=[],
     )
     handle.cancel("user stopped")
@@ -70,7 +70,7 @@ def test_external_agent_partial_stream_is_recovered_after_restart():
     store = MemoryOperationStore()
     client = FakeExternalAgent([{"type": "message", "content": "partial"}])
     handle = ExternalAgentAdapter(store, client).start(
-        owner_id="owner-a", session_id="session-restart", agent_id="codex-direct",
+        owner_id="owner-a", session_id="session-restart", agent_id="external-agent",
         system="system", messages=[],
     )
     stream = handle.events()

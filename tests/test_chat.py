@@ -154,25 +154,25 @@ class TestChatService:
 
     def test_client_disconnect_closes_stream_without_yielding_done(self, chat_service):
         llm = FakeLLM(["unused"])
-        llm.provider = "codex"
+        llm.provider = "deepseek"
         chat_service._default_llm = llm
         stream = chat_service.stream_chat("close after first event", session_id="disconnect-test")
 
         assert next(stream)["type"] == "classify"
         stream.close()
 
-    def test_codex_direct_runtime_persists_completed_operation(self, chat_service):
-        llm = FakeLLM(["Codex 运行时适配完成。"])
-        llm.provider = "codex"
+    def test_runtime_persists_completed_operation(self, chat_service):
+        llm = FakeLLM(["Runtime 适配完成。"])
+        llm.provider = "deepseek"
         chat_service._default_llm = llm
 
         events = list(chat_service.stream_chat(
-            "验证 Codex Runtime", session_id="codex-runtime-test", user_id="codex-user",
+            "验证 Runtime", session_id="runtime-test", user_id="runtime-user",
         ))
 
         assert any(event["type"] == "token" for event in events)
         operations = chat_service._runtime_store.list_operations(
-            "codex-user", session_id="codex-runtime-test",
+            "runtime-user", session_id="runtime-test",
         )
         assert len(operations) == 1
         assert operations[0].phase.value == "completed"

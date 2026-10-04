@@ -57,8 +57,8 @@ uv sync
 
 # 配置环境变量
 cp .env.example .env
-# 至少配置 JWT_SECRET；默认文本 provider 为 Codex。
-# 使用 DeepSeek 时再配置 DEEPSEEK_API_KEY。
+# 至少配置 JWT_SECRET 和 DEEPSEEK_API_KEY。
+# 当前文本 provider 为 DeepSeek。
 
 # 启动
 ./.venv/bin/python -m matrix

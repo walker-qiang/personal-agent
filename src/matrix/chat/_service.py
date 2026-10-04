@@ -1105,10 +1105,6 @@ class ChatService:
             agnes_api_key=config.agnes_api_key,
             model=config.agent_model,
             deepseek_base_url=config.deepseek_base_url,
-            codex_bin=config.codex_bin,
-            codex_workdir=config.codex_workdir,
-            codex_sandbox=config.codex_sandbox,
-            codex_reasoning_effort=config.codex_reasoning_effort,
             agnes_base_url=config.agnes_base_url,
             max_tokens=config.agent_max_tokens,
             timeout_sec=config.agent_model_timeout_sec,
@@ -1142,10 +1138,6 @@ class ChatService:
                     config.agnes_base_url if provider == "agnes"
                     else config.deepseek_base_url
                 ),
-                codex_bin=config.codex_bin,
-                codex_workdir=config.codex_workdir,
-                codex_sandbox=config.codex_sandbox,
-                codex_reasoning_effort=config.codex_reasoning_effort,
                 agnes_base_url=config.agnes_base_url,
                 max_tokens=config.agent_max_tokens,
                 timeout_sec=config.agent_model_timeout_sec,
@@ -1262,10 +1254,6 @@ class ChatService:
     def available_providers(self) -> list[dict[str, Any]]:
         """List available providers with their models."""
         providers = []
-        if self.config.llm_available or self.config.agent_provider == "codex":
-            from shutil import which
-            if which(self.config.codex_bin):
-                providers.append({"id": "codex", "name": "本地 Codex", "models": KNOWN_MODELS.get("codex", [])})
         if self.config.deepseek_api_key:
             providers.append({"id": "deepseek", "name": "DeepSeek", "models": KNOWN_MODELS.get("deepseek", [])})
         return providers
@@ -1291,7 +1279,7 @@ class ChatService:
         if session_id:
             provider = self.store.get_provider(session_id, user_id=user_id)
             model = self.store.get_model(session_id, user_id=user_id)
-            if provider:
+            if provider == "deepseek":
                 return {"provider": provider, "model": model or default_model(provider)}
         return {"provider": self._default_provider, "model": default_model(self._default_provider)}
 
@@ -1307,7 +1295,7 @@ class ChatService:
         Returns:
             dict with 'ok', 'provider', and 'model' fields.
         """
-        if provider not in {"codex", "deepseek"}:
+        if provider != "deepseek":
             return {"ok": False, "error": f"unsupported provider: {provider}"}
         if not self.store.set_provider(session_id, provider, model, user_id=user_id):
             return {"ok": False, "error": "session not found or belongs to another user"}
@@ -1324,10 +1312,6 @@ class ChatService:
                 agnes_api_key=self.config.agnes_api_key,
                 model=model or default_model(provider),
                 deepseek_base_url=self.config.deepseek_base_url,
-                codex_bin=self.config.codex_bin,
-                codex_workdir=self.config.codex_workdir,
-                codex_sandbox=self.config.codex_sandbox,
-                codex_reasoning_effort=self.config.codex_reasoning_effort,
                 agnes_base_url=self.config.agnes_base_url,
                 max_tokens=self.config.agent_max_tokens,
                 timeout_sec=self.config.agent_model_timeout_sec,
@@ -1338,10 +1322,11 @@ class ChatService:
     def _get_llm(self, session_id: str | None, user_id: str = "default") -> LLMClient:
         """Get the LLM client for a session, using stored provider/model."""
         if session_id:
-            provider = self.store.get_provider(session_id, user_id=user_id)
-            if provider:
-                model = self.store.get_model(session_id, user_id=user_id)
-                return self._build_llm(provider, model or None)
+            provider_info = self.get_provider(session_id, user_id=user_id)
+            if provider_info["provider"] != self._default_provider:
+                return self._build_llm(
+                    provider_info["provider"], provider_info["model"],
+                )
         return self._default_llm
 
     def probe_llm(self, session_id: str | None = None, user_id: str = "default") -> dict[str, Any]:
@@ -1365,10 +1350,6 @@ class ChatService:
                 agnes_api_key=self.config.agnes_api_key,
                 model=model,
                 deepseek_base_url=self.config.deepseek_base_url,
-                codex_bin=self.config.codex_bin,
-                codex_workdir=self.config.codex_workdir,
-                codex_sandbox=self.config.codex_sandbox,
-                codex_reasoning_effort=self.config.codex_reasoning_effort,
                 agnes_base_url=self.config.agnes_base_url,
                 max_tokens=512,
                 timeout_sec=min(self.config.agent_model_timeout_sec, 30.0),
