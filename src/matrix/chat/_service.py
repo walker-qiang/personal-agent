@@ -2708,9 +2708,13 @@ class ChatService:
                     continue
                 key = str(mem.get("key", "")).strip()
                 value = str(mem.get("value", "")).strip()
-                mem_type = str(mem.get("type", "preference")).strip()
-                if mem_type not in ("preference", "policy"):
-                    mem_type = "preference"
+                raw_type = str(mem.get("type", "preference")).strip().lower()
+                mem_type = "preference"
+                if raw_type == "policy":
+                    logger.info(
+                        "memory_extract_policy_downgraded: user=%s session=%s key=%s",
+                        user_id, session_id, key,
+                    )
                 if key and value:
                     candidates.append(
                         {"key": key, "value": value, "type": mem_type},
@@ -2732,9 +2736,26 @@ class ChatService:
                     user_id, session_id, outcome.counts(),
                     outcome.llm_used, outcome.reason,
                 )
+                existing_by_key = {
+                    str(item.get("key", "")): item
+                    for item in existing
+                    if isinstance(item, dict) and item.get("key")
+                }
                 for decision in outcome.decisions:
                     if decision.op in ("ADD", "UPDATE"):
                         if not decision.key or not decision.value:
+                            continue
+                        existing_memory = existing_by_key.get(decision.key)
+                        if (
+                            existing_memory
+                            and existing_memory.get("memory_type") == "policy"
+                        ):
+                            logger.warning(
+                                "memory_rejected: user=%s key=%s reason="
+                                "automatic write cannot mutate confirmed policy",
+                                user_id, decision.key,
+                            )
+                            screened_out += 1
                             continue
                         screening = self._memory_safety.screen(
                             decision.key, decision.value,
@@ -2748,7 +2769,9 @@ class ChatService:
                             continue
                         self.store.upsert_profile(
                             user_id, decision.key, screening.value,
-                            memory_type=decision.memory_type,
+                            # Automatic extraction never has the authority to
+                            # create or promote a hard policy.
+                            memory_type="preference",
                             source_session_id=session_id,
                             source_quote=question[:200],
                             confidence=0.6 if outcome.llm_used else 0.4,
@@ -2759,11 +2782,23 @@ class ChatService:
                         logger.info(
                             "memory_upsert: user=%s op=%s key=%s type=%s session=%s",
                             user_id, decision.op, decision.key,
-                            decision.memory_type, session_id,
+                            "preference", session_id,
                         )
                         durable_sync_needed = True
                     elif decision.op == "DELETE":
                         if not decision.key:
+                            continue
+                        existing_memory = existing_by_key.get(decision.key)
+                        if (
+                            existing_memory
+                            and existing_memory.get("memory_type") == "policy"
+                        ):
+                            logger.warning(
+                                "memory_rejected: user=%s key=%s reason="
+                                "automatic delete cannot remove confirmed policy",
+                                user_id, decision.key,
+                            )
+                            screened_out += 1
                             continue
                         removed = self.store.delete_profile_key(
                             user_id, decision.key,

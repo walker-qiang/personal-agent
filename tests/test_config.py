@@ -160,6 +160,17 @@ class TestLoadConfig:
         config = load_config()
         assert config.cache_path == os_cache.resolve()
 
+    def test_rag_allowlist_is_configurable_and_docs_path_is_absolute(
+        self, monkeypatch,
+    ):
+        monkeypatch.setenv("JWT_SECRET", "test-secret-key-for-config-tests-32bytes")
+        monkeypatch.setenv("MATRIX_RAG_ALLOWED_DIRS", "20-资料, 21-知识")
+
+        config = load_config()
+
+        assert config.rag_allowed_dirs == ("20-资料", "21-知识")
+        assert Path(config.rag_docs_path).is_absolute()
+
 
 class TestProviderAvailability:
     """Provider availability and pipeline degradation.

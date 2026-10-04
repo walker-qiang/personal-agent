@@ -9,6 +9,7 @@ import pytest
 
 from matrix.chat import ChatService, preview_json
 from matrix.config import AgentConfig
+from matrix.memory.decisions import MemoryDecisionEngine
 from matrix.tools import ToolRegistry
 from matrix.tools.finance import register_all
 
@@ -105,6 +106,53 @@ class TestChatService:
         )
 
         assert chat_service.store.get_profile("memory-user") == {"language": "中文"}
+
+    def test_automatic_policy_candidate_is_stored_as_preference(self, chat_service):
+        chat_service._pipeline_llm = FakeLLM([
+            '{"memories": [{"key": "hard-rule", "value": "不买亏损股", "type": "policy"}]}',
+        ])
+        chat_service._memory_decisions = MemoryDecisionEngine(
+            llm=FakeLLM([
+                '{"decisions": [{"op": "ADD", "key": "hard-rule", '
+                '"value": "不买亏损股", "type": "policy"}]}',
+            ]),
+            enabled=True,
+        )
+
+        chat_service._extract_memories(
+            "以后不要买亏损股。",
+            "好的，我会注意。",
+            "memory-policy-user",
+        )
+
+        memories = chat_service.store.get_all_memories("memory-policy-user")
+        assert memories[0]["memory_type"] == "preference"
+
+    def test_automatic_delete_cannot_remove_confirmed_policy(self, chat_service):
+        chat_service.store.upsert_profile(
+            "memory-policy-user", "hard-rule", "不买亏损股",
+            memory_type="policy",
+        )
+        chat_service._pipeline_llm = FakeLLM([
+            '{"memories": [{"key": "hard-rule", "value": "可以买亏损股", '
+            '"type": "preference"}]}',
+        ])
+        chat_service._memory_decisions = MemoryDecisionEngine(
+            llm=FakeLLM([
+                '{"decisions": [{"op": "DELETE", "target": "hard-rule", '
+                '"key": "hard-rule", "type": "preference"}]}',
+            ]),
+            enabled=True,
+        )
+
+        chat_service._extract_memories(
+            "我改变想法了。",
+            "已记录。",
+            "memory-policy-user",
+        )
+
+        memories = chat_service.store.get_all_memories("memory-policy-user")
+        assert memories[0]["memory_type"] == "policy"
 
     def test_empty_message_returns_error(self, chat_service):
         events = list(chat_service.stream_chat(""))

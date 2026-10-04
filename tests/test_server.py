@@ -210,6 +210,7 @@ class TestChat:
             assert "missing DEEPSEEK_API_KEY" in text
             assert "event: done" in text
 
+
     def test_chat_with_tools(self, client, auth_token):
         """Full chat flow with FakeLLM — requires monkeypatching the app state."""
         resp = client.post(
@@ -269,6 +270,62 @@ class TestChat:
         assert len(summaries) == 1
         assert summaries[0]["summary"] == "旧分支讨论了测试事实。"
         assert llm.calls == 1
+
+
+class TestMemoryPolicyConfirmation:
+    def test_policy_requires_explicit_confirmation(self, client, auth_token):
+        resp = client.post(
+            "/memory",
+            json={
+                "key": "hard-rule",
+                "value": "不买亏损股",
+                "memory_type": "policy",
+            },
+            headers=_auth_headers(auth_token),
+        )
+
+        assert resp.status_code == 409
+        assert "confirm: true" in resp.json()["detail"]
+
+    def test_policy_accepts_boolean_confirmation(
+        self, client, auth_token, monkeypatch,
+    ):
+        from matrix.server.routes import memory as memory_routes
+
+        monkeypatch.setattr(
+            memory_routes,
+            "sync_memory_profile",
+            lambda user_id, profile: {"ok": True},
+        )
+        resp = client.post(
+            "/memory",
+            json={
+                "key": "hard-rule",
+                "value": "不买亏损股",
+                "memory_type": "policy",
+                "confirm": True,
+            },
+            headers=_auth_headers(auth_token),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["memory_type"] == "policy"
+        stored = client.app.state.chat.store.get_all_memories("admin")
+        assert stored[0]["memory_type"] == "policy"
+
+    def test_string_confirmation_is_not_accepted(self, client, auth_token):
+        resp = client.post(
+            "/memory",
+            json={
+                "key": "hard-rule",
+                "value": "不买亏损股",
+                "memory_type": "policy",
+                "confirm": "true",
+            },
+            headers=_auth_headers(auth_token),
+        )
+
+        assert resp.status_code == 409
 
 
 class TestReset:

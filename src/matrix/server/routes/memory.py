@@ -76,7 +76,10 @@ async def list_memories(request: Request, include_retired: bool = False):
 async def upsert_memory(request: Request):
     """Create or update a memory entry.
 
-    Body: {"key": str, "value": str, "memory_type": "preference"|"policy"}
+    Body: {"key": str, "value": str, "memory_type": "preference"|"policy",
+           "confirm": bool}
+
+    ``policy`` is a durable hard rule and requires ``confirm: true``.
     """
     store = _get_store(request)
     user_id = _get_user_id(request)
@@ -87,6 +90,7 @@ async def upsert_memory(request: Request):
     memory_type = str(payload.get("memory_type", "preference")).strip()
     scope = str(payload.get("scope", "user")).strip()
     scope_id = str(payload.get("scope_id", "")).strip()
+    confirmed = payload.get("confirm") is True
 
     if not key or not value:
         raise HTTPException(status_code=400, detail="key and value are required")
@@ -96,6 +100,23 @@ async def upsert_memory(request: Request):
         raise HTTPException(status_code=400, detail="scope must be 'user' or 'session'")
     if scope == "session" and not scope_id:
         raise HTTPException(status_code=400, detail="scope_id is required when scope='session'")
+
+    existing = next(
+        (
+            item for item in store.get_all_memories(user_id)
+            if item.get("key") == key
+        ),
+        None,
+    )
+    if (
+        memory_type == "policy"
+        or (existing and existing.get("memory_type") == "policy")
+    ) and not confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="policy 是会注入后续 agent 提示词的硬约束，"
+                   "新增、修改或降级都需要 body 中显式提供 confirm: true。",
+        )
 
     # Screen before persisting: this text will be replayed into future prompts.
     chat = request.app.state.chat

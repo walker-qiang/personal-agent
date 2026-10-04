@@ -48,6 +48,7 @@ def _build_rag(config: AgentConfig, tools_registry: ToolRegistry) -> tuple[objec
         embedder=embedder,
         persist_dir=config.rag_persist_dir,
         knowledge_graph=knowledge_graph,
+        allowed_dirs=config.rag_allowed_dirs,
     )
     chunk_count = indexer.index_directory(config.rag_docs_path)
     logger.info(

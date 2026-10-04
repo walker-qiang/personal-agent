@@ -5,10 +5,12 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 import chromadb
 
+from ..config import DEFAULT_RAG_ALLOWED_DIRS
 from .context_guard import ContextGuard
 from .embedder import LocalEmbedder, get_embedding_namespace
 
@@ -30,6 +32,45 @@ _CHUNK_OVERLAP = 100  # 字符数
 
 # ChromaDB 集合名前缀；实际名称包含 embedding 模型和维度指纹。
 _COLLECTION_BASE_NAME = "documents"
+
+# Directory and filename filters are always active, even when the allowlist is
+# overridden. They prevent accidental indexing of runtime material or secrets.
+_SENSITIVE_DIRECTORY_NAMES = frozenset({
+    ".agents",
+    ".cache",
+    ".codex",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "cache",
+    "credential",
+    "credentials",
+    "dist",
+    "keys",
+    "log",
+    "logs",
+    "node_modules",
+    "private",
+    "secret",
+    "secrets",
+    "system",
+    "token",
+    "tokens",
+    "var",
+    "附件",
+    "系统",
+    "91-附件",
+    "92-系统",
+})
+
+_SENSITIVE_FILENAME_RE = re.compile(
+    r"(^\.env(?:\..*)?$|"
+    r"(^|[-_.])(api[-_]?key|credential|credentials|"
+    r"password|passwd|secret|secrets|token|tokens)([-_.]|$)|"
+    r"^(id_rsa|id_dsa|authorized_keys)$)",
+    re.IGNORECASE,
+)
 
 # 元数据键名
 _META_INDEXED_AT = ".indexed_at"
@@ -99,6 +140,107 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE, overlap: int = _CHUNK_
     return chunks
 
 
+class RagSourcePolicy:
+    """Fail-closed source policy for files entering the RAG index."""
+
+    def __init__(
+        self,
+        allowed_dirs: Sequence[str] = DEFAULT_RAG_ALLOWED_DIRS,
+    ) -> None:
+        normalized: list[str] = []
+        for raw_dir in allowed_dirs:
+            value = str(raw_dir).strip().replace("\\", "/")
+            if not value:
+                continue
+            path = Path(value)
+            if path.is_absolute() or ".." in path.parts:
+                logger.warning("rag: ignoring unsafe allowed directory: %s", raw_dir)
+                continue
+            normalized.append(Path(os.path.normpath(value)).as_posix())
+        self.allowed_dirs = tuple(dict.fromkeys(normalized))
+
+    @staticmethod
+    def _resolved(path: str | Path) -> Path:
+        return Path(path).expanduser().resolve(strict=False)
+
+    def _relative_path(
+        self,
+        docs_path: str | Path,
+        source_path: str | Path,
+    ) -> tuple[Path, Path] | None:
+        docs_root = self._resolved(docs_path)
+        candidate = self._resolved(source_path)
+        try:
+            relative = candidate.relative_to(docs_root)
+        except ValueError:
+            return None
+        return docs_root, relative
+
+    def _allowed_relative(self, docs_root: Path, relative: Path) -> bool:
+        if not relative.parts:
+            return False
+        if (
+            docs_root.name.startswith(".")
+            or docs_root.name.casefold() in _SENSITIVE_DIRECTORY_NAMES
+        ):
+            return False
+        if any(
+            part.startswith(".") or part.casefold() in _SENSITIVE_DIRECTORY_NAMES
+            for part in relative.parts[:-1]
+        ):
+            return False
+
+        allowed = tuple(Path(item) for item in self.allowed_dirs)
+        if any(item == Path(".") for item in allowed):
+            return True
+
+        relative_parts = relative.parts
+        if docs_root.name in {
+            item.name for item in allowed if len(item.parts) == 1
+        }:
+            return True
+        return any(
+            len(item.parts) <= len(relative_parts)
+            and relative_parts[:len(item.parts)] == item.parts
+            for item in allowed
+        )
+
+    def is_allowed_directory(
+        self,
+        docs_path: str | Path,
+        directory_path: str | Path,
+    ) -> bool:
+        """Return whether walking into a directory is permitted."""
+        result = self._relative_path(docs_path, directory_path)
+        if result is None:
+            return False
+        docs_root, relative = result
+        if any(
+            part.startswith(".") or part.casefold() in _SENSITIVE_DIRECTORY_NAMES
+            for part in relative.parts
+        ):
+            return False
+        return self._allowed_relative(docs_root, relative / "_placeholder")
+
+    def is_allowed_file(
+        self,
+        docs_path: str | Path,
+        file_path: str | Path,
+    ) -> bool:
+        """Return whether a file may be read and indexed."""
+        result = self._relative_path(docs_path, file_path)
+        if result is None:
+            return False
+        docs_root, relative = result
+        if not self._allowed_relative(docs_root, relative):
+            return False
+        filename = relative.name
+        return not (
+            filename.startswith(".")
+            or _SENSITIVE_FILENAME_RE.search(filename) is not None
+        )
+
+
 # ---------------------------------------------------------------------------
 # DocumentIndexer
 # ---------------------------------------------------------------------------
@@ -117,6 +259,7 @@ class DocumentIndexer:
         chunk_overlap: int = _CHUNK_OVERLAP,
         knowledge_graph: Optional["KnowledgeGraph"] = None,
         entity_extractor: Optional["EntityExtractor"] = None,
+        allowed_dirs: Sequence[str] = DEFAULT_RAG_ALLOWED_DIRS,
     ) -> None:
         """
         Args:
@@ -126,6 +269,7 @@ class DocumentIndexer:
             chunk_overlap: 块间重叠字符数。
             knowledge_graph: 可选的知识图谱实例，索引时自动抽取实体。
             entity_extractor: 可选的实体抽取器，若 None 且 knowledge_graph 存在则自动创建。
+            allowed_dirs: 相对于 docs_path 的 RAG 允许目录，默认 fail-closed。
         """
         self.embedder = embedder or LocalEmbedder()
         self.chunk_size = chunk_size
@@ -150,6 +294,7 @@ class DocumentIndexer:
 
         # Context Guard: 文档入库前的清洗层（移除 prompt injection、截断超长行）
         self._context_guard = ContextGuard()
+        self._source_policy = RagSourcePolicy(allowed_dirs)
 
         # Knowledge Graph: 可选的实体图谱抽取
         self._knowledge_graph = knowledge_graph
@@ -181,13 +326,17 @@ class DocumentIndexer:
         if not os.path.isdir(docs_path):
             raise ValueError(f"目录不存在: {docs_path}")
 
+        # Remove chunks from sources that are no longer allowed before
+        # collecting files, so a previous broad index cannot leak old data.
+        purged_chunks = self._purge_disallowed_chunks(docs_path)
+
         # 收集所有需要索引的文件
         files_to_index = self._find_files(docs_path)
         changed_files = self._filter_changed(files_to_index)
-        self.last_index_changed = bool(changed_files)
+        self.last_index_changed = bool(changed_files or purged_chunks)
 
         if not changed_files:
-            logger.info("没有文件需要更新索引。")
+            logger.info("没有文件需要更新索引，清理了 %d 个受限 chunk。", purged_chunks)
             return 0
 
         total_chunks = 0
@@ -210,13 +359,51 @@ class DocumentIndexer:
     def _find_files(self, docs_path: str) -> List[str]:
         """递归扫描目录，返回所有支持的文件路径。"""
         files: List[str] = []
-        for root, _dirs, filenames in os.walk(docs_path):
+        docs_root = str(Path(docs_path).expanduser().resolve())
+        for root, dirs, filenames in os.walk(
+            docs_root, topdown=True, followlinks=False,
+        ):
+            dirs[:] = [
+                directory for directory in dirs
+                if self._source_policy.is_allowed_directory(
+                    docs_root, os.path.join(root, directory),
+                )
+            ]
             for fname in filenames:
                 ext = os.path.splitext(fname)[1].lower()
-                if ext in _SUPPORTED_EXTS:
-                    files.append(os.path.join(root, fname))
+                file_path = os.path.join(root, fname)
+                if ext in _SUPPORTED_EXTS and self._source_policy.is_allowed_file(
+                    docs_root, file_path,
+                ):
+                    files.append(str(Path(file_path).resolve(strict=False)))
         logger.debug("扫描到 %d 个支持的文件。", len(files))
-        return files
+        return sorted(set(files))
+
+    def _purge_disallowed_chunks(self, docs_path: str) -> int:
+        """Delete existing chunks whose source is outside the current policy."""
+        try:
+            existing = self._collection.get(include=["metadatas"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rag: unable to inspect existing chunks: %s", exc)
+            return 0
+
+        ids_to_delete: list[str] = []
+        ids = existing.get("ids", []) or []
+        metadatas = existing.get("metadatas", []) or []
+        for index, chunk_id in enumerate(ids):
+            metadata = metadatas[index] if index < len(metadatas) else None
+            source_file = metadata.get("source_file") if isinstance(metadata, dict) else ""
+            if not source_file or not self._source_policy.is_allowed_file(
+                docs_path, source_file,
+            ):
+                ids_to_delete.append(chunk_id)
+
+        if ids_to_delete:
+            self._collection.delete(ids=ids_to_delete)
+            logger.warning(
+                "rag: purged %d chunks outside source policy", len(ids_to_delete),
+            )
+        return len(ids_to_delete)
 
     def _filter_changed(self, file_paths: List[str]) -> List[str]:
         """对比文件 mtime_ns 与 ChromaDB 中存储的索引时间，返回需要重新索引的文件列表。

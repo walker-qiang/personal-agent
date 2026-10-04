@@ -51,6 +51,7 @@ ENV_ADMIN_PASSWORD = "ADMIN_PASSWORD"
 ENV_RAG_DOCS_PATH = "MATRIX_RAG_DOCS_PATH"
 ENV_RAG_PERSIST_DIR = "MATRIX_RAG_PERSIST_DIR"
 ENV_RAG_EMBED_MODEL = "MATRIX_RAG_EMBED_MODEL"
+ENV_RAG_ALLOWED_DIRS = "MATRIX_RAG_ALLOWED_DIRS"
 
 # MCP (Model Context Protocol) client config
 ENV_MCP_CONFIG_PATH = "MCP_CONFIG_PATH"
@@ -79,6 +80,16 @@ KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
 
 # Agnes base URL (used for image/video generation only, not text LLM)
 DEFAULT_AGNES_BASE_URL = "https://apihub.agnes-ai.com/v1"
+
+# RAG defaults are deliberately allowlisted. Personal assets contains private
+# life, attachments, and runtime/system data that must not reach an LLM prompt.
+DEFAULT_RAG_ALLOWED_DIRS = (
+    "13-财富",
+    "20-资料",
+    "21-知识",
+    "30-项目",
+    "31-技能",
+)
 
 # Image generation models
 IMAGE_MODELS: dict[str, list[dict[str, str]]] = {
@@ -153,6 +164,7 @@ class AgentConfig:
     rag_docs_path: str = ""
     rag_persist_dir: str = ""
     rag_embed_model: str = "BAAI/bge-small-zh-v1.5"
+    rag_allowed_dirs: tuple[str, ...] = DEFAULT_RAG_ALLOWED_DIRS
     mcp_config_path: str = ""
     reflexion_max_attempts: int = 2  # 0 disables Reflexion loop
     otel_exporter_endpoint: str = ""  # OTLP endpoint (e.g. http://localhost:4318/v1/traces)
@@ -291,13 +303,18 @@ def load_config() -> AgentConfig:
         admin_password_hash = hash_password(raw_admin)
 
     # RAG config
-    rag_docs_path = os.environ.get(ENV_RAG_DOCS_PATH, "").strip()
-    if not rag_docs_path:
-        rag_docs_path = str(root / ".." / "personal-assets")
+    rag_docs_path = str(_resolve_path(
+        [ENV_RAG_DOCS_PATH],
+        root / ".." / "personal-assets",
+    ))
     rag_persist_dir = os.environ.get(ENV_RAG_PERSIST_DIR, "").strip()
     if not rag_persist_dir:
         rag_persist_dir = str(root / "var" / "rag")
     rag_embed_model = os.environ.get(ENV_RAG_EMBED_MODEL, "BAAI/bge-small-zh-v1.5").strip() or "BAAI/bge-small-zh-v1.5"
+    rag_allowed_dirs = _parse_csv_env(
+        ENV_RAG_ALLOWED_DIRS,
+        DEFAULT_RAG_ALLOWED_DIRS,
+    )
 
     # MCP config path: MCP_CONFIG_PATH > default
     mcp_config_path = os.environ.get(ENV_MCP_CONFIG_PATH, "").strip()
@@ -374,6 +391,7 @@ def load_config() -> AgentConfig:
         rag_docs_path=rag_docs_path,
         rag_persist_dir=rag_persist_dir,
         rag_embed_model=rag_embed_model,
+        rag_allowed_dirs=rag_allowed_dirs,
         mcp_config_path=mcp_config_path,
         reflexion_max_attempts=reflexion_max,
         otel_exporter_endpoint=otel_endpoint,
@@ -440,6 +458,15 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def _parse_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Parse a comma-separated allowlist while keeping a safe default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or default
 
 
 def parse_addr(raw: str, env_name: str = ENV_AGENT_ADDR) -> tuple[str, int]:
