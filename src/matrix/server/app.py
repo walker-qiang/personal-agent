@@ -27,7 +27,7 @@ from ..tools.web import register_all as register_web_tools
 from ..tools.agnes import register_all as register_agnes_tools
 from ..tools.adapters.personal_os import register_all as register_personal_os_tools
 from ..tools.rag import register_all as register_rag_tools
-from .routes import auth, chat, health, memory, provider, runtime, sessions, tools, trace, upload
+from .routes import auth, chat, health, memory, provider, runtime, sessions, tools, trace, upload, stock_research
 from .middleware import AuthMiddleware
 
 logger = get_logger("matrix")
@@ -387,6 +387,7 @@ def create_app(config: AgentConfig | None = None) -> FastAPI:
     app.include_router(tools.router)
     app.include_router(upload.router)
     app.include_router(chat.router)
+    app.include_router(stock_research.router)
     app.include_router(health.router)
     app.include_router(sessions.router)
     app.include_router(provider.router)

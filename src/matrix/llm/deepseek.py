@@ -22,7 +22,7 @@ import logging
 from typing import Any, Iterator
 
 from .errors import LLMError
-from .http import post_json_stream_events, post_json_with_retry
+from .http import post_json, post_json_stream_events, post_json_with_retry
 from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
@@ -361,6 +361,27 @@ class DeepSeekClient:
             return parse_json_response(content)
         except Exception as err:
             raise LLMError(f"DeepSeek JSON output could not be parsed: {err}") from err
+
+    def complete_json_budgeted(
+        self, system: str, messages: list[dict[str, Any]], max_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """One upstream request, with an output ceiling and observable usage."""
+        # The budget check covers the exact supplied messages; this path must
+        # never silently truncate or add a retry at the provider layer.
+        payload = {
+            "model": self.model, "instructions": system,
+            "input": self._convert_messages_to_input(messages),
+            "max_output_tokens": max_output_tokens,
+            "reasoning": {"effort": "none"},
+            "text": {"format": {"type": "json_object"}},
+        }
+        data = post_json(self.base_url.rstrip("/") + "/responses", payload, self._headers(), self.timeout_sec)
+        if data.get("status") not in (None, "completed"):
+            raise LLMError("budgeted stock research did not complete")
+        result = parse_json_response(self._parse_response(data).content)
+        if not isinstance(result, dict):
+            raise LLMError("stock research response must be a JSON object")
+        return result, data.get("usage") if isinstance(data.get("usage"), dict) else {}
 
     def stream_complete(
         self, system: str, messages: list[dict[str, Any]], temperature: float | None = None

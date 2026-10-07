@@ -6,7 +6,7 @@ import json
 from typing import Any, Iterator
 
 from .errors import LLMError
-from .http import post_json_stream, post_json_with_retry
+from .http import post_json, post_json_stream, post_json_with_retry
 from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
@@ -132,6 +132,27 @@ class AnthropicClient:
             return parse_json_response(text)
         except Exception as err:
             raise LLMError(f"Anthropic JSON output could not be parsed: {err}") from err
+
+    def complete_json_budgeted(
+        self, system: str, messages: list[dict[str, Any]], max_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """One upstream request, with an output ceiling and observable usage."""
+        payload = {
+            "model": self.model, "max_tokens": max_output_tokens,
+            "system": system, "messages": messages,
+            "tools": [{"name": "return_json", "description": "Return JSON",
+                       "input_schema": {"type": "object", "additionalProperties": True}}],
+            "tool_choice": {"type": "tool", "name": "return_json"},
+        }
+        data = post_json("https://api.anthropic.com/v1/messages", payload, self._headers(), self.timeout_sec)
+        if data.get("stop_reason") not in (None, "tool_use"):
+            raise LLMError("budgeted stock research did not complete")
+        for block in data.get("content", []):
+            if block.get("type") == "tool_use" and block.get("name") == "return_json":
+                result = block.get("input")
+                if isinstance(result, dict):
+                    return result, data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        raise LLMError("stock research response did not contain a JSON tool result")
 
     def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens from Anthropic Messages API.
