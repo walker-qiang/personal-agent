@@ -160,16 +160,17 @@ DEEP_RESEARCH_RESULT_SCHEMA: dict[str, Any] = {
 }
 
 
-def _result_shape_summary(result: dict[str, Any]) -> dict[str, Any]:
+def _result_shape_summary(result: Any) -> dict[str, Any]:
     """Return debug-safe result shape without persisting report prose."""
+    result_object = result if isinstance(result, dict) else {}
     list_fields: dict[str, dict[str, Any]] = {}
     for field in RESEARCH_MINIMUM_ITEMS:
-        value = result.get(field)
+        value = result_object.get(field)
         list_fields[field] = {
             "type": type(value).__name__,
             "count": len(value) if isinstance(value, list) else 0,
         }
-    sources = result.get("sources")
+    sources = result_object.get("sources")
     source_items = sources if isinstance(sources, list) else []
     usable_sources = [
         item for item in source_items
@@ -182,13 +183,14 @@ def _result_shape_summary(result: dict[str, Any]) -> dict[str, Any]:
         in {"official", "web_fetch", "cninfo", "hkexnews"}
     ]
     return {
-        "schema_version": result.get("schema_version"),
-        "type": result.get("type"),
-        "status": result.get("status"),
-        "research_date": result.get("research_date"),
-        "data_date": result.get("data_date"),
-        "latest_report_period": result.get("latest_report_period"),
-        "information_completeness": result.get("information_completeness"),
+        "result_type": type(result).__name__,
+        "schema_version": result_object.get("schema_version"),
+        "type": result_object.get("type"),
+        "status": result_object.get("status"),
+        "research_date": result_object.get("research_date"),
+        "data_date": result_object.get("data_date"),
+        "latest_report_period": result_object.get("latest_report_period"),
+        "information_completeness": result_object.get("information_completeness"),
         "fields": list_fields,
         "usable_source_count": len(usable_sources),
         "official_source_count": len(official_sources),
@@ -196,7 +198,7 @@ def _result_shape_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sanitization_summary(
-    before: dict[str, Any], after: dict[str, Any],
+    before: Any, after: Any,
 ) -> dict[str, Any]:
     """Record shape-only evidence for deterministic content removal."""
     return {
@@ -683,20 +685,33 @@ class DeepResearchHandle:
                     "role": "user",
                     "content": _build_multimodal_content(self.question, self.attachments),
                 }],
+                schema=DEEP_RESEARCH_RESULT_SCHEMA,
             )
-            if not isinstance(result, dict):
-                raise ValueError("深度研究汇总结果不是 JSON 对象")
-            normalized_result = self.workflow.normalize_result(
-                result, evidence, code=code, name=self.name,
-                object_type=object_type, research_date=self.research_date,
-            )
-            result = self.workflow.sanitize_result(
-                normalized_result, evidence, research_date=self.research_date,
-            )
-            initial_sanitization = _sanitization_summary(normalized_result, result)
-            issues = self.workflow.validate_result(
-                result, evidence, research_date=self.research_date,
-            )
+            initial_result_shape = _result_shape_summary(result)
+            if isinstance(result, dict):
+                normalized_result = self.workflow.normalize_result(
+                    result, evidence, code=code, name=self.name,
+                    object_type=object_type, research_date=self.research_date,
+                )
+                result = self.workflow.sanitize_result(
+                    normalized_result, evidence, research_date=self.research_date,
+                )
+                initial_sanitization = _sanitization_summary(normalized_result, result)
+                issues = self.workflow.validate_result(
+                    result, evidence, research_date=self.research_date,
+                )
+            else:
+                # Keep only type and shape diagnostics; never feed a non-object
+                # response back into the repair prompt or persist its content.
+                result = {}
+                initial_sanitization = {
+                    "before_sanitization": initial_result_shape,
+                    "after_sanitization": _result_shape_summary(result),
+                }
+                issues = [
+                    "首轮研究结果必须是 JSON 对象，实际类型为 "
+                    f"{initial_result_shape['result_type']}",
+                ]
             if issues:
                 initial_issues = list(issues)
                 current, event = self.workflow._commit(
@@ -707,6 +722,7 @@ class DeepResearchHandle:
                         "attempt": 1,
                         "issues": initial_issues,
                         "result_shape": _result_shape_summary(result),
+                        "initial_result_shape": initial_result_shape,
                         "sanitization": initial_sanitization,
                     },
                     {"type": "thinking", "content": "首轮研究结果未通过质量校验，正在修正…"},
