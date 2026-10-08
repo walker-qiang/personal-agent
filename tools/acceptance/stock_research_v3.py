@@ -34,7 +34,24 @@ class FakeLLM:
 class IntegrationLLM(FakeLLM):
     def complete_json_budgeted(self, system, messages, maximum):
         payload = json.loads(messages[0]["content"])
-        plan, context, documents = payload["plan"], payload.get("context", {}), payload.get("documents", [])
+        if "request" in payload:
+            payload = payload["request"]
+        plan = payload.get("plan", {})
+        context = payload.get("context", {})
+        documents = payload.get("documents", [])
+        if not plan:
+            plan = {
+                "plan_id": payload.get("question", "facts-only"),
+                "question": payload["question"],
+                "facts_only": True,
+                "calculated_metrics": payload.get("calculated_metrics", []),
+            }
+            context = {
+                "question": payload["question"],
+                "subject": payload.get("subject", {}),
+                "calculated_metrics": payload.get("calculated_metrics", []),
+                "pending_questions": payload.get("pending_questions", []),
+            }
         self.calls.append(plan["plan_id"])
         if not documents:
             return {"episode": {"pending_questions": []},
@@ -42,7 +59,7 @@ class IntegrationLLM(FakeLLM):
                         "input_tokens": 150, "output_tokens": 20}
         document = documents[0]
         if plan.get("facts_only"):
-            assert set(context) == {"question", "subject", "calculated_metrics"}
+            assert set(context) == {"question", "subject", "calculated_metrics", "pending_questions"}
             assert "thesis" not in context and not document.get("excerpt")
             assert "Restricted original" not in messages[0]["content"]
             assert context["calculated_metrics"] == plan["calculated_metrics"]

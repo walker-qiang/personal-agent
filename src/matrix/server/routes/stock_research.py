@@ -43,6 +43,13 @@ def _usage(value: Any) -> dict[str, int] | None:
     return {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
+def _estimate_input_tokens(value: str) -> int:
+    """Conservative admission estimate; provider usage remains authoritative."""
+    ascii_units = sum(1 for char in value if ord(char) < 128)
+    non_ascii_units = len(value) - ascii_units
+    return (ascii_units + 3) // 4 + non_ascii_units * 2
+
+
 def _structured_result(value: Any) -> bool:
     return (isinstance(value, dict)
             and isinstance(value.get("episode"), dict)
@@ -91,27 +98,27 @@ async def stock_research(request: Request):
             raise ValueError("budget exceeds server limits or is missing")
         facts_only = plan.get("facts_only") is True
         if facts_only:
-            if (set(context) - {"question", "subject", "calculated_metrics"}
+            if (set(context) - {"question", "subject", "calculated_metrics", "pending_questions"}
                     or set(context.get("subject", {})) != {"name"}):
-                raise ValueError("numeric-only context must not include Thesis, notes or private questions")
+                raise ValueError("numeric-only context must not include Thesis, notes or private source material")
             if context.get("calculated_metrics", []) != plan.get("calculated_metrics", []):
                 raise ValueError("calculated metrics differ from the confirmed plan")
+            if context.get("pending_questions", []) != plan.get("pending_questions", []):
+                raise ValueError("pending questions differ from the confirmed plan")
         if len(documents) > 5:
             raise ValueError("at most five documents are allowed")
         for doc in documents:
-            if not isinstance(doc, dict) or not isinstance(doc.get("permissions"), dict) or not doc.get("content_hash"):
-                raise ValueError("document permissions or hash are invalid")
             if facts_only:
                 facts = doc.get("numeric_facts")
-                if (not doc["permissions"].get("external_model_facts")
-                        or doc["permissions"].get("external_model_excerpt")
-                        or doc.get("excerpt") or not isinstance(facts, list) or not facts
+                if (set(doc) != {"numeric_facts"} or not isinstance(facts, list) or not facts
                         or any(not isinstance(fact, dict) or
                                not all(isinstance(fact.get(key), str) for key in
                                        ("field", "value", "period", "currency", "unit"))
                                for fact in facts)):
-                    raise ValueError("numeric-only document must contain authorized structured values and no excerpt")
-            elif (not doc["permissions"].get("external_model_excerpt")
+                    raise ValueError("numeric-only document must contain only authorized structured values")
+            elif (not isinstance(doc, dict) or not isinstance(doc.get("permissions"), dict)
+                  or not doc.get("content_hash")
+                  or not doc["permissions"].get("external_model_excerpt")
                   or not isinstance(doc.get("excerpt"), str)):
                 raise ValueError("document excerpt permission is invalid")
         system = (
@@ -122,7 +129,9 @@ async def stock_research(request: Request):
             "put the analysis and unresolved questions in episode. "
             "Propose only scoped changes with source id and fact id when evidence exists; "
             "never claim verification. "
-            "No tools, external search, trading actions or file writes."
+            "Do not perform additional tool calls or external search; use only the "
+            "verified documents and structured context supplied by personal-os. "
+            "No trading actions or file writes."
         )
         if facts_only:
             system += (
@@ -132,11 +141,28 @@ async def stock_research(request: Request):
                 '{"metric_id":"the supplied metric id","value":"the exact supplied value"}. '
                 "Do not claim a value for a not_computable metric."
             )
+        if facts_only:
+            # Keep protocol and authorization metadata in the service boundary;
+            # only the explicitly authorized research DTO reaches the model.
+            model_request = {
+                "subject": context["subject"],
+                "question": context["question"],
+                "documents": documents,
+                "calculated_metrics": context.get("calculated_metrics", []),
+                "pending_questions": context.get("pending_questions", []),
+            }
+        else:
+            model_request = {"plan": plan, "context": context, "documents": documents}
         messages = [{"role": "user", "content": json.dumps(
-            {"plan": plan, "context": context, "documents": documents}, ensure_ascii=False,
+            model_request, ensure_ascii=False,
         )}]
-        # Each UTF-8 byte is charged as a token, plus framing reserve.
-        input_bound = len(system.encode()) + len(messages[0]["content"].encode()) + 2048
+        # Reserve framing explicitly, but avoid treating every UTF-8 byte as a
+        # token. Provider-reported usage is checked again after each request.
+        input_bound = (
+            _estimate_input_tokens(system)
+            + _estimate_input_tokens(messages[0]["content"])
+            + 2048
+        )
         output = budget["output_tokens"]
         if input_bound > budget["input_tokens"] or input_bound + output > budget["total_tokens"]:
             raise ValueError("synthesis exceeds cumulative token ceiling")
@@ -151,8 +177,14 @@ async def stock_research(request: Request):
                 "Preserve supported analysis in episode; use empty arrays when evidence "
                 "is absent. Return only the corrected JSON object."
             )
-            repair_input = json.dumps({"plan": plan, "draft": result}, ensure_ascii=False)
-            repair_bound = len(repair_system.encode()) + len(repair_input.encode()) + 2048
+            repair_input = json.dumps(
+                {"request": model_request, "draft": result}, ensure_ascii=False,
+            )
+            repair_bound = (
+                _estimate_input_tokens(repair_system)
+                + _estimate_input_tokens(repair_input)
+                + 2048
+            )
             if _usage(usage) is None or repair_bound > budget["input_tokens"] or (
                 input_bound + output + repair_bound + output > budget["total_tokens"]
             ):
