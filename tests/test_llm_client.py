@@ -33,28 +33,39 @@ def _tool_output(call_id: str, text: str = '{"ok": true}') -> dict:
 
 
 def _assert_paired(items: list[dict]) -> None:
-    """Every function_call must be followed by its function_call_output."""
-    calls = [i for i in items if i.get("type") == "function_call"]
-    outputs = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+    """Every assistant tool call must have a matching tool message."""
+    calls = [
+        (call, index)
+        for index, message in enumerate(items)
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+    ]
+    outputs = {
+        i.get("tool_call_id")
+        for i in items
+        if i.get("role") == "tool"
+    }
     assert calls, "expected at least one function_call item"
-    for call in calls:
-        assert call.get("call_id") in outputs, (
-            f"missing function_call_output for {call.get('call_id')}"
+    for call, _ in calls:
+        assert call.get("id") in outputs, (
+            f"missing tool output for {call.get('id')}"
         )
 
 
 def _mock_response(text: str) -> dict:
-    """Build a mock Responses API response."""
+    """Build a mock Chat Completions response."""
     return {
-        "status": "completed",
-        "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": text},
+        }],
     }
 
 
 class TestDeepSeekClient:
-    def test_converts_multimodal_content_to_responses_input(self):
+    def test_keeps_multimodal_content_in_chat_messages(self):
         client = DeepSeekClient(api_key="test-key")
-        items = client._convert_messages_to_input([{
+        payload = client._build_payload("system", [{
             "role": "user",
             "content": [
                 {"type": "text", "text": "描述图片"},
@@ -65,11 +76,17 @@ class TestDeepSeekClient:
             ],
         }])
 
-        assert items == [{
+        assert payload["messages"] == [{
+            "role": "system",
+            "content": "system",
+        }, {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "描述图片"},
-                {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+                {"type": "text", "text": "描述图片"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+                },
             ],
         }]
 
@@ -116,7 +133,12 @@ class TestDeepSeekClient:
     def test_handles_missing_content(self):
         """DeepSeek should raise LLMError when response has no content."""
         def fake_post_json(*_args, **_kwargs):
-            return {"output": [{"type": "message", "content": []}]}
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": None},
+                }],
+            }
 
         client = DeepSeekClient(api_key="test-key")
         with patch("matrix.llm.http.post_json", fake_post_json), pytest.raises(LLMError, match="content is empty"):
@@ -134,7 +156,7 @@ class TestDeepSeekClient:
 
 
 class TestToolCallOutputPairing:
-    """Responses API rejects unmatched function_call items with 400.
+    """Chat Completions rejects unmatched tool messages.
 
     ``No tool output found for tool call <id>`` happens whenever an assistant
     message carries tool_calls whose tool results were never appended (tool
@@ -191,16 +213,16 @@ class TestToolCallOutputPairing:
         ]
         assert order == [("tool", "call-1"), ("tool", "call-2")]
 
-    def test_converted_input_items_are_fully_paired(self):
+    def test_chat_messages_are_fully_paired(self):
         client = DeepSeekClient(api_key="test-key")
-        items = client._convert_messages_to_input([
+        items = client._build_payload("system", [
             {"role": "user", "content": "查一下"},
             _assistant_tool_call("call-1"),
-        ])
+        ])["messages"]
 
         _assert_paired(items)
 
-    def test_payload_input_is_paired_after_truncation_drops_a_result(self):
+    def test_payload_messages_are_paired_after_truncation_drops_a_result(self):
         """A tool result dropped by truncation must not break the request."""
         client = DeepSeekClient(api_key="test-key")
         payload = client._build_payload(
@@ -217,7 +239,7 @@ class TestToolCallOutputPairing:
             }],
         )
 
-        _assert_paired(payload["input"])
+        _assert_paired(payload["messages"])
 
     def test_ignores_tool_calls_without_ids(self):
         messages = [

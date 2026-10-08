@@ -34,7 +34,7 @@ def build_llm_client(
         raise ValueError(f"unsupported text provider: {provider}")
     return DeepSeekClient(
         api_key=deepseek_api_key,
-        model=model or "deepseek-v4-flash",
+        model=model or "deepseek-flash",
         base_url=deepseek_base_url,
         max_tokens=max_tokens,
         timeout_sec=timeout_sec,

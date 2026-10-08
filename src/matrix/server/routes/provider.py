@@ -34,7 +34,7 @@ async def get_providers(request: Request):
 async def switch_provider(request: Request):
     """Switch the LLM provider/model for a specific session.
 
-    Expects JSON body: {"session_id": "...", "provider": "deepseek", "model": "deepseek-v4-flash"}
+    Expects JSON body: {"session_id": "...", "provider": "deepseek", "model": "deepseek-flash"}
     """
     import json as _json
 

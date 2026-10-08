@@ -29,7 +29,7 @@ class LLMClient(Protocol):
         """Call LLM and return a parsed JSON object/array.
 
         Uses provider-native structured output when available:
-        - DeepSeek/OpenAI: response_format={"type": "json_object"}
+        - DeepSeek Chat Completions API: response_format={"type": "json_object"}
         - Anthropic: forced single-tool call with JSON schema
 
         Falls back to prompt-based JSON with robust parsing.

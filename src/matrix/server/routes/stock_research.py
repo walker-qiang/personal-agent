@@ -2,15 +2,41 @@
 
 from __future__ import annotations
 
-import json
-import os
 import asyncio
+import json
+import logging
+import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ...llm.errors import LLMAuthError, LLMError, LLMRateLimitError, LLMTransientError
+
 router = APIRouter()
+logger = logging.getLogger("matrix.stock_research")
+
+_MAX_ERROR_DETAIL = 1000
+
+
+def _model_error_code(error: BaseException) -> str:
+    if isinstance(error, LLMAuthError):
+        return "provider_authentication"
+    if isinstance(error, LLMRateLimitError):
+        return "provider_rate_limit"
+    if isinstance(error, LLMTransientError):
+        return "provider_transient"
+    if isinstance(error, LLMError):
+        return "provider_error"
+    return "unexpected_model_error"
+
+
+def _safe_error_detail(error: BaseException) -> str:
+    detail = str(error).strip() or error.__class__.__name__
+    detail = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1[redacted]", detail)
+    detail = re.sub(r"\bsk-[A-Za-z0-9_-]+\b", "[redacted]", detail)
+    return detail[:_MAX_ERROR_DETAIL]
 
 
 def _limits() -> dict[str, int]:
@@ -55,6 +81,61 @@ def _structured_result(value: Any) -> bool:
             and isinstance(value.get("episode"), dict)
             and isinstance(value.get("thesis_patch"), list)
             and isinstance(value.get("evidence_candidates"), list))
+
+
+def _valid_numeric_facts(value: Any, *, require_nonempty: bool) -> bool:
+    if not isinstance(value, list) or (require_nonempty and not value):
+        return False
+    allowed = {"field", "value", "comparative_value", "period", "currency", "unit"}
+    for fact in value:
+        if not isinstance(fact, dict) or set(fact) - allowed:
+            return False
+        required = ("field", "value", "period", "currency", "unit")
+        if not all(isinstance(fact.get(key), str) for key in required):
+            return False
+        if "comparative_value" in fact and not isinstance(fact["comparative_value"], str):
+            return False
+    return True
+
+
+def _validate_portfolio_context(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("portfolio context must be structured")
+    if set(value) - {"version", "target_holding", "transactions", "allocation"}:
+        raise ValueError("portfolio context contains unauthorized fields")
+    if not isinstance(value.get("version"), int) or value["version"] != 1:
+        raise ValueError("portfolio context version is invalid")
+    target = value.get("target_holding")
+    if target is not None:
+        if not isinstance(target, dict):
+            raise ValueError("target holding must be structured")
+        allowed = {
+            "code", "name", "currency", "allocation_bucket", "as_of",
+            "current_value_yuan", "cost_basis_yuan", "quantity",
+            "current_weight_pct", "position_status", "transaction_count",
+        }
+        if set(target) - allowed or not all(
+            isinstance(target.get(key), str)
+            for key in ("code", "name", "currency", "allocation_bucket", "position_status")
+        ):
+            raise ValueError("target holding contains unauthorized fields")
+    transactions = value.get("transactions")
+    if not isinstance(transactions, list) or len(transactions) > 50:
+        raise ValueError("portfolio transactions are invalid")
+    transaction_fields = {
+        "occurred_at", "type", "quantity", "unit_price_yuan",
+        "amount_yuan", "fee_yuan", "tax_yuan", "currency",
+    }
+    for transaction in transactions:
+        if not isinstance(transaction, dict) or set(transaction) - transaction_fields:
+            raise ValueError("portfolio transaction contains unauthorized fields")
+    allocation = value.get("allocation")
+    if not isinstance(allocation, list) or len(allocation) > 20:
+        raise ValueError("portfolio allocation is invalid")
+    allocation_fields = {"allocation_bucket", "current_pct", "target_pct", "delta_pct"}
+    for bucket in allocation:
+        if not isinstance(bucket, dict) or set(bucket) - allocation_fields:
+            raise ValueError("portfolio allocation contains unauthorized fields")
 
 
 @router.get("/api/research/stock.v3/capabilities")
@@ -105,22 +186,41 @@ async def stock_research(request: Request):
                 raise ValueError("calculated metrics differ from the confirmed plan")
             if context.get("pending_questions", []) != plan.get("pending_questions", []):
                 raise ValueError("pending questions differ from the confirmed plan")
+        else:
+            allowed_context = {
+                "question", "subject", "thesis", "portfolio_context", "pending_questions",
+            }
+            if set(context) - allowed_context or set(context.get("subject", {})) != {"code", "name"}:
+                raise ValueError("research context contains unauthorized fields")
+            if not isinstance(context.get("thesis"), dict):
+                raise ValueError("selected Thesis context is required")
+            if context.get("pending_questions", []) != plan.get("pending_questions", []):
+                raise ValueError("pending questions differ from the confirmed plan")
+            if context.get("portfolio_context") != plan.get("portfolio_context"):
+                raise ValueError("portfolio context differs from the confirmed plan")
+            _validate_portfolio_context(context.get("portfolio_context"))
         if len(documents) > 5:
             raise ValueError("at most five documents are allowed")
         for doc in documents:
             if facts_only:
                 facts = doc.get("numeric_facts")
-                if (set(doc) != {"numeric_facts"} or not isinstance(facts, list) or not facts
-                        or any(not isinstance(fact, dict) or
-                               not all(isinstance(fact.get(key), str) for key in
-                                       ("field", "value", "period", "currency", "unit"))
-                               for fact in facts)):
+                if set(doc) != {"numeric_facts"} or not _valid_numeric_facts(facts, require_nonempty=True):
                     raise ValueError("numeric-only document must contain only authorized structured values")
-            elif (not isinstance(doc, dict) or not isinstance(doc.get("permissions"), dict)
-                  or not doc.get("content_hash")
-                  or not doc["permissions"].get("external_model_excerpt")
-                  or not isinstance(doc.get("excerpt"), str)):
-                raise ValueError("document excerpt permission is invalid")
+            else:
+                if (not isinstance(doc, dict)
+                        or set(doc) - {"source_id", "excerpt", "numeric_facts"}
+                        or not isinstance(doc.get("source_id"), str)
+                        or not doc["source_id"]):
+                    raise ValueError("document excerpt DTO is invalid")
+                excerpt = doc.get("excerpt", "")
+                if not isinstance(excerpt, str):
+                    raise ValueError("document excerpt DTO is invalid")
+                if "numeric_facts" in doc and not _valid_numeric_facts(
+                    doc["numeric_facts"], require_nonempty=False
+                ):
+                    raise ValueError("document numeric facts DTO is invalid")
+                if not excerpt and not doc.get("numeric_facts"):
+                    raise ValueError("document DTO has neither excerpt nor structured facts")
         system = (
             "Return only a JSON object with exactly these top-level keys: "
             '{"episode":{"summary":"","pending_questions":[]},"thesis_patch":[],'
@@ -130,7 +230,9 @@ async def stock_research(request: Request):
             "Propose only scoped changes with source id and fact id when evidence exists; "
             "never claim verification. "
             "Do not perform additional tool calls or external search; use only the "
-            "verified documents and structured context supplied by personal-os. "
+            "verified documents, selected Thesis claims and portfolio context supplied by personal-os. "
+            "Use portfolio context only to assess portfolio fit, concentration, cost basis and transaction history; "
+            "distinguish those user-provided facts from company evidence and do not invent missing values. "
             "No trading actions or file writes."
         )
         if facts_only:
@@ -141,9 +243,9 @@ async def stock_research(request: Request):
                 '{"metric_id":"the supplied metric id","value":"the exact supplied value"}. '
                 "Do not claim a value for a not_computable metric."
             )
+        # The application protocol has already validated the boundary. The model
+        # receives only the explicit research DTO, never the original plan envelope.
         if facts_only:
-            # Keep protocol and authorization metadata in the service boundary;
-            # only the explicitly authorized research DTO reaches the model.
             model_request = {
                 "subject": context["subject"],
                 "question": context["question"],
@@ -152,7 +254,14 @@ async def stock_research(request: Request):
                 "pending_questions": context.get("pending_questions", []),
             }
         else:
-            model_request = {"plan": plan, "context": context, "documents": documents}
+            model_request = {
+                "subject": context["subject"],
+                "question": context["question"],
+                "thesis": context["thesis"],
+                "portfolio_context": context["portfolio_context"],
+                "documents": documents,
+                "pending_questions": context.get("pending_questions", []),
+            }
         messages = [{"role": "user", "content": json.dumps(
             model_request, ensure_ascii=False,
         )}]
@@ -215,6 +324,47 @@ async def stock_research(request: Request):
                 "model_calls": calls}
     except (KeyError, TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
-    except Exception:
-        return JSONResponse({"error": "stock research request failed; do not automatically retry"},
-                            status_code=502)
+    except LLMError as exc:
+        error_code = _model_error_code(exc)
+        detail = _safe_error_detail(exc)
+        logger.exception(
+            "stock v3 model request failed plan_id=%s model=%s documents=%d "
+            "facts_only=%s error_code=%s detail=%s",
+            plan.get("plan_id", ""),
+            cap.get("model", ""),
+            len(documents) if isinstance(documents, list) else -1,
+            facts_only,
+            error_code,
+            detail,
+        )
+        return JSONResponse(
+            {
+                "error": "stock research model request failed",
+                "error_code": error_code,
+                "detail": detail,
+                "no_automatic_retry": True,
+            },
+            status_code=502,
+        )
+    except Exception as exc:
+        error_code = _model_error_code(exc)
+        detail = _safe_error_detail(exc)
+        logger.exception(
+            "stock v3 request failed unexpectedly plan_id=%s model=%s "
+            "documents=%d facts_only=%s error_code=%s detail=%s",
+            plan.get("plan_id", ""),
+            cap.get("model", ""),
+            len(documents) if isinstance(documents, list) else -1,
+            facts_only,
+            error_code,
+            detail,
+        )
+        return JSONResponse(
+            {
+                "error": "stock research request failed",
+                "error_code": error_code,
+                "detail": detail,
+                "no_automatic_retry": True,
+            },
+            status_code=502,
+        )

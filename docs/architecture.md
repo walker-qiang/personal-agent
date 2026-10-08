@@ -294,7 +294,7 @@ Provider SSE / CLI stream
 
 - `RuntimeEvent` 是 Runtime 内部唯一事件信封，按 operation 的 `sequence` 有序提交。
 - `message_delta`、`tool_update`、`message_end` 等事件在模型流到达时立即提交并转发；工具参数 delta 在 Runtime Core 内组装为完整 `ToolCall` 后才执行。
-- DeepSeek Responses API 和 Anthropic Messages API 使用原生文本/工具流；其他 provider 仍通过同一个 `ModelPort.stream()` 契约进入 Runtime，未提供原生工具流的 provider 只在工具决策处降级为一次性 provider 调用。
+- DeepSeek Chat Completions API 和 Anthropic Messages API 使用原生文本/工具流；其他 provider 仍通过同一个 `ModelPort.stream()` 契约进入 Runtime，未提供原生工具流的 provider 只在工具决策处降级为一次性 provider 调用。
 - LangGraph 在后台线程推进，前台持续排空结构化事件队列，因此图节点未结束时 token、工具状态和审批事件也可以抵达 SSE。
 - 客户端重连使用 `/api/runtime/operations/{id}/events?after_sequence=N` 补拉 durable 事件；`N` 应保存为客户端已处理的最大 sequence。
 - 事件先完成 durable commit，再进入实时通道。事件通道关闭只取消当前消费，不会自动重放未确认的外部 effect。

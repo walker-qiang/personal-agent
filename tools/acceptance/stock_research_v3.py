@@ -40,18 +40,15 @@ class IntegrationLLM(FakeLLM):
         context = payload.get("context", {})
         documents = payload.get("documents", [])
         if not plan:
+            facts_only = "portfolio_context" not in payload
             plan = {
                 "plan_id": payload.get("question", "facts-only"),
                 "question": payload["question"],
-                "facts_only": True,
+                "facts_only": facts_only,
                 "calculated_metrics": payload.get("calculated_metrics", []),
             }
-            context = {
-                "question": payload["question"],
-                "subject": payload.get("subject", {}),
-                "calculated_metrics": payload.get("calculated_metrics", []),
-                "pending_questions": payload.get("pending_questions", []),
-            }
+            context = {key: value for key, value in payload.items() if key != "documents"}
+            documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
         if not documents:
             return {"episode": {"pending_questions": []},
@@ -76,6 +73,21 @@ class IntegrationLLM(FakeLLM):
                 },
                 "thesis_patch": [], "evidence_candidates": [],
             }, {"input_tokens": 150, "output_tokens": 20}
+        assert set(context) == {
+            "subject", "question", "thesis", "portfolio_context",
+            "pending_questions",
+        }
+        assert set(context["portfolio_context"]) <= {
+            "version", "target_holding", "transactions", "allocation",
+        }
+        portfolio = context["portfolio_context"]
+        assert portfolio["target_holding"]["code"] == "sh600001"
+        assert portfolio["target_holding"]["current_value_yuan"] == 1000
+        assert portfolio["target_holding"]["cost_basis_yuan"] == 900
+        assert len(portfolio["transactions"]) == 1
+        assert portfolio["transactions"][0]["amount_yuan"] == 900
+        assert any(item["allocation_bucket"] == "growth" for item in portfolio["allocation"])
+        assert "permissions" not in document and "content_hash" not in document
         quote = "The consideration was paid in cash."
         assert quote in document["excerpt"]
         claims = context["thesis"]["claims"]
@@ -147,8 +159,16 @@ async def main():
     budget = {"input_tokens": 25000, "output_tokens": 1500, "total_tokens": 40000}
     plan = {"plan_id": "fixture", "object_type": "stock", "model": "mock-budgeted",
             "confirmed_at": "2026-10-06T00:00:00Z", "input_hash": "fixture-hash",
-            "question": "What changed?", "budget": budget, "documents": []}
-    context = {"question": plan["question"], "thesis": {"revision": 1}}
+            "question": "What changed?", "budget": budget, "documents": [],
+            "facts_only": False, "pending_questions": [],
+            "portfolio_context": {"version": 1, "transactions": [], "allocation": []}}
+    context = {
+        "question": plan["question"],
+        "subject": {"code": "sh600001", "name": "Fixture"},
+        "thesis": {"decision": {}, "claims": []},
+        "portfolio_context": {"version": 1, "transactions": [], "allocation": []},
+        "pending_questions": [],
+    }
     payload = {"plan": plan, "context": context, "documents": []}
     llm = FakeLLM()
     result = await route.stock_research(Request(llm, payload))
@@ -165,8 +185,11 @@ async def main():
     payload["documents"] = []
     plan["facts_only"] = True
     plan["calculated_metrics"] = [{"id": "fixture:net_profit_yoy_pct", "value": "13.02"}]
+    plan.pop("pending_questions", None)
+    plan.pop("portfolio_context", None)
     payload["context"] = {"question": plan["question"], "subject": {"name": "Fixture"},
-                          "calculated_metrics": plan["calculated_metrics"]}
+                          "calculated_metrics": plan["calculated_metrics"],
+                          "pending_questions": []}
     llm = FakeLLM()
     result = await route.stock_research(Request(llm, payload))
     assert result["model_calls"] == 1 and len(llm.calls) == 1

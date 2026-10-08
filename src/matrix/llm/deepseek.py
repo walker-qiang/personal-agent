@@ -1,18 +1,9 @@
-"""DeepSeek API client — Responses API.
+"""DeepSeek API client using the documented Chat Completions API.
 
-Uses the DeepSeek Responses API (POST /responses) which is compatible with
-OpenAI Responses API format. Key differences from the legacy Chat Completions API:
-
-  - Endpoint: /responses (not /chat/completions)
-  - System prompt → `instructions` parameter (not in `input`)
-  - Messages → `input` items (role-based messages + function_call/function_call_output items)
-  - Tools: flat format `{type, name, description, parameters}` (not nested under `function`)
-  - Response: `output[]` array with typed items (message, function_call)
-  - Streaming: semantic events (response.output_text.delta, response.completed, etc.)
-
-The calling code (react.py, commander.py, etc.) still uses Chat Completions
-message format. This client converts internally — the migration is fully
-encapsulated here.
+DeepSeek exposes an OpenAI-compatible endpoint at
+``POST https://api.deepseek.com/chat/completions``. The rest of Matrix uses
+provider-neutral messages and tool definitions, so this adapter owns the
+small amount of format conversion required by DeepSeek.
 """
 
 from __future__ import annotations
@@ -22,17 +13,14 @@ import logging
 from typing import Any, Iterator
 
 from .errors import LLMError
-from .http import post_json, post_json_stream_events, post_json_with_retry
+from .http import post_json, post_json_stream, post_json_with_retry
 from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
 from .truncate import truncate_messages
 
 
 logger = logging.getLogger("matrix.llm.deepseek")
 
-# Maximum characters per message before truncation
 _DEFAULT_MAX_MESSAGE_CHARS = 16000
-
-# Placeholder fed to the model when a tool call produced no output at all.
 _NO_TOOL_OUTPUT = '{"error": "tool produced no output"}'
 
 
@@ -42,8 +30,6 @@ def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str]:
     if isinstance(value, dict):
         return value, ""
     if value is None or value == "":
-        # An empty object is valid for tools without required fields. Required
-        # field validation remains the registry's responsibility.
         return {}, ""
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
@@ -57,71 +43,71 @@ def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str]:
 def _ensure_tool_call_outputs(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Guarantee every assistant tool_call has a matching tool output.
+    """Keep every assistant tool call paired with a tool response.
 
-    The Responses API rejects the whole request with 400
-    ``No tool output found for tool call <id>`` when an assistant message
-    carries ``tool_calls`` whose results were never appended — a tool that
-    raised, was skipped, or whose output was dropped by context truncation.
-
-    Dropping the orphaned call would silently rewrite history, so we inject a
-    neutral placeholder instead and log it: the request stays valid, and the
-    warning points at the upstream gap that produced it.
+    Context truncation can remove a tool response while keeping the assistant
+    message that requested it. DeepSeek rejects that history, so inject a
+    neutral provider-visible result and retain a warning for diagnosis.
     """
+
     pending: list[tuple[int, list[str]]] = []
     satisfied: set[str] = set()
-    for i, msg in enumerate(messages):
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant" and message.get("tool_calls"):
             ids = [
-                str(tc.get("id", ""))
-                for tc in msg["tool_calls"]
-                if tc.get("id")
+                str(tool_call.get("id", ""))
+                for tool_call in message["tool_calls"]
+                if tool_call.get("id")
             ]
             if ids:
-                pending.append((i, ids))
-        elif msg.get("role") == "tool":
-            call_id = str(msg.get("tool_call_id", ""))
+                pending.append((index, ids))
+        elif message.get("role") == "tool":
+            call_id = str(message.get("tool_call_id", ""))
             if call_id:
                 satisfied.add(call_id)
 
-    missing_by_index: dict[int, list[str]] = {}
-    for i, ids in pending:
-        gaps = [cid for cid in ids if cid not in satisfied]
-        if gaps:
-            missing_by_index[i] = gaps
-
+    missing_by_index = {
+        index: [call_id for call_id in ids if call_id not in satisfied]
+        for index, ids in pending
+        if any(call_id not in satisfied for call_id in ids)
+    }
     if not missing_by_index:
         return messages
 
-    total = sum(len(v) for v in missing_by_index.values())
+    total = sum(len(ids) for ids in missing_by_index.values())
     logger.warning(
         "llm.deepseek: %d tool call(s) missing output; injecting placeholders "
         "assistant_indexes=%s",
-        total, sorted(missing_by_index),
+        total,
+        sorted(missing_by_index),
     )
-
     result = list(messages)
-    # Insert back-to-front so earlier indexes keep their positions.
-    for i in sorted(missing_by_index, reverse=True):
+    for index in sorted(missing_by_index, reverse=True):
         placeholders = [
             {
                 "role": "tool",
-                "tool_call_id": cid,
+                "tool_call_id": call_id,
                 "content": _NO_TOOL_OUTPUT,
             }
-            for cid in missing_by_index[i]
+            for call_id in missing_by_index[index]
         ]
-        result[i + 1:i + 1] = placeholders
+        result[index + 1:index + 1] = placeholders
     return result
 
 
+def _sanitize_tool_name(name: Any) -> str:
+    """DeepSeek function names allow alphanumerics, ``_`` and ``-`` only."""
+
+    return str(name).replace(".", "_")
+
+
 class DeepSeekClient:
-    """LLM client for DeepSeek Responses API."""
+    """LLM client for DeepSeek's OpenAI-compatible Chat Completions API."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-v4-flash",
+        model: str = "deepseek-flash",
         base_url: str = "https://api.deepseek.com",
         max_tokens: int = 8192,
         timeout_sec: float = 45.0,
@@ -134,7 +120,53 @@ class DeepSeekClient:
         self.timeout_sec = timeout_sec
         self.max_message_chars = max_message_chars
 
-    # ── Payload building ────────────────────────────────────────────────────
+    def _chat_url(self) -> str:
+        """Build the documented endpoint while allowing a custom base URL."""
+
+        return self.base_url.rstrip("/") + "/chat/completions"
+
+    def _messages(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self.max_message_chars > 0:
+            messages = truncate_messages(
+                messages,
+                system_prompt=system,
+                max_tokens=self.max_message_chars // 2,
+                reserve_tokens=500,
+            )
+        messages = _ensure_tool_call_outputs(messages)
+        normalized: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+        ]
+        for message in messages:
+            copied = dict(message)
+            if copied.get("role") == "assistant" and copied.get("tool_calls"):
+                tool_calls = []
+                for raw_tool_call in copied["tool_calls"]:
+                    tool_call = dict(raw_tool_call)
+                    function = dict(tool_call.get("function", {}))
+                    if "name" in function:
+                        function["name"] = _sanitize_tool_name(function["name"])
+                    tool_call["function"] = function
+                    tool_calls.append(tool_call)
+                copied["tool_calls"] = tool_calls
+            normalized.append(copied)
+        return normalized
+
+    def _tool_definitions(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        definitions: list[dict[str, Any]] = []
+        for tool in tools:
+            function: dict[str, Any] = {
+                "name": _sanitize_tool_name(tool["name"]),
+                "description": tool.get("description", ""),
+            }
+            if "input_schema" in tool:
+                function["parameters"] = tool["input_schema"]
+            definitions.append({"type": "function", "function": function})
+        return definitions
 
     def _build_payload(
         self,
@@ -144,104 +176,26 @@ class DeepSeekClient:
         tool_choice: str = "auto",
         temperature: float | None = None,
         json_mode: bool = False,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
-        """Build Responses API payload from Chat Completions-style messages."""
-        if self.max_message_chars > 0:
-            messages = truncate_messages(
-                messages,
-                system_prompt=system,
-                max_tokens=self.max_message_chars // 2,
-                reserve_tokens=500,
-            )
-
-        input_items = self._convert_messages_to_input(messages)
+        """Build a DeepSeek Chat Completions request."""
 
         payload: dict[str, Any] = {
             "model": self.model,
-            "instructions": system,
-            "input": input_items,
-            "max_output_tokens": self.max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "messages": self._messages(system, messages),
         }
         if temperature is not None:
             payload["temperature"] = temperature
         if tools:
-            payload["tools"] = tools
+            payload["tools"] = self._tool_definitions(tools)
             payload["tool_choice"] = tool_choice
         if json_mode:
-            payload["text"] = {"format": {"type": "json_object"}}
+            payload["response_format"] = {"type": "json_object"}
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         return payload
-
-    def _convert_messages_to_input(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Convert Chat Completions messages to Responses API input items.
-
-        Handles:
-        - {role: "user"/"assistant", content: "..."} → {role, content: [{type, text}]}
-        - {role: "assistant", tool_calls: [...]} → {type: "function_call", ...} items
-        - {role: "tool", tool_call_id, content} → {type: "function_call_output", ...}
-        """
-        messages = _ensure_tool_call_outputs(messages)
-        items: list[dict[str, Any]] = []
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            if role == "tool":
-                # Tool result → function_call_output
-                items.append({
-                    "type": "function_call_output",
-                    "call_id": msg.get("tool_call_id", ""),
-                    "output": str(content) if content else "{}",
-                })
-            elif role == "assistant" and "tool_calls" in msg:
-                # Assistant with tool calls → function_call items
-                if content:
-                    items.append({
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": str(content)}],
-                    })
-                for tc in msg["tool_calls"]:
-                    func = tc.get("function", {})
-                    items.append({
-                        "type": "function_call",
-                        "name": func.get("name", ""),
-                        "arguments": func.get("arguments", "{}"),
-                        "call_id": tc.get("id", ""),
-                    })
-            else:
-                # Regular message (user/assistant/system)
-                content_type = "input_text" if role == "user" else "output_text"
-                if isinstance(content, list):
-                    blocks: list[dict[str, Any]] = []
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") == "text":
-                            blocks.append({
-                                "type": content_type,
-                                "text": str(block.get("text", "")),
-                            })
-                        elif block.get("type") == "image_url":
-                            image_url = block.get("image_url", {})
-                            url = (
-                                image_url.get("url", "")
-                                if isinstance(image_url, dict) else ""
-                            )
-                            blocks.append({
-                                "type": "input_image",
-                                "image_url": url,
-                            })
-                        else:
-                            blocks.append(block)
-                    items.append({"role": role, "content": blocks})
-                else:
-                    items.append({
-                        "role": role,
-                        "content": [{"type": content_type, "text": str(content)}]
-                        if content else [],
-                    })
-        return items
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -249,83 +203,81 @@ class DeepSeekClient:
             "content-type": "application/json",
         }
 
-    # ── Response parsing ────────────────────────────────────────────────────
-
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> FunctionCallResult:
-        """Parse Responses API response into FunctionCallResult.
+        """Parse a documented Chat Completions response."""
 
-        Response structure:
-          {
-            "status": "completed" | "incomplete" | "failed",
-            "output": [
-              {"type": "message", "content": [{"type": "output_text", "text": "..."}]},
-              {"type": "function_call", "name": "...", "arguments": "...", "call_id": "..."},
-            ]
-          }
-        """
-        output = data.get("output", [])
-        text_parts: list[str] = []
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise LLMError("DeepSeek response did not include choices")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise LLMError("DeepSeek response choice is invalid")
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise LLMError("DeepSeek response message is invalid")
+
+        content = message.get("content")
+        text = "" if content is None else str(content)
         tool_calls: list[ToolCall] = []
-        finish_reason = "stop"
+        for raw_tool_call in message.get("tool_calls", []) or []:
+            if not isinstance(raw_tool_call, dict):
+                continue
+            function = raw_tool_call.get("function") or {}
+            if not isinstance(function, dict):
+                function = {}
+            arguments, arguments_error = _parse_tool_arguments(
+                function.get("arguments", "{}"),
+            )
+            tool_calls.append(ToolCall(
+                id=str(raw_tool_call.get("id", "")),
+                name=str(function.get("name", "")),
+                arguments=arguments,
+                arguments_error=arguments_error,
+            ))
 
-        for item in output:
-            item_type = item.get("type", "")
-            if item_type == "message":
-                for part in item.get("content", []):
-                    if part.get("type") == "output_text":
-                        text_parts.append(part.get("text", ""))
-            elif item_type == "function_call":
-                name = item.get("name", "")
-                args_str = item.get("arguments", "{}")
-                args, arguments_error = _parse_tool_arguments(args_str)
-                tool_calls.append(ToolCall(
-                    id=item.get("call_id", ""),
-                    name=name,
-                    arguments=args,
-                    arguments_error=arguments_error,
-                ))
-                finish_reason = "tool_calls"
-
-        status = data.get("status", "completed")
-        if status == "incomplete":
-            finish_reason = "length"
-        elif status == "failed":
-            finish_reason = "error"
-
+        finish_reason = str(choice.get("finish_reason") or "stop")
         return FunctionCallResult(
-            content="".join(text_parts),
+            content=text,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
         )
 
-    # ── Public API (unchanged interface) ─────────────────────────────────────
+    @staticmethod
+    def _usage(data: dict[str, Any]) -> dict[str, Any]:
+        """Map provider usage to Matrix's provider-neutral budget fields."""
+
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        normalized: dict[str, Any] = {}
+        if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+            normalized["input_tokens"] = prompt_tokens
+        if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
+            normalized["output_tokens"] = completion_tokens
+        if isinstance(usage.get("total_tokens"), int):
+            normalized["total_tokens"] = usage["total_tokens"]
+        if isinstance(usage.get("completion_tokens_details"), dict):
+            normalized["completion_tokens_details"] = usage["completion_tokens_details"]
+        return normalized
 
     def complete(
-        self, system: str, messages: list[dict[str, Any]], temperature: float | None = None
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
     ) -> str:
-        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(system, messages, temperature=temperature)
-        data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
+        data = post_json_with_retry(
+            self._chat_url(), payload, self._headers(), self.timeout_sec,
+        )
         result = self._parse_response(data)
         if not result.content:
-            # Reasoning models can burn the whole max_output_tokens budget on
-            # hidden reasoning before emitting any message item, leaving the
-            # output with reasoning only. Surface that instead of a bare
-            # "empty" so callers know to raise the token budget.
-            details: list[str] = []
-            if data.get("status") == "incomplete":
-                reason = (data.get("incomplete_details") or {}).get("reason", "")
-                if reason:
-                    details.append(f"status=incomplete ({reason})")
-            kinds = {item.get("type", "?") for item in data.get("output", [])}
-            if kinds:
-                details.append(f"output types: {', '.join(sorted(kinds))}")
-            suffix = f"; {', '.join(details)}" if details else ""
             raise LLMError(
-                "DeepSeek response message content is empty"
-                f" (max_output_tokens={payload.get('max_output_tokens')}{suffix});"
-                " increase max_tokens if a reasoning model spent the budget on reasoning"
+                "DeepSeek response message content is empty "
+                f"(finish_reason={result.finish_reason})"
             )
         return result.content
 
@@ -336,11 +288,8 @@ class DeepSeekClient:
         schema: dict[str, Any] | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any] | list[Any]:
-        """Call DeepSeek with JSON output mode.
+        """Call DeepSeek with the documented JSON response mode."""
 
-        Uses text.format={type: "json_object"} in Responses API.
-        The system prompt must contain the word "json" for this to work.
-        """
         if schema:
             system += (
                 "\nReturn JSON matching this schema. Do not omit required fields, "
@@ -348,13 +297,13 @@ class DeepSeekClient:
                 "is specified. Schema:\n"
                 + json.dumps(schema, ensure_ascii=False)
             )
-        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(
             system, messages, temperature=temperature, json_mode=True,
         )
-        data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
-        result = self._parse_response(data)
-        content = result.content
+        data = post_json_with_retry(
+            self._chat_url(), payload, self._headers(), self.timeout_sec,
+        )
+        content = self._parse_response(data).content
         if not content:
             raise LLMError("DeepSeek JSON response was empty")
         try:
@@ -363,62 +312,62 @@ class DeepSeekClient:
             raise LLMError(f"DeepSeek JSON output could not be parsed: {err}") from err
 
     def complete_json_budgeted(
-        self, system: str, messages: list[dict[str, Any]], max_output_tokens: int,
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        max_output_tokens: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """One upstream request, with an output ceiling and observable usage."""
-        # The budget check covers the exact supplied messages; this path must
-        # never silently truncate or add a retry at the provider layer.
-        payload = {
-            "model": self.model, "instructions": system,
-            "input": self._convert_messages_to_input(messages),
-            "max_output_tokens": max_output_tokens,
-            "reasoning": {"effort": "none"},
-            "text": {"format": {"type": "json_object"}},
-        }
-        data = post_json(self.base_url.rstrip("/") + "/responses", payload, self._headers(), self.timeout_sec)
-        if data.get("status") not in (None, "completed"):
-            raise LLMError("budgeted stock research did not complete")
-        result = parse_json_response(self._parse_response(data).content)
-        if not isinstance(result, dict):
+        """Make exactly one bounded request and return normalized usage."""
+
+        payload = self._build_payload(
+            system,
+            messages,
+            json_mode=True,
+            max_tokens=max_output_tokens,
+            # Low is a documented DeepSeek level and leaves room for the
+            # structured answer under the stock research output ceiling.
+            reasoning_effort="low",
+        )
+        data = post_json(self._chat_url(), payload, self._headers(), self.timeout_sec)
+        result = self._parse_response(data)
+        if result.finish_reason not in {"stop", "tool_calls"}:
+            raise LLMError(
+                "budgeted stock research did not complete "
+                f"(finish_reason={result.finish_reason})"
+            )
+        try:
+            parsed = parse_json_response(result.content)
+        except Exception as err:
+            raise LLMError(f"stock research JSON output could not be parsed: {err}") from err
+        if not isinstance(parsed, dict):
             raise LLMError("stock research response must be a JSON object")
-        return result, data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        return parsed, self._usage(data)
 
     def stream_complete(
-        self, system: str, messages: list[dict[str, Any]], temperature: float | None = None
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
     ) -> Iterator[str]:
-        """Stream completion tokens from DeepSeek Responses API.
+        """Stream assistant text from Chat Completions SSE chunks."""
 
-        Uses Responses API streaming (stream=True). Yields content delta chunks
-        from response.output_text.delta events.
-        """
-        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(system, messages, temperature=temperature)
         payload["stream"] = True
-
-        for event_type, raw in post_json_stream_events(
-            url, payload, self._headers(), self.timeout_sec
+        for raw in post_json_stream(
+            self._chat_url(), payload, self._headers(), self.timeout_sec,
         ):
-            # Only process output text deltas
-            if event_type and not event_type.startswith("response.output_text"):
-                # Check for terminal events
-                if event_type in (
-                    "response.completed",
-                    "response.incomplete",
-                    "response.failed",
-                ):
-                    return
-                continue
-
             try:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning("stream_complete: skipped unparseable SSE chunk: %s", raw[:100])
+                logger.warning("stream_complete: skipped invalid SSE chunk: %s", raw[:100])
                 continue
-
-            # Extract delta text
-            delta = chunk.get("delta", "")
-            if delta:
-                yield delta
+            choices = chunk.get("choices", [])
+            if not choices or not isinstance(choices[0], dict):
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if content:
+                yield str(content)
 
     def stream_function_call(
         self,
@@ -428,151 +377,86 @@ class DeepSeekClient:
         tool_choice: str = "auto",
         temperature: float | None = None,
     ) -> Iterator[LLMStreamEvent]:
-        """Stream text and function-call deltas from the Responses API."""
-        name_map: dict[str, str] = {}
-        api_tools: list[dict[str, Any]] = []
-        for tool in tools:
-            original = str(tool["name"])
-            sanitized = original.replace(".", "_")
-            name_map[sanitized] = original
-            api_tools.append({
-                "type": "function",
-                "name": sanitized,
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {}),
-            })
+        """Stream text and tool-call deltas from Chat Completions SSE."""
 
-        url = self.base_url.rstrip("/") + "/responses"
         payload = self._build_payload(
             system,
             messages,
-            tools=api_tools,
+            tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,
         )
         payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        names: dict[str, str] = {}
+        calls: dict[int, dict[str, str]] = {}
         finish_reason = "stop"
         usage: dict[str, Any] = {}
-        call_ids_by_index: dict[str, str] = {}
-        names_by_call: dict[str, str] = {}
-        argument_buffers: dict[str, str] = {}
-        call_order: list[str] = []
 
-        def resolve_call(
-            chunk: dict[str, Any],
-            item: dict[str, Any] | None = None,
-        ) -> tuple[str, str, str]:
-            item = item if isinstance(item, dict) else {}
-            raw_index = chunk.get("output_index", item.get("output_index", ""))
-            index = str(raw_index) if raw_index is not None else ""
-            raw_call_id = (
-                chunk.get("call_id")
-                or item.get("call_id")
-                or call_ids_by_index.get(index, "")
-            )
-            call_id = str(raw_call_id or (f"tool-{index}" if index else "tool-0"))
-            if index:
-                call_ids_by_index[index] = call_id
-            raw_name = chunk.get("name") or item.get("name") or ""
-            name = name_map.get(str(raw_name), str(raw_name))
-            if name:
-                names_by_call[call_id] = name
-            if call_id not in call_order:
-                call_order.append(call_id)
-            return call_id, name, index
-
-        for event_type, raw in post_json_stream_events(
-            url, payload, self._headers(), self.timeout_sec
+        for raw in post_json_stream(
+            self._chat_url(), payload, self._headers(), self.timeout_sec,
         ):
             try:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
                 logger.warning(
-                    "stream_function_call: skipped unparseable SSE chunk: %s",
+                    "stream_function_call: skipped invalid SSE chunk: %s",
                     raw[:100],
                 )
                 continue
-            kind = str(event_type or chunk.get("type", ""))
-            if kind.endswith("output_text.delta"):
-                delta = str(chunk.get("delta", ""))
-                if delta:
-                    yield LLMStreamEvent(kind="message_delta", content=delta)
+            usage = self._usage(chunk) or usage
+            choices = chunk.get("choices", [])
+            if not choices or not isinstance(choices[0], dict):
                 continue
-            if kind.endswith("function_call_arguments.delta"):
-                item = chunk.get("item", {})
-                if not isinstance(item, dict):
-                    item = {}
-                call_id, name, index = resolve_call(chunk, item)
-                delta = chunk.get("delta", "")
-                if isinstance(delta, dict):
-                    delta = json.dumps(delta, ensure_ascii=False)
-                delta = str(delta)
-                argument_buffers[call_id] = argument_buffers.get(call_id, "") + delta
+            choice = choices[0]
+            if choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content:
+                yield LLMStreamEvent(kind="message_delta", content=str(content))
+            for raw_tool_call in delta.get("tool_calls", []) or []:
+                if not isinstance(raw_tool_call, dict):
+                    continue
+                index = int(raw_tool_call.get("index", 0))
+                state = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                if raw_tool_call.get("id"):
+                    state["id"] = str(raw_tool_call["id"])
+                function = raw_tool_call.get("function") or {}
+                if not isinstance(function, dict):
+                    function = {}
+                if function.get("name"):
+                    state["name"] = str(function["name"])
+                    names[state["name"]] = next(
+                        (
+                            str(tool["name"])
+                            for tool in tools
+                            if _sanitize_tool_name(tool["name"]) == state["name"]
+                        ),
+                        state["name"],
+                    )
+                arguments_delta = str(function.get("arguments", ""))
+                if arguments_delta:
+                    state["arguments"] += arguments_delta
                 yield LLMStreamEvent(
                     kind="tool_call_delta",
                     metadata={
-                        # When only output_index is available, Runtime joins
-                        # this delta with the stable id from output_item.added.
-                        "call_id": str(
-                            chunk.get("call_id") or item.get("call_id") or ""
-                        ),
+                        "call_id": state["id"],
                         "index": index,
-                        "name": name,
-                        "arguments_delta": delta,
+                        "name": names.get(state["name"], state["name"]),
+                        "arguments_delta": arguments_delta,
                     },
                 )
-                finish_reason = "tool_calls"
-                continue
-            if kind.endswith("function_call_arguments.done"):
-                item = chunk.get("item", {})
-                if not isinstance(item, dict):
-                    item = {}
-                call_id, _, _ = resolve_call(chunk, item)
-                full_arguments = chunk.get("arguments", item.get("arguments"))
-                if full_arguments is not None:
-                    if isinstance(full_arguments, dict):
-                        full_text = json.dumps(full_arguments, ensure_ascii=False)
-                    else:
-                        full_text = str(full_arguments)
-                    argument_buffers[call_id] = full_text
-                finish_reason = "tool_calls"
-                continue
-            if kind.endswith("output_item.added"):
-                item = chunk.get("item", {})
-                if isinstance(item, dict) and item.get("type") == "function_call":
-                    call_id, name, index = resolve_call(chunk, item)
-                    yield LLMStreamEvent(
-                        kind="tool_call_delta",
-                        metadata={
-                            "call_id": str(item.get("call_id", "")),
-                            "index": index,
-                            "name": name,
-                            "arguments_delta": "",
-                        },
-                    )
-                    finish_reason = "tool_calls"
-                continue
-            if kind in {"response.completed", "response.incomplete", "response.failed"}:
-                response_data = chunk.get("response", {})
-                if isinstance(response_data, dict):
-                    raw_usage = response_data.get("usage")
-                    if isinstance(raw_usage, dict):
-                        usage = dict(raw_usage)
-                if kind == "response.incomplete":
-                    finish_reason = "length"
-                elif kind == "response.failed":
-                    finish_reason = "error"
 
-        for call_id in call_order:
-            arguments, arguments_error = _parse_tool_arguments(
-                argument_buffers.get(call_id, ""),
-            )
+        for index in sorted(calls):
+            state = calls[index]
+            arguments, arguments_error = _parse_tool_arguments(state["arguments"])
             yield LLMStreamEvent(
                 kind="tool_calls",
                 tool_calls=(
                     ToolCall(
-                        id=call_id,
-                        name=names_by_call.get(call_id, ""),
+                        id=state["id"],
+                        name=names.get(state["name"], state["name"]),
                         arguments=arguments,
                         arguments_error=arguments_error,
                     ),
@@ -591,70 +475,30 @@ class DeepSeekClient:
         tool_choice: str = "auto",
         temperature: float | None = None,
     ) -> FunctionCallResult:
-        """Call DeepSeek Responses API with native function calling.
-
-        Returns a FunctionCallResult with either content or tool_calls.
-        Supports multi-turn tool messages:
-        - role="tool" with tool_call_id + content
-        - role="assistant" with tool_calls[] + content
-
-        Tool names are sanitized (dots → underscores) for API compatibility.
-        """
-        url = self.base_url.rstrip("/") + "/responses"
-
-        # Sanitize tool names: replace dots with underscores for APIs that
-        # only accept ^[a-zA-Z0-9_-]+$ (strict OpenAI-compatible).
-        name_map: dict[str, str] = {}  # sanitized → original
-        reverse_map: dict[str, str] = {}  # original → sanitized
-        api_tools: list[dict[str, Any]] = []
-        for t in tools:
-            original = t["name"]
-            sanitized = original.replace(".", "_")
-            name_map[sanitized] = original
-            reverse_map[original] = sanitized
-            # Responses API uses flat tool format (not nested under "function")
-            api_tools.append({
-                "type": "function",
-                "name": sanitized,
-                "description": t["description"],
-                "parameters": t.get("input_schema", {}),
-            })
-
-        # Normalize messages: sanitize tool names in assistant tool_calls
-        api_messages: list[dict[str, Any]] = []
-        for msg in messages:
-            api_msg = dict(msg)
-            if msg.get("role") == "assistant" and "tool_calls" in msg:
-                normalized_tcs = []
-                for tc in msg["tool_calls"]:
-                    ntc = dict(tc)
-                    if "function" in ntc:
-                        ntc["function"] = dict(ntc["function"])
-                        ntc["function"]["name"] = reverse_map.get(
-                            ntc["function"]["name"], ntc["function"]["name"],
-                        )
-                    normalized_tcs.append(ntc)
-                api_msg["tool_calls"] = normalized_tcs
-            api_messages.append(api_msg)
+        """Call DeepSeek with native Chat Completions function calling."""
 
         payload = self._build_payload(
-            system, api_messages, tools=api_tools, tool_choice=tool_choice,
+            system,
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
             temperature=temperature,
         )
-
-        data = post_json_with_retry(url, payload, self._headers(), self.timeout_sec)
+        data = post_json_with_retry(
+            self._chat_url(), payload, self._headers(), self.timeout_sec,
+        )
         result = self._parse_response(data)
-
-        # Map sanitized tool names back to original (ToolCall is frozen, so rebuild)
-        if name_map:
-            result.tool_calls = [
-                ToolCall(
-                    id=tc.id,
-                    name=name_map.get(tc.name, tc.name),
-                    arguments=tc.arguments,
-                    arguments_error=tc.arguments_error,
-                )
-                for tc in result.tool_calls
-            ]
-
+        names = {
+            _sanitize_tool_name(tool["name"]): str(tool["name"])
+            for tool in tools
+        }
+        result.tool_calls = [
+            ToolCall(
+                id=tool_call.id,
+                name=names.get(tool_call.name, tool_call.name),
+                arguments=tool_call.arguments,
+                arguments_error=tool_call.arguments_error,
+            )
+            for tool_call in result.tool_calls
+        ]
         return result

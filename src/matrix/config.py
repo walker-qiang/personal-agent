@@ -68,12 +68,12 @@ ENV_CODE_SANDBOX_NETWORK = "MATRIX_CODE_SANDBOX_NETWORK"
 
 # ---- Defaults ----
 
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Known models per provider (text/chat models only)
 KNOWN_MODELS: dict[str, list[dict[str, str]]] = {
     "deepseek": [
-        {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "desc": "快速 · 1M上下文"},
+        {"id": "deepseek-flash", "name": "DeepSeek Flash", "desc": "快速 · 1M上下文"},
         {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "desc": "高质量 · 1M上下文"},
     ],
 }

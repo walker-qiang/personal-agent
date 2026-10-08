@@ -147,16 +147,16 @@ def post_json_stream(
         raise LLMTransientError(f"model provider unavailable: {err.reason}") from err
 
 
-# ── Responses API SSE event reader ────────────────────────────────────────────
+# ── Event-based SSE reader ───────────────────────────────────────────────────
 
 
 def _read_sse_events(resp: Any, timeout_sec: float) -> Iterator[tuple[str | None, str]]:
-    """Read SSE events from a streaming HTTP response (Responses API format).
+    """Read SSE events from a streaming HTTP response.
 
     Yields (event_type, data_str) tuples. For old-format SSE without
     'event:' lines, event_type is None.
 
-    Responses API uses semantic events like:
+    Some providers use semantic events like:
       event: response.output_text.delta
       data: {"type":"response.output_text.delta","delta":"Hello"}
 
@@ -185,7 +185,7 @@ def _read_sse_events(resp: Any, timeout_sec: float) -> Iterator[tuple[str | None
                 if data_str == "[DONE]":
                     return
                 yield (event_type, data_str)
-                # Don't reset event_type — Responses API data lines
+                # Don't reset event_type — data lines may
                 # contain type field too, but keeping event_type lets
                 # callers filter without parsing JSON first.
                 event_type = None
@@ -207,7 +207,7 @@ def post_json_stream_events(
 ) -> Iterator[tuple[str | None, str]]:
     """POST JSON with streaming SSE response. Yields (event_type, data_str) tuples.
 
-    For Responses API streaming. Same error handling as post_json_stream.
+    Same error handling as post_json_stream.
     """
     _acquire_rate_limit()
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
