@@ -18,6 +18,9 @@ router = APIRouter()
 logger = logging.getLogger("matrix.stock_research")
 
 _MAX_ERROR_DETAIL = 1000
+_MAX_NEW_DOCUMENTS = 12
+_MAX_SYNTHESIS_CALLS = 2
+_MAX_REPAIR_CALLS = 1
 
 
 def _model_error_code(error: BaseException) -> str:
@@ -81,6 +84,175 @@ def _structured_result(value: Any) -> bool:
             and isinstance(value.get("episode"), dict)
             and isinstance(value.get("thesis_patch"), list)
             and isinstance(value.get("evidence_candidates"), list))
+
+
+_V3_RESULT_KEYS = {"episode", "thesis_patch", "evidence_candidates"}
+_V3_EPISODE_KEYS = {"summary", "pending_questions", "numeric_claims"}
+_V3_PATCH_KEYS = {
+    "entity", "id", "field", "before", "after", "change_type",
+    "reason", "evidence_refs",
+}
+_V3_EVIDENCE_KEYS = {"source_id", "fact_id", "limited_quote", "statement"}
+_V3_CHANGE_TYPES = {"strengthened", "weakened", "falsified", "retired", "calibrated"}
+
+
+def _v3_contract_prompt(*, facts_only: bool) -> str:
+    numeric_claims = (
+        ', "numeric_claims":[{"metric_id":"<metric id>","value":"<exact supplied value>"}]'
+        if facts_only else ""
+    )
+    episode_example = (
+        '{"summary":"<analysis>","pending_questions":["<question>"]'
+        + numeric_claims
+        + "}"
+    )
+    return (
+        "The stock-research-v3 result contract is strict. Return exactly this JSON shape "
+        "(no additional keys and never use patch_type, evidence_direction, verification, "
+        "summary-as-fact, fact, or claims fields): "
+        '{"episode":' + episode_example + ","
+        '"thesis_patch":[{"entity":"claim","id":"<claim id>","field":"confidence",'
+        '"before":"low","after":"medium","change_type":"strengthened",'
+        '"reason":"<why this scoped change is supported>",'
+        '"evidence_refs":["<source_id>:<fact_id>"]}],'
+        '"evidence_candidates":[{"source_id":"<supplied source id>",'
+        '"fact_id":"<stable fact id>",'
+        '"limited_quote":"<exact contiguous quote from the supplied excerpt, <=300 chars>",'
+        '"statement":"<what the quote establishes>"}]}. '
+        "episode.summary may be empty, pending_questions must be an array of strings, "
+        "and arrays may be empty. A thesis_patch requires a matching evidence_candidate "
+        "and must use evidence_refs in the exact source_id:fact_id format. "
+        "Only use entity=claim or entity=decision; only use the supplied claim ids and "
+        "allowed Thesis fields. Do not assert that a source or fact is verified; "
+        "personal-os performs verification and writeback checks."
+    )
+
+
+def _v3_result_errors(
+    value: Any,
+    documents: list[dict[str, Any]],
+    *,
+    facts_only: bool,
+) -> list[str]:
+    """Validate the complete v3 DTO before crossing the Agent boundary."""
+
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return ["result must be a JSON object"]
+    extra = set(value) - _V3_RESULT_KEYS
+    missing = _V3_RESULT_KEYS - set(value)
+    if extra:
+        errors.append(f"result has unsupported keys: {sorted(extra)}")
+    if missing:
+        errors.append(f"result is missing keys: {sorted(missing)}")
+
+    episode = value.get("episode")
+    if not isinstance(episode, dict):
+        errors.append("episode must be an object")
+    else:
+        episode_extra = set(episode) - _V3_EPISODE_KEYS
+        if episode_extra:
+            errors.append(f"episode has unsupported keys: {sorted(episode_extra)}")
+        if "summary" in episode and not isinstance(episode["summary"], str):
+            errors.append("episode.summary must be a string")
+        pending = episode.get("pending_questions", [])
+        if not isinstance(pending, list) or any(
+            not isinstance(item, str) or not item.strip() for item in pending
+        ):
+            errors.append("episode.pending_questions must be an array of non-empty strings")
+        numeric_claims = episode.get("numeric_claims")
+        if numeric_claims is not None:
+            if not facts_only:
+                errors.append("episode.numeric_claims is only allowed for facts_only plans")
+            elif not isinstance(numeric_claims, list) or any(
+                not isinstance(item, dict)
+                or set(item) != {"metric_id", "value"}
+                or not isinstance(item["metric_id"], str)
+                or not isinstance(item["value"], str)
+                for item in numeric_claims
+            ):
+                errors.append(
+                    "episode.numeric_claims must contain only metric_id and value strings"
+                )
+
+    source_excerpts = {
+        str(document.get("source_id")): str(document.get("excerpt") or "")
+        for document in documents
+    }
+    candidates = value.get("evidence_candidates")
+    candidate_refs: set[str] = set()
+    if not isinstance(candidates, list):
+        errors.append("evidence_candidates must be an array")
+    else:
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                errors.append(f"evidence_candidates[{index}] must be an object")
+                continue
+            if set(candidate) != _V3_EVIDENCE_KEYS:
+                errors.append(
+                    f"evidence_candidates[{index}] must use exactly "
+                    f"{sorted(_V3_EVIDENCE_KEYS)}"
+                )
+                continue
+            if not all(isinstance(candidate[key], str) and candidate[key].strip()
+                       for key in _V3_EVIDENCE_KEYS):
+                errors.append(f"evidence_candidates[{index}] contains an empty or non-string field")
+                continue
+            quote = candidate["limited_quote"]
+            source_id = candidate["source_id"]
+            if len(quote) > 300:
+                errors.append(f"evidence_candidates[{index}].limited_quote exceeds 300 characters")
+            if source_id not in source_excerpts:
+                errors.append(f"evidence_candidates[{index}] references an unknown source_id")
+            elif quote not in source_excerpts[source_id]:
+                errors.append(
+                    f"evidence_candidates[{index}].limited_quote is not an exact excerpt"
+                )
+            candidate_refs.add(f"{source_id}:{candidate['fact_id']}")
+
+    patches = value.get("thesis_patch")
+    if not isinstance(patches, list):
+        errors.append("thesis_patch must be an array")
+    else:
+        for index, patch in enumerate(patches):
+            if not isinstance(patch, dict):
+                errors.append(f"thesis_patch[{index}] must be an object")
+                continue
+            if set(patch) != _V3_PATCH_KEYS:
+                errors.append(
+                    f"thesis_patch[{index}] must use exactly {sorted(_V3_PATCH_KEYS)}"
+                )
+                continue
+            if patch["entity"] not in {"claim", "decision"}:
+                errors.append(f"thesis_patch[{index}].entity is not a V3 entity")
+            if not isinstance(patch["id"], str) or not isinstance(patch["field"], str):
+                errors.append(f"thesis_patch[{index}] id and field must be strings")
+            if not isinstance(patch["before"], str) or not isinstance(patch["after"], str):
+                errors.append(f"thesis_patch[{index}] before and after must be strings")
+            if patch["change_type"] not in _V3_CHANGE_TYPES:
+                errors.append(f"thesis_patch[{index}].change_type is not a V3 change type")
+            if not isinstance(patch["reason"], str) or not patch["reason"].strip():
+                errors.append(f"thesis_patch[{index}].reason must be non-empty")
+            refs = patch["evidence_refs"]
+            if not isinstance(refs, list) or not refs or any(
+                not isinstance(ref, str) or ref not in candidate_refs for ref in refs
+            ):
+                errors.append(
+                    f"thesis_patch[{index}].evidence_refs must reference supplied candidates"
+                )
+    return errors
+
+
+def _usage_parts(value: Any) -> list[dict[str, int]]:
+    direct = _usage(value)
+    if direct is not None:
+        return [direct]
+    if not isinstance(value, dict):
+        return []
+    parts: list[dict[str, int]] = []
+    for nested in value.values():
+        parts.extend(_usage_parts(nested))
+    return parts
 
 
 def _valid_numeric_facts(value: Any, *, require_nonempty: bool) -> bool:
@@ -149,9 +321,9 @@ async def capabilities(request: Request) -> dict[str, Any]:
                           and callable(getattr(client, "complete_json_budgeted", None))),
         "model": getattr(client, "model", ""),
         "limits": limits,
-        "max_new_documents": 5,
-        "max_synthesis_calls": 1,
-        "max_repair_calls": 1,
+        "max_new_documents": _MAX_NEW_DOCUMENTS,
+        "max_synthesis_calls": _MAX_SYNTHESIS_CALLS,
+        "max_repair_calls": _MAX_REPAIR_CALLS,
     }
 
 
@@ -199,8 +371,21 @@ async def stock_research(request: Request):
             if context.get("portfolio_context") != plan.get("portfolio_context"):
                 raise ValueError("portfolio context differs from the confirmed plan")
             _validate_portfolio_context(context.get("portfolio_context"))
-        if len(documents) > 5:
-            raise ValueError("at most five documents are allowed")
+        scope = plan.get("scope") if isinstance(plan.get("scope"), dict) else {}
+        max_documents = scope.get("max_new_documents", 5)
+        max_synthesis_calls = scope.get("max_synthesis_calls", 1)
+        max_repair_calls = scope.get("max_repair_calls", 1)
+        if (not isinstance(max_documents, int) or isinstance(max_documents, bool)
+                or not 1 <= max_documents <= cap["max_new_documents"]):
+            raise ValueError("research document limit is outside the server capability")
+        if (not isinstance(max_synthesis_calls, int) or isinstance(max_synthesis_calls, bool)
+                or not 1 <= max_synthesis_calls <= cap["max_synthesis_calls"]):
+            raise ValueError("synthesis call limit is outside the server capability")
+        if (not isinstance(max_repair_calls, int) or isinstance(max_repair_calls, bool)
+                or not 0 <= max_repair_calls <= cap["max_repair_calls"]):
+            raise ValueError("repair call limit is outside the server capability")
+        if len(documents) > max_documents:
+            raise ValueError(f"at most {max_documents} documents are allowed")
         for doc in documents:
             if facts_only:
                 facts = doc.get("numeric_facts")
@@ -235,6 +420,7 @@ async def stock_research(request: Request):
             "distinguish those user-provided facts from company evidence and do not invent missing values. "
             "No trading actions or file writes."
         )
+        system += " " + _v3_contract_prompt(facts_only=facts_only)
         if facts_only:
             system += (
                 " API calculated_metrics are authoritative; do not calculate financial figures. "
@@ -243,6 +429,17 @@ async def stock_research(request: Request):
                 '{"metric_id":"the supplied metric id","value":"the exact supplied value"}. '
                 "Do not claim a value for a not_computable metric."
             )
+        evidence_system = system + (
+            " First build an evidence map: identify the most decision-relevant new facts, "
+            "contradictions, unchanged claims and unresolved questions. Keep every proposed "
+            "change tied to the supplied source id and fact id."
+        )
+        synthesis_system = system + (
+            " Act as the final decision synthesizer. Review the evidence draft supplied in "
+            "the request, discard unsupported claims, preserve valid citations, and make the "
+            "summary explicitly state what changed, what did not change, the strongest "
+            "counter-evidence and the next monitoring question."
+        )
         # The application protocol has already validated the boundary. The model
         # receives only the explicit research DTO, never the original plan envelope.
         if facts_only:
@@ -268,23 +465,74 @@ async def stock_research(request: Request):
         # Reserve framing explicitly, but avoid treating every UTF-8 byte as a
         # token. Provider-reported usage is checked again after each request.
         input_bound = (
-            _estimate_input_tokens(system)
+            _estimate_input_tokens(evidence_system if max_synthesis_calls > 1 and not facts_only else system)
             + _estimate_input_tokens(messages[0]["content"])
             + 2048
         )
         output = budget["output_tokens"]
-        if input_bound > budget["input_tokens"] or input_bound + output > budget["total_tokens"]:
+        wants_second_synthesis = max_synthesis_calls > 1 and not facts_only
+        second_reserve = 0
+        if wants_second_synthesis:
+            second_reserve = (
+                _estimate_input_tokens(synthesis_system)
+                + _estimate_input_tokens(json.dumps(
+                    {"request": model_request, "evidence_draft": ""},
+                    ensure_ascii=False,
+                ))
+                + output
+                + 2048
+            )
+        if input_bound > budget["input_tokens"] or (
+            input_bound + output + second_reserve > budget["total_tokens"]
+        ):
             raise ValueError("synthesis exceeds cumulative token ceiling")
         client = _client(request)
-        result, usage = await asyncio.to_thread(client.complete_json_budgeted, system, messages, output)
+        result, first_usage = await asyncio.to_thread(
+            client.complete_json_budgeted,
+            evidence_system if wants_second_synthesis else system,
+            messages,
+            output,
+        )
         calls = 1
+        usage: Any = first_usage
+        if wants_second_synthesis:
+            first_parts = _usage_parts(first_usage)
+            if not first_parts:
+                raise ValueError("second synthesis requires provider usage for the first call")
+            draft_request = {
+                "request": model_request,
+                "evidence_draft": result,
+            }
+            second_messages = [{"role": "user", "content": json.dumps(
+                draft_request, ensure_ascii=False,
+            )}]
+            second_bound = (
+                _estimate_input_tokens(synthesis_system)
+                + _estimate_input_tokens(second_messages[0]["content"])
+                + 2048
+            )
+            consumed = sum(part["input_tokens"] + part["output_tokens"] for part in first_parts)
+            if second_bound > budget["input_tokens"] or (
+                consumed + second_bound + output > budget["total_tokens"]
+            ):
+                raise ValueError("second synthesis exceeds remaining cumulative token ceiling")
+            result, second_usage = await asyncio.to_thread(
+                client.complete_json_budgeted,
+                synthesis_system,
+                second_messages,
+                output,
+            )
+            usage = {"evidence": first_usage, "synthesis": second_usage}
+            calls = 2
         if not isinstance(result, dict):
             raise ValueError("synthesis result must be a JSON object")
-        if not _structured_result(result):
+        result_errors = _v3_result_errors(result, documents, facts_only=facts_only)
+        if result_errors and max_repair_calls > 0:
             repair_system = (
-                system + " Repair the draft into the required top-level structure and types. "
-                "Preserve supported analysis in episode; use empty arrays when evidence "
-                "is absent. Return only the corrected JSON object."
+                system + " Repair the draft into the exact stock-research-v3 contract. "
+                "Preserve supported analysis in episode, discard unsupported patch or "
+                "evidence fields, and use empty arrays when a supported citation cannot "
+                "be produced. Return only the corrected JSON object."
             )
             repair_input = json.dumps(
                 {"request": model_request, "draft": result}, ensure_ascii=False,
@@ -294,22 +542,28 @@ async def stock_research(request: Request):
                 + _estimate_input_tokens(repair_input)
                 + 2048
             )
-            if _usage(usage) is None or repair_bound > budget["input_tokens"] or (
-                input_bound + output + repair_bound + output > budget["total_tokens"]
+            usage_parts = _usage_parts(usage)
+            consumed = sum(part["input_tokens"] + part["output_tokens"] for part in usage_parts)
+            if not usage_parts or repair_bound > budget["input_tokens"] or (
+                consumed + repair_bound + output > budget["total_tokens"]
             ):
                 raise ValueError("repair requires known usage and remaining cumulative budget")
             result, repair_usage = await asyncio.to_thread(
                 client.complete_json_budgeted,
                 repair_system, [{"role": "user", "content": repair_input}], output,
             )
-            calls = 2
-            usage = {"synthesis": usage, "repair": repair_usage}
-        actual = [_usage(usage)] if calls == 1 else [
-            _usage(usage["synthesis"]), _usage(usage["repair"])]
-        usage_complete = all(part is not None for part in actual)
-        if not _structured_result(result):
+            calls += 1
+            if isinstance(usage, dict) and _usage(usage) is None:
+                usage["repair"] = repair_usage
+            else:
+                usage = {"synthesis": usage, "repair": repair_usage}
+            result_errors = _v3_result_errors(result, documents, facts_only=facts_only)
+        actual = _usage_parts(usage)
+        usage_complete = len(actual) == calls
+        if result_errors:
             return JSONResponse(
-                {"error": "v3 result incomplete after repair", "usage": usage,
+                {"error": "v3 result contract invalid after repair",
+                 "details": result_errors[:20], "usage": usage,
                  "usage_complete": usage_complete, "model_calls": calls},
                 status_code=422,
             )

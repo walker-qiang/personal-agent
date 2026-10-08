@@ -99,7 +99,7 @@ class IntegrationLLM(FakeLLM):
         }] if claims else []
         if plan["question"] == "partial" and patch:
             patch[0]["evidence_refs"] = ["forged:fact-a"]
-        if plan["question"] == "repair" and self.calls.count(plan["plan_id"]) == 1:
+        if plan["question"] == "repair" and self.calls.count(plan["plan_id"]) <= 2:
             return {"episode": {}}, {"input_tokens": 150, "output_tokens": 20}
         return {
             "episode": {"pending_questions": ["Can the cash payment be reconciled?"]},
@@ -173,6 +173,17 @@ async def main():
     llm = FakeLLM()
     result = await route.stock_research(Request(llm, payload))
     assert result["model_calls"] == 1 and result["usage_complete"] and len(llm.calls) == 1
+    two_stage_plan = dict(plan)
+    two_stage_plan["scope"] = {
+        "max_new_documents": 12,
+        "max_synthesis_calls": 2,
+        "max_repair_calls": 1,
+    }
+    two_stage_payload = dict(payload)
+    two_stage_payload["plan"] = two_stage_plan
+    llm = FakeLLM()
+    result = await route.stock_research(Request(llm, two_stage_payload))
+    assert result["model_calls"] == 2 and result["usage_complete"] and len(llm.calls) == 2
     llm = FakeLLM()
     llm.repair = True
     result = await route.stock_research(Request(llm, payload))
@@ -215,7 +226,7 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result.status_code == 503 and not llm.calls
     print(json.dumps({"status": "passed", "checks": [
-        "one synthesis", "one bounded repair", "immutable documents",
+        "two-stage synthesis", "one bounded repair", "immutable documents",
         "immutable API calculations", "private context/excerpt blocked",
         "missing budget fails closed"]}))
 
