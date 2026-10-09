@@ -22,6 +22,7 @@ logger = logging.getLogger("matrix.llm.deepseek")
 
 _DEFAULT_MAX_MESSAGE_CHARS = 16000
 _NO_TOOL_OUTPUT = '{"error": "tool produced no output"}'
+_STRUCTURED_TOOL_NAME = "return_json"
 
 
 def _parse_tool_arguments(value: Any) -> tuple[dict[str, Any], str]:
@@ -178,6 +179,7 @@ class DeepSeekClient:
         json_mode: bool = False,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        thinking: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Build a DeepSeek Chat Completions request."""
 
@@ -195,6 +197,8 @@ class DeepSeekClient:
             payload["response_format"] = {"type": "json_object"}
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
+        if thinking is not None:
+            payload["thinking"] = thinking
         return payload
 
     def _headers(self) -> dict[str, str]:
@@ -288,15 +292,44 @@ class DeepSeekClient:
         schema: dict[str, Any] | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any] | list[Any]:
-        """Call DeepSeek with the documented JSON response mode."""
+        """Call DeepSeek with provider-enforced structured output when schema is set."""
 
-        if schema:
-            system += (
-                "\nReturn JSON matching this schema. Do not omit required fields, "
-                "use null for required arrays, or return empty arrays when minItems "
-                "is specified. Schema:\n"
-                + json.dumps(schema, ensure_ascii=False)
+        if schema is not None:
+            data = post_json_with_retry(
+                self._chat_url(),
+                self._build_payload(
+                    system,
+                    messages,
+                    tools=[{
+                        "name": _STRUCTURED_TOOL_NAME,
+                        "description": "Return the requested structured JSON result.",
+                        "input_schema": schema,
+                    }],
+                    tool_choice="required",
+                    temperature=temperature,
+                    thinking={"type": "disabled"},
+                ),
+                self._headers(),
+                self.timeout_sec,
             )
+            result = self._parse_response(data)
+            if result.finish_reason != "tool_calls":
+                raise LLMError(
+                    "DeepSeek structured JSON response did not use the required tool "
+                    f"(finish_reason={result.finish_reason})"
+                )
+            calls = [call for call in result.tool_calls if call.name == _STRUCTURED_TOOL_NAME]
+            if len(calls) != 1:
+                raise LLMError(
+                    "DeepSeek structured JSON response must contain exactly one "
+                    f"{_STRUCTURED_TOOL_NAME} tool call"
+                )
+            call = calls[0]
+            if call.arguments_error:
+                raise LLMError(
+                    f"DeepSeek structured JSON tool arguments invalid: {call.arguments_error}"
+                )
+            return call.arguments
         payload = self._build_payload(
             system, messages, temperature=temperature, json_mode=True,
         )
@@ -316,17 +349,31 @@ class DeepSeekClient:
         system: str,
         messages: list[dict[str, Any]],
         max_output_tokens: int,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Make exactly one bounded request and return normalized usage."""
+        """Make one bounded request with optional provider-enforced schema."""
 
         payload = self._build_payload(
             system,
             messages,
-            json_mode=True,
+            tools=([{
+                "name": _STRUCTURED_TOOL_NAME,
+                "description": "Return the requested structured JSON result.",
+                "input_schema": schema,
+            }] if schema is not None else None),
+            tool_choice="required" if schema is not None else "auto",
+            json_mode=schema is None,
             max_tokens=max_output_tokens,
-            # Low is a documented DeepSeek level and leaves room for the
-            # structured answer under the stock research output ceiling.
-            reasoning_effort="low",
+            # Stock v3 is a strict application contract. Keep synthesis and
+            # repair deterministic so a repair cannot introduce a new shape
+            # error through sampling variance.
+            temperature=0.0,
+            # DeepSeek thinking mode does not support the required tool choice.
+            # It is enabled by default, so explicitly disable it for
+            # schema-enforced tool calls while keeping the legacy reasoning
+            # budget for prompt-only JSON.
+            reasoning_effort=None if schema is not None else "low",
+            thinking={"type": "disabled"} if schema is not None else None,
         )
         data = post_json(self._chat_url(), payload, self._headers(), self.timeout_sec)
         result = self._parse_response(data)
@@ -335,6 +382,63 @@ class DeepSeekClient:
                 "budgeted stock research did not complete "
                 f"(finish_reason={result.finish_reason})"
             )
+        if schema is not None:
+            if result.finish_reason != "tool_calls":
+                raise LLMError(
+                    "budgeted structured JSON response did not use the required tool "
+                    f"(finish_reason={result.finish_reason})"
+                )
+            calls = [call for call in result.tool_calls if call.name == _STRUCTURED_TOOL_NAME]
+            if len(calls) != 1:
+                raise LLMError(
+                    "budgeted structured JSON response must contain exactly one "
+                    f"{_STRUCTURED_TOOL_NAME} tool call"
+                )
+            call = calls[0]
+            if call.arguments_error:
+                if "工具参数不是有效 JSON" in call.arguments_error:
+                    # Some DeepSeek tool-call responses contain malformed
+                    # argument text even though the request used a JSON
+                    # schema. Retry once in JSON-object mode; the caller still
+                    # performs the authoritative schema and cross-reference
+                    # validation before accepting the result.
+                    logger.warning(
+                        "budgeted structured JSON tool arguments were malformed; "
+                        "retrying once with provider JSON mode",
+                    )
+                    fallback_data = post_json(
+                        self._chat_url(),
+                        self._build_payload(
+                            system,
+                            messages,
+                            json_mode=True,
+                            max_tokens=max_output_tokens,
+                            temperature=0.0,
+                            reasoning_effort="low",
+                            thinking={"type": "disabled"},
+                        ),
+                        self._headers(),
+                        self.timeout_sec,
+                    )
+                    fallback_result = self._parse_response(fallback_data)
+                    if fallback_result.finish_reason != "stop":
+                        raise LLMError(
+                            "budgeted JSON fallback did not complete "
+                            f"(finish_reason={fallback_result.finish_reason})",
+                        )
+                    try:
+                        parsed = parse_json_response(fallback_result.content)
+                    except Exception as err:
+                        raise LLMError(
+                            f"budgeted JSON fallback could not be parsed: {err}",
+                        ) from err
+                    if not isinstance(parsed, dict):
+                        raise LLMError("budgeted JSON fallback must return an object")
+                    return parsed, self._usage(fallback_data)
+                raise LLMError(
+                    f"budgeted structured JSON tool arguments invalid: {call.arguments_error}"
+                )
+            return call.arguments, self._usage(data)
         try:
             parsed = parse_json_response(result.content)
         except Exception as err:

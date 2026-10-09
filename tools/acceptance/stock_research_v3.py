@@ -20,19 +20,21 @@ class FakeLLM:
     def __init__(self):
         self.calls = []
         self.repair = False
+        self.omit_usage = False
 
-    def complete_json_budgeted(self, system, messages, maximum):
+    def _usage(self):
+        return {} if self.omit_usage else {"input_tokens": 150, "output_tokens": 20}
+
+    def complete_json_budgeted(self, system, messages, maximum, schema=None):
         self.calls.append((system, messages, maximum))
         if self.repair and len(self.calls) == 1:
-            return {"episode": {}}, {"input_tokens": 150, "output_tokens": 20}
-        return {"episode": {"pending_questions": []},
-                "thesis_patch": [], "evidence_candidates": []}, {
-                    "input_tokens": 150, "output_tokens": 20,
-                }
+            return {"episode": {}}, self._usage()
+        return {"episode": {"summary": "", "pending_questions": []},
+                "thesis_patch": [], "evidence_candidates": []}, self._usage()
 
 
 class IntegrationLLM(FakeLLM):
-    def complete_json_budgeted(self, system, messages, maximum):
+    def complete_json_budgeted(self, system, messages, maximum, schema=None):
         payload = json.loads(messages[0]["content"])
         if "request" in payload:
             payload = payload["request"]
@@ -47,11 +49,14 @@ class IntegrationLLM(FakeLLM):
                 "facts_only": facts_only,
                 "calculated_metrics": payload.get("calculated_metrics", []),
             }
-            context = {key: value for key, value in payload.items() if key != "documents"}
+            context = {
+                key: value for key, value in payload.items()
+                if key not in {"documents", "evidence_segments"}
+            }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
         if not documents:
-            return {"episode": {"pending_questions": []},
+            return {"episode": {"summary": "", "pending_questions": []},
                     "thesis_patch": [], "evidence_candidates": []}, {
                         "input_tokens": 150, "output_tokens": 20}
         document = documents[0]
@@ -90,6 +95,10 @@ class IntegrationLLM(FakeLLM):
         assert "permissions" not in document and "content_hash" not in document
         quote = "The consideration was paid in cash."
         assert quote in document["excerpt"]
+        segment = next(
+            item for item in payload.get("evidence_segments", [])
+            if item["source_id"] == document["source_id"] and quote in item["text"]
+        )
         claims = context["thesis"]["claims"]
         patch = [{
             "entity": "claim", "id": claims[0]["claim_id"], "field": "confidence",
@@ -102,10 +111,10 @@ class IntegrationLLM(FakeLLM):
         if plan["question"] == "repair" and self.calls.count(plan["plan_id"]) <= 2:
             return {"episode": {}}, {"input_tokens": 150, "output_tokens": 20}
         return {
-            "episode": {"pending_questions": ["Can the cash payment be reconciled?"]},
+                    "episode": {"summary": "", "pending_questions": ["Can the cash payment be reconciled?"]},
             "thesis_patch": patch,
             "evidence_candidates": [{"source_id": document["source_id"], "fact_id": "fact-a",
-                                     "limited_quote": quote, "statement": quote}],
+                                     "excerpt_id": segment["excerpt_id"], "statement": quote}],
         }, {"input_tokens": 150, "output_tokens": 20}
 
 
@@ -189,6 +198,11 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result["model_calls"] == 2 and len(llm.calls) == 2
     llm = FakeLLM()
+    llm.repair = True
+    llm.omit_usage = True
+    result = await route.stock_research(Request(llm, payload))
+    assert result["model_calls"] == 2 and not result["usage_complete"] and len(llm.calls) == 2
+    llm = FakeLLM()
     payload["documents"] = [{"source_id": "unsanctioned", "permissions": {
         "external_model_excerpt": True}, "excerpt": "text", "content_hash": "sha256"}]
     result = await route.stock_research(Request(llm, payload))
@@ -226,7 +240,8 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result.status_code == 503 and not llm.calls
     print(json.dumps({"status": "passed", "checks": [
-        "two-stage synthesis", "one bounded repair", "immutable documents",
+        "two-stage synthesis", "one bounded repair", "repair without provider usage",
+        "immutable documents",
         "immutable API calculations", "private context/excerpt blocked",
         "missing budget fails closed"]}))
 

@@ -21,6 +21,7 @@ _MAX_ERROR_DETAIL = 1000
 _MAX_NEW_DOCUMENTS = 12
 _MAX_SYNTHESIS_CALLS = 2
 _MAX_REPAIR_CALLS = 1
+_EVIDENCE_SEGMENT_MAX_CHARS = 240
 
 
 def _model_error_code(error: BaseException) -> str:
@@ -92,7 +93,7 @@ _V3_PATCH_KEYS = {
     "entity", "id", "field", "before", "after", "change_type",
     "reason", "evidence_refs",
 }
-_V3_EVIDENCE_KEYS = {"source_id", "fact_id", "limited_quote", "statement"}
+_V3_MODEL_EVIDENCE_KEYS = {"source_id", "excerpt_id", "fact_id", "statement"}
 _V3_CHANGE_TYPES = {"strengthened", "weakened", "falsified", "retired", "calibrated"}
 
 
@@ -116,21 +117,180 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
         '"reason":"<why this scoped change is supported>",'
         '"evidence_refs":["<source_id>:<fact_id>"]}],'
         '"evidence_candidates":[{"source_id":"<supplied source id>",'
+        '"excerpt_id":"<supplied evidence segment id>",'
         '"fact_id":"<stable fact id>",'
-        '"limited_quote":"<exact contiguous quote from the supplied excerpt, <=300 chars>",'
         '"statement":"<what the quote establishes>"}]}. '
         "episode.summary may be empty, pending_questions must be an array of strings, "
         "and arrays may be empty. A thesis_patch requires a matching evidence_candidate "
         "and must use evidence_refs in the exact source_id:fact_id format. "
+        "Evidence candidates must select an excerpt_id from evidence_segments; never "
+        "invent or return quote text. The application will materialize the exact quote. "
         "Only use entity=claim or entity=decision; only use the supplied claim ids and "
         "allowed Thesis fields. Do not assert that a source or fact is verified; "
         "personal-os performs verification and writeback checks."
     )
 
 
+def _v3_result_schema(*, facts_only: bool) -> dict[str, Any]:
+    """Canonical provider schema for the stock v3 result DTO.
+
+    This describes shape and scalar constraints only. Source/claim identity,
+    quote continuity, and before-value checks remain application semantics.
+    """
+    episode_properties: dict[str, Any] = {
+        "summary": {"type": "string"},
+        "pending_questions": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+    }
+    if facts_only:
+        episode_properties["numeric_claims"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["metric_id", "value"],
+                "properties": {
+                    "metric_id": {"type": "string", "minLength": 1},
+                    "value": {"type": "string", "minLength": 1},
+                },
+                "additionalProperties": False,
+            },
+        }
+    return {
+        "type": "object",
+        "required": ["episode", "thesis_patch", "evidence_candidates"],
+        "properties": {
+            "episode": {
+                "type": "object",
+                "required": ["summary", "pending_questions"],
+                "properties": episode_properties,
+                "additionalProperties": False,
+            },
+            "thesis_patch": {
+                "type": "array",
+                **({"maxItems": 0} if facts_only else {}),
+                "items": {
+                    "type": "object",
+                    "required": sorted(_V3_PATCH_KEYS),
+                    "properties": {
+                        "entity": {"type": "string", "enum": ["claim", "decision"]},
+                        "id": {"type": "string", "minLength": 1},
+                        "field": {"type": "string", "minLength": 1},
+                        "before": {"type": "string"},
+                        "after": {"type": "string"},
+                        "change_type": {"type": "string", "enum": sorted(_V3_CHANGE_TYPES)},
+                        "reason": {"type": "string", "minLength": 1},
+                        "evidence_refs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "evidence_candidates": {
+                "type": "array",
+                **({"maxItems": 0} if facts_only else {}),
+                "items": {
+                    "type": "object",
+                    "required": sorted(_V3_MODEL_EVIDENCE_KEYS),
+                    "properties": {
+                        "source_id": {"type": "string", "minLength": 1},
+                        "excerpt_id": {"type": "string", "minLength": 1},
+                        "fact_id": {"type": "string", "minLength": 1},
+                        "statement": {"type": "string", "minLength": 1},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "additionalProperties": False,
+    }
+
+
+def _evidence_segments(documents: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Build deterministic, source-backed segments for model selection."""
+
+    segments: list[dict[str, str]] = []
+    for document in documents:
+        source_id = document.get("source_id")
+        excerpt = document.get("excerpt")
+        if not isinstance(source_id, str) or not source_id or not isinstance(excerpt, str):
+            continue
+        segment_index = 0
+        for line in excerpt.splitlines():
+            if not line.strip():
+                continue
+            start = 0
+            while start < len(line):
+                end = min(start + _EVIDENCE_SEGMENT_MAX_CHARS, len(line))
+                text = line[start:end].strip()
+                if text:
+                    segments.append({
+                        "source_id": source_id,
+                        "excerpt_id": f"{source_id}:segment-{segment_index:04d}",
+                        "text": text,
+                    })
+                    segment_index += 1
+                start = end
+    return segments
+
+
+def _model_document_index(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep document identity and numeric facts in follow-up requests."""
+
+    indexed: list[dict[str, Any]] = []
+    for document in documents:
+        source_id = document.get("source_id")
+        if not isinstance(source_id, str) or not source_id:
+            continue
+        item: dict[str, Any] = {"source_id": source_id}
+        facts = document.get("numeric_facts")
+        if facts:
+            item["numeric_facts"] = facts
+        indexed.append(item)
+    return indexed
+
+
+def _compact_synthesis_request(
+    context: dict[str, Any],
+    documents: list[dict[str, Any]],
+    evidence_segments: list[dict[str, str]],
+    evidence_draft: Any,
+) -> dict[str, Any]:
+    """Build a bounded follow-up request from the first-pass selections."""
+
+    selected_ids: set[str] = set()
+    if isinstance(evidence_draft, dict):
+        candidates = evidence_draft.get("evidence_candidates", [])
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    excerpt_id = candidate.get("excerpt_id")
+                    if isinstance(excerpt_id, str) and excerpt_id:
+                        selected_ids.add(excerpt_id)
+    selected_segments = [
+        segment for segment in evidence_segments
+        if segment["excerpt_id"] in selected_ids
+    ][:32]
+    return {
+        "subject": context["subject"],
+        "question": context["question"],
+        "thesis": context["thesis"],
+        "portfolio_context": context["portfolio_context"],
+        "pending_questions": context.get("pending_questions", []),
+        "documents": _model_document_index(documents),
+        "evidence_segments": selected_segments,
+        "evidence_draft": evidence_draft,
+    }
+
+
 def _v3_result_errors(
     value: Any,
     documents: list[dict[str, Any]],
+    evidence_segments: list[dict[str, str]],
     *,
     facts_only: bool,
 ) -> list[str]:
@@ -153,9 +313,9 @@ def _v3_result_errors(
         episode_extra = set(episode) - _V3_EPISODE_KEYS
         if episode_extra:
             errors.append(f"episode has unsupported keys: {sorted(episode_extra)}")
-        if "summary" in episode and not isinstance(episode["summary"], str):
+        if "summary" not in episode or not isinstance(episode["summary"], str):
             errors.append("episode.summary must be a string")
-        pending = episode.get("pending_questions", [])
+        pending = episode.get("pending_questions")
         if not isinstance(pending, list) or any(
             not isinstance(item, str) or not item.strip() for item in pending
         ):
@@ -175,9 +335,8 @@ def _v3_result_errors(
                     "episode.numeric_claims must contain only metric_id and value strings"
                 )
 
-    source_excerpts = {
-        str(document.get("source_id")): str(document.get("excerpt") or "")
-        for document in documents
+    segments_by_id = {
+        segment["excerpt_id"]: segment for segment in evidence_segments
     }
     candidates = value.get("evidence_candidates")
     candidate_refs: set[str] = set()
@@ -188,26 +347,25 @@ def _v3_result_errors(
             if not isinstance(candidate, dict):
                 errors.append(f"evidence_candidates[{index}] must be an object")
                 continue
-            if set(candidate) != _V3_EVIDENCE_KEYS:
+            if set(candidate) != _V3_MODEL_EVIDENCE_KEYS:
                 errors.append(
                     f"evidence_candidates[{index}] must use exactly "
-                    f"{sorted(_V3_EVIDENCE_KEYS)}"
+                    f"{sorted(_V3_MODEL_EVIDENCE_KEYS)}"
                 )
                 continue
             if not all(isinstance(candidate[key], str) and candidate[key].strip()
-                       for key in _V3_EVIDENCE_KEYS):
+                       for key in _V3_MODEL_EVIDENCE_KEYS):
                 errors.append(f"evidence_candidates[{index}] contains an empty or non-string field")
                 continue
-            quote = candidate["limited_quote"]
             source_id = candidate["source_id"]
-            if len(quote) > 300:
-                errors.append(f"evidence_candidates[{index}].limited_quote exceeds 300 characters")
-            if source_id not in source_excerpts:
+            excerpt_id = candidate["excerpt_id"]
+            segment = segments_by_id.get(excerpt_id)
+            if segment is None:
+                errors.append(f"evidence_candidates[{index}] references an unknown excerpt_id")
+                continue
+            if segment["source_id"] != source_id:
                 errors.append(f"evidence_candidates[{index}] references an unknown source_id")
-            elif quote not in source_excerpts[source_id]:
-                errors.append(
-                    f"evidence_candidates[{index}].limited_quote is not an exact excerpt"
-                )
+                continue
             candidate_refs.add(f"{source_id}:{candidate['fact_id']}")
 
     patches = value.get("thesis_patch")
@@ -240,7 +398,116 @@ def _v3_result_errors(
                 errors.append(
                     f"thesis_patch[{index}].evidence_refs must reference supplied candidates"
                 )
+    if facts_only:
+        if isinstance(candidates, list) and candidates:
+            errors.append("facts_only result must not contain evidence_candidates")
+        if isinstance(patches, list) and patches:
+            errors.append("facts_only result must not contain thesis_patch")
+    elif not documents and (candidates or patches):
+        errors.append("result without documents must not contain evidence or thesis patches")
     return errors
+
+
+def _salvage_v3_result(
+    value: Any,
+    evidence_segments: list[dict[str, str]],
+    *,
+    facts_only: bool,
+) -> tuple[Any, dict[str, int]]:
+    """Drop only unsupported evidence proposals after bounded repair.
+
+    Provider schemas can enforce DTO shape, but they cannot express the
+    cross-object relationship between ``thesis_patch.evidence_refs`` and
+    ``evidence_candidates``.  A single mismatched model-generated reference
+    must not discard an otherwise useful episode and exact source-backed
+    candidates.  Invalid proposals are therefore treated as untrusted and
+    removed deterministically; the strict validator still runs afterwards.
+    """
+
+    if not isinstance(value, dict):
+        return value, {"dropped_candidates": 0, "dropped_patches": 0}
+    candidates = value.get("evidence_candidates")
+    patches = value.get("thesis_patch")
+    if not isinstance(candidates, list) or not isinstance(patches, list):
+        return value, {"dropped_candidates": 0, "dropped_patches": 0}
+
+    segments_by_id = {segment["excerpt_id"]: segment for segment in evidence_segments}
+    safe_candidates: list[dict[str, Any]] = []
+    candidate_refs: set[str] = set()
+    seen_refs: set[str] = set()
+    dropped_candidates = 0
+    for candidate in candidates:
+        if (not isinstance(candidate, dict)
+                or set(candidate) != _V3_MODEL_EVIDENCE_KEYS
+                or not all(isinstance(candidate[key], str) and candidate[key].strip()
+                           for key in _V3_MODEL_EVIDENCE_KEYS)):
+            dropped_candidates += 1
+            continue
+        segment = segments_by_id.get(candidate["excerpt_id"])
+        if segment is None or segment["source_id"] != candidate["source_id"]:
+            dropped_candidates += 1
+            continue
+        ref = f"{candidate['source_id']}:{candidate['fact_id']}"
+        if ref in seen_refs:
+            dropped_candidates += 1
+            continue
+        seen_refs.add(ref)
+        candidate_refs.add(ref)
+        safe_candidates.append(candidate)
+
+    safe_patches: list[dict[str, Any]] = []
+    dropped_patches = 0
+    for patch in patches:
+        valid = (
+            not facts_only
+            and isinstance(patch, dict)
+            and set(patch) == _V3_PATCH_KEYS
+            and patch["entity"] in {"claim", "decision"}
+            and isinstance(patch["id"], str) and patch["id"].strip()
+            and isinstance(patch["field"], str) and patch["field"].strip()
+            and isinstance(patch["before"], str)
+            and isinstance(patch["after"], str)
+            and patch["change_type"] in _V3_CHANGE_TYPES
+            and isinstance(patch["reason"], str) and patch["reason"].strip()
+            and isinstance(patch["evidence_refs"], list)
+            and patch["evidence_refs"]
+            and all(ref in candidate_refs for ref in patch["evidence_refs"])
+        )
+        if valid:
+            safe_patches.append(patch)
+        else:
+            dropped_patches += 1
+
+    salvaged = dict(value)
+    salvaged["evidence_candidates"] = safe_candidates
+    salvaged["thesis_patch"] = safe_patches
+    return salvaged, {
+        "dropped_candidates": dropped_candidates,
+        "dropped_patches": dropped_patches,
+    }
+
+
+def _materialize_v3_result(
+    value: dict[str, Any], evidence_segments: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Replace model-selected segment IDs with exact source-backed quotes."""
+
+    segments_by_id = {
+        segment["excerpt_id"]: segment for segment in evidence_segments
+    }
+    materialized = dict(value)
+    candidates = []
+    for candidate in value["evidence_candidates"]:
+        segment = segments_by_id[candidate["excerpt_id"]]
+        candidates.append({
+            "source_id": candidate["source_id"],
+            "excerpt_id": candidate["excerpt_id"],
+            "fact_id": candidate["fact_id"],
+            "limited_quote": segment["text"],
+            "statement": candidate["statement"],
+        })
+    materialized["evidence_candidates"] = candidates
+    return materialized
 
 
 def _usage_parts(value: Any) -> list[dict[str, int]]:
@@ -456,9 +723,15 @@ async def stock_research(request: Request):
                 "question": context["question"],
                 "thesis": context["thesis"],
                 "portfolio_context": context["portfolio_context"],
-                "documents": documents,
+                # The exact source-owned text is already represented once in
+                # evidence_segments below. Do not send every excerpt a second
+                # time under documents; that duplicate wastes model context
+                # and can falsely trip the conservative admission estimate.
+                "documents": _model_document_index(documents),
                 "pending_questions": context.get("pending_questions", []),
             }
+        evidence_segments = _evidence_segments(documents)
+        model_request["evidence_segments"] = evidence_segments
         messages = [{"role": "user", "content": json.dumps(
             model_request, ensure_ascii=False,
         )}]
@@ -482,27 +755,36 @@ async def stock_research(request: Request):
                 + output
                 + 2048
             )
-        if input_bound > budget["input_tokens"] or (
-            input_bound + output + second_reserve > budget["total_tokens"]
-        ):
-            raise ValueError("synthesis exceeds cumulative token ceiling")
+        if input_bound > budget["input_tokens"]:
+            logger.warning(
+                "stock v3 estimated synthesis input exceeds soft per-call budget; "
+                "continuing for quality plan_id=%s estimated=%d budget=%d",
+                plan["plan_id"], input_bound, budget["input_tokens"],
+            )
+        if input_bound + output + second_reserve > budget["total_tokens"]:
+            logger.warning(
+                "stock v3 estimated synthesis usage exceeds soft cumulative budget "
+                "plan_id=%s estimated=%d budget=%d",
+                plan["plan_id"], input_bound + output + second_reserve,
+                budget["total_tokens"],
+            )
         client = _client(request)
+        result_schema = _v3_result_schema(facts_only=facts_only)
         result, first_usage = await asyncio.to_thread(
             client.complete_json_budgeted,
             evidence_system if wants_second_synthesis else system,
             messages,
             output,
+            schema=result_schema,
         )
         calls = 1
         usage: Any = first_usage
+        call_bounds = [input_bound + output]
         if wants_second_synthesis:
             first_parts = _usage_parts(first_usage)
-            if not first_parts:
-                raise ValueError("second synthesis requires provider usage for the first call")
-            draft_request = {
-                "request": model_request,
-                "evidence_draft": result,
-            }
+            draft_request = _compact_synthesis_request(
+                context, documents, evidence_segments, result,
+            )
             second_messages = [{"role": "user", "content": json.dumps(
                 draft_request, ensure_ascii=False,
             )}]
@@ -511,22 +793,36 @@ async def stock_research(request: Request):
                 + _estimate_input_tokens(second_messages[0]["content"])
                 + 2048
             )
-            consumed = sum(part["input_tokens"] + part["output_tokens"] for part in first_parts)
-            if second_bound > budget["input_tokens"] or (
-                consumed + second_bound + output > budget["total_tokens"]
-            ):
-                raise ValueError("second synthesis exceeds remaining cumulative token ceiling")
-            result, second_usage = await asyncio.to_thread(
-                client.complete_json_budgeted,
-                synthesis_system,
-                second_messages,
-                output,
-            )
-            usage = {"evidence": first_usage, "synthesis": second_usage}
-            calls = 2
+            call_bounds.append(second_bound + output)
+            if second_bound > budget["input_tokens"]:
+                logger.warning(
+                    "stock v3 second synthesis exceeds input ceiling; "
+                    "keeping bounded evidence draft plan_id=%s estimated=%d budget=%d",
+                    plan["plan_id"], second_bound, budget["input_tokens"],
+                )
+            else:
+                consumed = sum(part["input_tokens"] + part["output_tokens"] for part in first_parts)
+                if first_parts and consumed + second_bound + output > budget["total_tokens"]:
+                    logger.warning(
+                        "stock v3 provider usage exceeds soft cumulative budget before "
+                        "second synthesis plan_id=%s consumed=%d next=%d budget=%d",
+                        plan["plan_id"], consumed, second_bound + output,
+                        budget["total_tokens"],
+                    )
+                result, second_usage = await asyncio.to_thread(
+                    client.complete_json_budgeted,
+                    synthesis_system,
+                    second_messages,
+                    output,
+                    schema=result_schema,
+                )
+                usage = {"evidence": first_usage, "synthesis": second_usage}
+                calls = 2
         if not isinstance(result, dict):
             raise ValueError("synthesis result must be a JSON object")
-        result_errors = _v3_result_errors(result, documents, facts_only=facts_only)
+        result_errors = _v3_result_errors(
+            result, documents, evidence_segments, facts_only=facts_only,
+        )
         if result_errors and max_repair_calls > 0:
             repair_system = (
                 system + " Repair the draft into the exact stock-research-v3 contract. "
@@ -535,7 +831,10 @@ async def stock_research(request: Request):
                 "be produced. Return only the corrected JSON object."
             )
             repair_input = json.dumps(
-                {"request": model_request, "draft": result}, ensure_ascii=False,
+                _compact_synthesis_request(
+                    context, documents, evidence_segments, result,
+                ),
+                ensure_ascii=False,
             )
             repair_bound = (
                 _estimate_input_tokens(repair_system)
@@ -543,36 +842,83 @@ async def stock_research(request: Request):
                 + 2048
             )
             usage_parts = _usage_parts(usage)
-            consumed = sum(part["input_tokens"] + part["output_tokens"] for part in usage_parts)
-            if not usage_parts or repair_bound > budget["input_tokens"] or (
-                consumed + repair_bound + output > budget["total_tokens"]
-            ):
-                raise ValueError("repair requires known usage and remaining cumulative budget")
-            result, repair_usage = await asyncio.to_thread(
-                client.complete_json_budgeted,
-                repair_system, [{"role": "user", "content": repair_input}], output,
-            )
-            calls += 1
-            if isinstance(usage, dict) and _usage(usage) is None:
-                usage["repair"] = repair_usage
+            if repair_bound > budget["input_tokens"]:
+                logger.warning(
+                    "stock v3 repair exceeds input ceiling; "
+                    "keeping current evidence draft plan_id=%s estimated=%d budget=%d",
+                    plan["plan_id"], repair_bound, budget["input_tokens"],
+                )
             else:
-                usage = {"synthesis": usage, "repair": repair_usage}
-            result_errors = _v3_result_errors(result, documents, facts_only=facts_only)
+                known_usage = len(usage_parts) == calls
+                consumed = (
+                    sum(part["input_tokens"] + part["output_tokens"] for part in usage_parts)
+                    if known_usage else sum(call_bounds)
+                )
+                if consumed + repair_bound + output > budget["total_tokens"]:
+                    logger.warning(
+                        "stock v3 repair exceeds soft cumulative budget; continuing within "
+                        "repair call limit plan_id=%s estimated_or_actual=%d repair=%d budget=%d "
+                        "usage_complete=%s",
+                        plan["plan_id"], consumed, repair_bound + output,
+                        budget["total_tokens"], known_usage,
+                    )
+                result, repair_usage = await asyncio.to_thread(
+                    client.complete_json_budgeted,
+                    repair_system, [{"role": "user", "content": repair_input}], output,
+                    schema=result_schema,
+                )
+                calls += 1
+                if isinstance(usage, dict) and _usage(usage) is None:
+                    usage["repair"] = repair_usage
+                else:
+                    usage = {"synthesis": usage, "repair": repair_usage}
+                result_errors = _v3_result_errors(
+                    result, documents, evidence_segments, facts_only=facts_only,
+                )
+        if result_errors:
+            result, salvage = _salvage_v3_result(
+                result, evidence_segments, facts_only=facts_only,
+            )
+            salvaged_errors = _v3_result_errors(
+                result, documents, evidence_segments, facts_only=facts_only,
+            )
+            if salvage["dropped_candidates"] or salvage["dropped_patches"]:
+                logger.warning(
+                    "stock v3 dropped unsupported model proposals after repair "
+                    "plan_id=%s candidates=%d patches=%d remaining_errors=%d",
+                    plan["plan_id"], salvage["dropped_candidates"],
+                    salvage["dropped_patches"], len(salvaged_errors),
+                )
+            result_errors = salvaged_errors
         actual = _usage_parts(usage)
         usage_complete = len(actual) == calls
         if result_errors:
             return JSONResponse(
                 {"error": "v3 result contract invalid after repair",
+                 "error_code": "result_contract_invalid",
                  "details": result_errors[:20], "usage": usage,
                  "usage_complete": usage_complete, "model_calls": calls},
                 status_code=422,
             )
-        if usage_complete and (
-            any(part["input_tokens"] > budget["input_tokens"]
-                or part["output_tokens"] > output for part in actual)
-            or sum(part["input_tokens"] + part["output_tokens"] for part in actual) > budget["total_tokens"]
-        ):
-            raise ValueError("provider usage exceeded confirmed budget; do not retry")
+        result = _materialize_v3_result(result, evidence_segments)
+        if usage_complete:
+            per_call_overage = any(
+                part["input_tokens"] > budget["input_tokens"]
+                or part["output_tokens"] > output for part in actual
+            )
+            total = sum(part["input_tokens"] + part["output_tokens"] for part in actual)
+            if per_call_overage:
+                logger.warning(
+                    "stock v3 provider usage exceeded soft per-call budget; "
+                    "keeping successful result plan_id=%s usage=%s budget=%s",
+                    plan["plan_id"], actual, budget,
+                )
+            if total > budget["total_tokens"]:
+                logger.warning(
+                    "stock v3 provider usage exceeded soft cumulative budget after "
+                    "successful result plan_id=%s actual=%d budget=%d",
+                    plan["plan_id"], total, budget["total_tokens"],
+                )
         return {"protocol": cap["protocol"], "plan_id": plan["plan_id"],
                 "result": result, "usage": usage, "usage_complete": usage_complete,
                 "model_calls": calls}
