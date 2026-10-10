@@ -2653,6 +2653,15 @@ class ChatService:
         )
         self.store.update_title(session_id, question[:30].strip(), user_id=user_id)
         # Hand extraction to the bounded background worker, never the request path.
+        # Service-driven sessions (automated research, smoke tests) carry task
+        # parameters, not durable user preferences — never let them pollute the
+        # profile. The skip set is configurable via MATRIX_MEMORY_SKIP_USERS.
+        if user_id.strip().lower() in self.config.memory_extraction_skip_users:
+            logger.info(
+                "memory_extract_skip: user=%s session=%s reason=skip_user",
+                user_id, session_id,
+            )
+            return
         accepted = self._memory_writer.submit({
             "session_id": session_id,
             "question": question,

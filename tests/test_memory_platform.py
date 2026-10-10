@@ -20,6 +20,62 @@ from matrix.memory.writer import MemoryWriteWorker
 from matrix.store import SessionStore
 
 
+# ── Write policy: service-driven sessions must not pollute profiles ───────
+
+
+class _SpyWriter:
+    def __init__(self) -> None:
+        self.submitted: list[dict] = []
+
+    def submit(self, payload: dict) -> bool:
+        self.submitted.append(payload)
+        return True
+
+
+class TestMemoryExtractionSkipUsers:
+    """Automated research sessions land on the "default" identity and used to
+    deposit hundreds of task parameters (e.g. research_subject) into the user
+    profile. The skip list in config must gate extraction in _remember."""
+
+    def _service(self, tmp_path: Path):
+        from matrix.chat import ChatService
+        from matrix.config import AgentConfig
+        from matrix.tools import ToolRegistry
+
+        config = AgentConfig(
+            root_path=tmp_path,
+            cache_path=tmp_path / "cache",
+            trace_path=tmp_path / "trace.jsonl",
+            store_path=tmp_path / "var" / "agent" / "sessions.db",
+            checkpoint_path=str(tmp_path / "var" / "agent" / "checkpoints.db"),
+            skills_base_dir=tmp_path / "skills",
+            host="127.0.0.1",
+            port=0,
+            deepseek_api_key="test-key",
+            agnes_api_key="test-key",
+            memory_semantic_enabled=False,
+        )
+        return ChatService(config, ToolRegistry())
+
+    def test_default_user_is_not_extracted(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = self._service(Path(d))
+            spy = _SpyWriter()
+            service._memory_writer = spy
+            service._remember("s1", "研究中国神华", "结论", user_id="default")
+        assert spy.submitted == []
+
+    def test_real_user_is_extracted(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = self._service(Path(d))
+            spy = _SpyWriter()
+            service._memory_writer = spy
+            service._remember("s1", "我喜欢表格输出", "好的", user_id="admin")
+        assert len(spy.submitted) == 1
+        assert spy.submitted[0]["user_id"] == "admin"
+
+
+
 @pytest.fixture
 def store():
     with tempfile.TemporaryDirectory() as d:

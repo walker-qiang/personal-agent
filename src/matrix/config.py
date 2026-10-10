@@ -152,6 +152,11 @@ class AgentConfig:
     # Memory write policy (Phase 2)
     memory_write_decisions: bool = True
     memory_evolution_min_interval_sec: float = 3600.0
+    # Users that never get profile memory writes. Service-driven sessions
+    # (e.g. automated investment research) land on the "default" identity when
+    # no real user is authenticated; their conversations are task parameters,
+    # not durable user preferences.
+    memory_extraction_skip_users: tuple[str, ...] = ("default",)
     rate_limit_per_sec: float = 5.0
     max_message_chars: int = 8000
     pipeline_provider: str = DEFAULT_PIPELINE_PROVIDER
@@ -376,6 +381,11 @@ def load_config() -> AgentConfig:
         memory_write_decisions=_env_flag("MATRIX_MEMORY_WRITE_DECISIONS", True),
         memory_evolution_min_interval_sec=clamp_float_env(
             "MATRIX_MEMORY_EVOLUTION_INTERVAL", 3600.0, 0.0, 86400.0,
+        ),
+        memory_extraction_skip_users=tuple(
+            item.strip().lower()
+            for item in os.environ.get("MATRIX_MEMORY_SKIP_USERS", "default").split(",")
+            if item.strip()
         ),
         rate_limit_per_sec=clamp_float_env(ENV_RATE_LIMIT_PER_SEC, 5.0, 0.5, 60.0),
         max_message_chars=clamp_int_env(ENV_MAX_MESSAGE_CHARS, 8000, 500, 50000),
