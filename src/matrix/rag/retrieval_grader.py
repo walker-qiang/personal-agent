@@ -40,6 +40,32 @@ _GRADE_SYSTEM = """你是一个文档相关性评估员。判断每个检索到�
 - overall_assessment 为 "sufficient" 当且仅当至少有1个 relevant 文档
 """
 
+_GRADE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["graded_docs", "overall_assessment", "missing_info"],
+    "properties": {
+        "graded_docs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["index", "relevance", "reason"],
+                "properties": {
+                    "index": {"type": "integer", "minimum": 0},
+                    "relevance": {"type": "string", "enum": ["relevant", "partially", "irrelevant"]},
+                    "reason": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "overall_assessment": {
+            "type": "string",
+            "enum": ["sufficient", "insufficient", "partial"],
+        },
+        "missing_info": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
 
 class RetrievalGrader:
     """Grades retrieved documents for relevance using LLM.
@@ -100,6 +126,7 @@ class RetrievalGrader:
             result = self._llm.complete_json(
                 _GRADE_SYSTEM,
                 [{"role": "user", "content": f"查询：{query}\n\n文档列表：\n{doc_list}"}],
+                schema=_GRADE_SCHEMA,
                 temperature=0.0,
             )
 

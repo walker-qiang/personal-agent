@@ -33,7 +33,9 @@ from ...runtime.domain.events import RuntimeEvent
 # ── Re-exports from split modules ────────────────────────────────────────────
 
 from ._prompts import (
+    COMMANDER_PLAN_SCHEMA,
     COMMANDER_PLAN_PROMPT,
+    EVALUATOR_SCHEMA,
     PREFLECT_PROMPT,
     REPLAN_PROMPT,
     FALLBACK_AGGREGATE_PROMPT,
@@ -44,7 +46,12 @@ from ._prompts import (
     REFLEXION_PROMPT,
     REFLEXION_RETRY_PROMPT,
     LESSON_EXTRACTION_PROMPT,
+    LESSON_SCHEMA,
     PLAYBOOK_EXTRACTION_PROMPT,
+    PLAYBOOK_SCHEMA,
+    PREFLECT_SCHEMA,
+    REFLECTION_SCHEMA,
+    REPLAN_SCHEMA,
     EVALUATOR_PROMPT,
 )
 from ._circuit_breaker import (
@@ -425,6 +432,7 @@ Agent 当前回答：
         data = llm.complete_json(
             EVALUATOR_PROMPT.format(today=_today_cn()),
             [{"role": "user", "content": eval_prompt}],
+            schema=EVALUATOR_SCHEMA,
             temperature=0.1,
         )
         if not isinstance(data, dict):

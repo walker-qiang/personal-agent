@@ -21,6 +21,28 @@ from typing import Any
 logger = logging.getLogger("matrix.orchestration")
 
 
+_VERIFICATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["verdict", "reason"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["SUPPORTED", "PARTIAL", "FABRICATED"]},
+        "reason": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+_CORRECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["verdict", "reason", "corrected_answer"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["FABRICATED"]},
+        "reason": {"type": "string"},
+        "corrected_answer": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+
 # ── Empty result guard ────────────────────────────────────────────────────────
 
 
@@ -308,6 +330,7 @@ def _single_verify(
         data = llm.complete_json(
             verify_prompt,
             [{"role": "user", "content": "请核查以上数字的事实准确性。"}],
+            schema=_VERIFICATION_SCHEMA,
             temperature=temperature,
         )
         if not isinstance(data, dict):
@@ -432,6 +455,7 @@ def _full_verify_and_correct(
         data = llm.complete_json(
             full_prompt,
             [{"role": "user", "content": "请生成修正后的回答。"}],
+            schema=_CORRECTION_SCHEMA,
             temperature=0.0,
         )
         if not isinstance(data, dict):

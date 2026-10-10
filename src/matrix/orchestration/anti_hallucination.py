@@ -627,6 +627,19 @@ Tool Results:
 Return JSON: {{"verdict": "SUPPORTED|PARTIALLY|CONTRADICTED|NO_EVIDENCE"}}"""
 
 
+_CLAIM_VERIFICATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["verdict"],
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["SUPPORTED", "PARTIALLY", "CONTRADICTED", "NO_EVIDENCE"],
+        },
+    },
+    "additionalProperties": False,
+}
+
+
 def verify_claims_with_llm(
     unverified: list[Claim],
     tool_results: list[dict[str, Any]],
@@ -655,7 +668,9 @@ def verify_claims_with_llm(
                 tool_results=results_text,
             )
             data = llm.complete_json(
-                "", [{"role": "user", "content": prompt}], temperature=0.0,
+                "", [{"role": "user", "content": prompt}],
+                schema=_CLAIM_VERIFICATION_SCHEMA,
+                temperature=0.0,
             )
             verdict = str(data.get("verdict", "NO_EVIDENCE")).upper() if isinstance(data, dict) else "ERROR"
             return (claim, verdict)

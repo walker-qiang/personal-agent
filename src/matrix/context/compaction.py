@@ -92,6 +92,47 @@ CRITICAL RULES:
 4. Output ONLY the JSON object, no other text"""
 
 
+COMPACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "user_goal", "execution_history", "abandoned_paths",
+        "critical_context", "data_references",
+    ],
+    "properties": {
+        "user_goal": {"type": "string", "minLength": 1},
+        "execution_history": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["phase", "actions", "outcome"],
+                "properties": {
+                    "phase": {"type": "string"},
+                    "actions": {"type": "string"},
+                    "outcome": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "abandoned_paths": {"type": "array", "items": {"type": "string"}},
+        "critical_context": {"type": "string"},
+        "data_references": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["refId", "tool", "summary"],
+                "properties": {
+                    "refId": {"type": "string", "minLength": 1},
+                    "tool": {"type": "string", "minLength": 1},
+                    "summary": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+
 def build_compaction_messages(
     messages: list[dict[str, Any]],
     user_goal: str,
@@ -100,7 +141,8 @@ def build_compaction_messages(
     """Build a compact prompt for the compaction LLM.
 
     If previous_summary is provided, uses incremental update prompt.
-    """
+"""
+
     conversation_parts: list[str] = []
 
     for i, msg in enumerate(messages):
@@ -287,7 +329,9 @@ def compact_messages(
 
     try:
         handoff = llm.complete_json(
-            compaction_msgs[0]["content"], compaction_msgs[1:], temperature=0.3,
+            compaction_msgs[0]["content"], compaction_msgs[1:],
+            schema=COMPACTION_SCHEMA,
+            temperature=0.3,
         )
         if not isinstance(handoff, dict) or "user_goal" not in handoff:
             logger.warning("Compaction JSON missing user_goal, falling back to truncation")

@@ -68,6 +68,46 @@ _EXTRACT_SYSTEM = """你是一个实体关系抽取引擎。从给定文本中�
 如果没有实体, 返回 {"entities": [], "relations": []}
 只返回 JSON, 不要其他文字。"""
 
+_EXTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["entities", "relations"],
+    "properties": {
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "type", "description"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "type": {
+                        "type": "string",
+                        "enum": ["stock", "fund", "concept", "person", "org", "indicator", "asset", "event", "other"],
+                    },
+                    "description": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["source", "target", "relation"],
+                "properties": {
+                    "source": {"type": "string", "minLength": 1},
+                    "target": {"type": "string", "minLength": 1},
+                    "relation": {
+                        "type": "string",
+                        "enum": ["belongs_to", "related_to", "affects", "part_of", "competitor", "holds"],
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
 # ── 实体名称归一化 ────────────────────────────────────────────────────────
 
 # 中文实体常见后缀, 归一化时移除
@@ -176,6 +216,7 @@ class EntityExtractor:
             result = self._llm.complete_json(
                 _EXTRACT_SYSTEM,
                 [{"role": "user", "content": text[:2000]}],  # 截断超长文本
+                schema=_EXTRACT_SCHEMA,
                 temperature=0.0,
             )
 

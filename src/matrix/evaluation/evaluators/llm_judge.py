@@ -52,6 +52,20 @@ Output ONLY a JSON object with this exact structure:
 The overall score should be a weighted average: accuracy × 0.35 + completeness × 0.30 + relevance × 0.20 + conciseness × 0.15.
 """
 
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["accuracy", "completeness", "relevance", "conciseness", "overall", "reasoning"],
+    "properties": {
+        "accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+        "completeness": {"type": "number", "minimum": 0, "maximum": 1},
+        "relevance": {"type": "number", "minimum": 0, "maximum": 1},
+        "conciseness": {"type": "number", "minimum": 0, "maximum": 1},
+        "overall": {"type": "number", "minimum": 0, "maximum": 1},
+        "reasoning": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
 
 class LLMEvaluator(Evaluator):
     """LLM-as-Judge evaluator for answer quality assessment.
@@ -93,6 +107,7 @@ class LLMEvaluator(Evaluator):
             scores = self._llm.complete_json(
                 JUDGE_SYSTEM_PROMPT,
                 [{"role": "user", "content": user_prompt}],
+                schema=JUDGE_SCHEMA,
                 temperature=0.1,
             )
         except Exception as e:

@@ -56,8 +56,10 @@ from ..memory.safety import MemorySafetyGuard
 from ..memory.temporal import humanize_span, parse_fact_time, resolve_time_range
 from ..memory.writer import MemoryWriteWorker
 from ..vault_client import VaultWriteError, sync_memory_profile
-from ._utils import(
+from ._utils import (
+    BRANCH_SUMMARY_SCHEMA,
     MEMORY_EXTRACTION_PROMPT,
+    MEMORY_EXTRACTION_SCHEMA,
     _drain_queue,
     _tool_event_key,
     preview_json,
@@ -1525,6 +1527,7 @@ class ChatService:
 摘要只描述用户和助手已经讨论的事实，不要补充推测，不要输出隐式思维链。
 """.strip(),
                         [{"role": "user", "content": transcript}],
+                        schema=BRANCH_SUMMARY_SCHEMA,
                         temperature=0.2,
                     )
                     if not isinstance(result, dict):
@@ -2727,6 +2730,7 @@ class ChatService:
             )
             data = self._pipeline_llm.complete_json(
                 prompt, [{"role": "user", "content": "Extract memories from this Q&A."}],
+                schema=MEMORY_EXTRACTION_SCHEMA,
             )
             raw_candidates = data.get("memories", []) if isinstance(data, dict) else []
             if not isinstance(raw_candidates, list):

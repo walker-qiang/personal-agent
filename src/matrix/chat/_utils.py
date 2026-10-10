@@ -27,6 +27,42 @@ MEMORY_EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，�
 用户：{question}
 助手：{answer}"""
 
+MEMORY_EXTRACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["memories"],
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["key", "value", "type"],
+                "properties": {
+                    "key": {"type": "string", "minLength": 1},
+                    "value": {"type": "string", "minLength": 1},
+                    "type": {"type": "string", "enum": ["policy", "preference"]},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+BRANCH_SUMMARY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["summary", "key_points", "unresolved"],
+    "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "key_points": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {"type": "string"},
+        },
+        "unresolved": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
 
 def _tool_event_key(
     name: Any,

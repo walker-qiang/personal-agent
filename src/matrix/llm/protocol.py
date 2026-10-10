@@ -50,6 +50,16 @@ class LLMClient(Protocol):
         """
         ...
 
+    def complete_json_budgeted(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        max_output_tokens: int,
+        schema: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Make one bounded structured-output call and return usage."""
+        ...
+
     def stream_complete(self, system: str, messages: list[dict[str, Any]], temperature: float | None = None) -> Iterator[str]:
         """Stream completion tokens one by one. Yields content chunks."""
         ...

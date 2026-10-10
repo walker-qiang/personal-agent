@@ -121,6 +121,28 @@ _GENERATE_ALTERNATIVES_SYSTEM = """你是一个动作生成器. 为用户任务�
 只返回 JSON, 不要其他文字."""
 
 
+_ACTION_EVALUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["score", "reasoning"],
+    "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "reasoning": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+_PLAN_EVALUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["score", "reasoning", "missing_steps"],
+    "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "reasoning": {"type": "string"},
+        "missing_steps": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+
+
 # ── 数据结构 ─────────────────────────────────────────────────────────────
 
 
@@ -270,6 +292,7 @@ class ToTEvaluator:
             result = self._llm.complete_json(
                 _EVALUATE_ACTION_SYSTEM,
                 [{"role": "user", "content": f"用户任务: {task}\n\n待评估动作:\n{action_desc}"}],
+                schema=_ACTION_EVALUATION_SCHEMA,
                 temperature=0.0,
             )
 
@@ -301,6 +324,7 @@ class ToTEvaluator:
             result = self._llm.complete_json(
                 _EVALUATE_PLAN_SYSTEM.format(task=task, plan=plan_str),
                 [{"role": "user", "content": task}],
+                schema=_PLAN_EVALUATION_SCHEMA,
                 temperature=0.0,
             )
 

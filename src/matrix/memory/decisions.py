@@ -30,6 +30,29 @@ logger = logging.getLogger(__name__)
 VALID_OPS = ("ADD", "UPDATE", "DELETE", "NONE")
 VALID_TYPES = ("preference", "policy")
 
+MEMORY_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["decisions"],
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["op", "key", "value", "type", "target"],
+                "properties": {
+                    "op": {"type": "string", "enum": list(VALID_OPS)},
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                    "type": {"type": "string", "enum": list(VALID_TYPES)},
+                    "target": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
 DECISION_SYSTEM_PROMPT = """你是一个记忆写入决策引擎。给定「新候选事实」和「已有记忆」，为每条候选判定写入操作。
 
 可选操作：
@@ -177,6 +200,7 @@ class MemoryDecisionEngine:
             data = self._llm.complete_json(
                 DECISION_SYSTEM_PROMPT,
                 [{"role": "user", "content": prompt}],
+                schema=MEMORY_DECISION_SCHEMA,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("memory_decision: llm failed (%s), defaulting to ADD", exc)

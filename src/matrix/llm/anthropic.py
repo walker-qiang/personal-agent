@@ -90,7 +90,7 @@ class AnthropicClient:
         call approach fails.
         """
         # Build the dummy tool definition
-        tool_schema = schema or {"type": "object", "properties": {}}
+        tool_schema = schema if schema is not None else {"type": "object", "properties": {}}
         tool_def = {
             "name": "return_json",
             "description": "Return the structured result as JSON",
@@ -115,13 +115,21 @@ class AnthropicClient:
             self.timeout_sec,
         )
 
-        # Extract tool call arguments (guaranteed JSON from Anthropic)
-        try:
-            for block in data["content"]:
-                if block.get("type") == "tool_use" and block.get("name") == "return_json":
-                    return block["input"]
-        except (KeyError, TypeError):
-            pass
+        # Extract tool call arguments (guaranteed JSON from Anthropic).
+        matches = [
+            block for block in data.get("content", [])
+            if block.get("type") == "tool_use" and block.get("name") == "return_json"
+        ]
+        if len(matches) == 1:
+            result = matches[0].get("input")
+            if schema is not None and not isinstance(result, dict):
+                raise LLMError("Anthropic structured JSON tool result must be an object")
+            return result
+
+        if schema is not None:
+            raise LLMError(
+                "Anthropic structured JSON response did not contain the required return_json tool"
+            )
 
         # Fallback: try parsing text content
         try:
@@ -134,20 +142,33 @@ class AnthropicClient:
             raise LLMError(f"Anthropic JSON output could not be parsed: {err}") from err
 
     def complete_json_budgeted(
-        self, system: str, messages: list[dict[str, Any]], max_output_tokens: int,
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        max_output_tokens: int,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """One upstream request, with an output ceiling and observable usage."""
+        """One schema-enforced request, with an output ceiling and usage."""
         payload = {
             "model": self.model, "max_tokens": max_output_tokens,
-            "system": system, "messages": messages,
+            "system": system, "messages": self._truncate(messages, system),
             "tools": [{"name": "return_json", "description": "Return JSON",
-                       "input_schema": {"type": "object", "additionalProperties": True}}],
+            "input_schema": schema if schema is not None else {
+                           "type": "object", "additionalProperties": True,
+                       }}],
             "tool_choice": {"type": "tool", "name": "return_json"},
+            "temperature": 0.0,
         }
         data = post_json("https://api.anthropic.com/v1/messages", payload, self._headers(), self.timeout_sec)
         if data.get("stop_reason") not in (None, "tool_use"):
             raise LLMError("budgeted stock research did not complete")
-        for block in data.get("content", []):
+        matches = [
+            block for block in data.get("content", [])
+            if block.get("type") == "tool_use" and block.get("name") == "return_json"
+        ]
+        if len(matches) != 1:
+            raise LLMError("budgeted structured JSON response must contain exactly one return_json tool result")
+        for block in matches:
             if block.get("type") == "tool_use" and block.get("name") == "return_json":
                 result = block.get("input")
                 if isinstance(result, dict):

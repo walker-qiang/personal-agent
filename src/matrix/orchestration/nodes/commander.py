@@ -38,18 +38,24 @@ from ._helpers import (
     _requires_browser,
     _today_cn,
     COMMANDER_AGGREGATE_PROMPT,
+    COMMANDER_PLAN_SCHEMA,
     COMMANDER_PLAN_PROMPT,
     DOMAIN_AGENT_REACT_SYSTEM,
     FALLBACK_AGGREGATE_PROMPT,
     LESSON_EXTRACTION_PROMPT,
+    LESSON_SCHEMA,
     MAX_PLAN_STEPS,
     MAX_REACT_ITERATIONS,
     MAX_SUBTASKS,
     PLAYBOOK_EXTRACTION_PROMPT,
+    PLAYBOOK_SCHEMA,
     PREFLECT_PROMPT,
+    PREFLECT_SCHEMA,
     REFLECTION_PROMPT,
+    REFLECTION_SCHEMA,
     REFLEXION_PROMPT,
     REPLAN_PROMPT,
+    REPLAN_SCHEMA,
     REVISE_PROMPT,
 )
 from ..anti_hallucination import verify_all_claims, build_verified_output, _strip_all_verification_tags
@@ -330,13 +336,17 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
     history_context = _build_history_context(cfg.get("history", []))
 
     try:
-        plan = llm.complete_json(
+        plan_result = llm.complete_json(
             COMMANDER_PLAN_PROMPT.format(agents=agents_desc, question=user_msg, max_subtasks=MAX_SUBTASKS),
             [{"role": "user", "content": history_context + user_msg}],
+            schema=COMMANDER_PLAN_SCHEMA,
             temperature=0.1,
         )
-        if not isinstance(plan, list):
-            plan = []
+        if isinstance(plan_result, dict):
+            plan = plan_result.get("steps", [])
+        else:
+            # Compatibility for test doubles and older providers during rollout.
+            plan = plan_result if isinstance(plan_result, list) else []
     except (LLMError, json.JSONDecodeError, ValueError) as e:
         logger.warning("commander_plan LLM/parse failed: %s", type(e).__name__)
         plan = []
@@ -411,6 +421,7 @@ def commander_plan_node(state: AgentState, *, config: RunnableConfig) -> dict[st
             critique = llm.complete_json(
                 PREFLECT_PROMPT.format(question=user_msg, plan=plan_json),
                 [{"role": "user", "content": user_msg}],
+                schema=PREFLECT_SCHEMA,
                 temperature=0.0,
             )
 
@@ -681,6 +692,7 @@ def replan_node(state: AgentState, *, config: RunnableConfig) -> dict[str, Any]:
                 goal=state.get("user_message", ""),
             ),
             [],
+            schema=REPLAN_SCHEMA,
             temperature=0.1,
         )
         if not isinstance(assessment, dict):
@@ -1059,6 +1071,7 @@ def reflection_node(state: AgentState, *, config: RunnableConfig) -> dict[str, A
                 verification_issues=verification_context,
             ),
             [{"role": "user", "content": history_context + "Evaluate the answer."}],
+            schema=REFLECTION_SCHEMA,
             temperature=0.1,
         )
         if isinstance(data, dict) and data.get("ok") is False:
@@ -1172,6 +1185,7 @@ def _extract_and_store_playbook(
                 answer=answer[:1000],
             ),
             [{"role": "user", "content": "Extract the strategy."}],
+            schema=PLAYBOOK_SCHEMA,
             temperature=0.0,
         )
         if not isinstance(lesson_data, dict):
@@ -1234,6 +1248,7 @@ def _extract_and_store_lesson(
                 issues="\n".join(f"- {i}" for i in issues[:5]),
             ),
             [{"role": "user", "content": "Extract the lesson."}],
+            schema=LESSON_SCHEMA,
             temperature=0.0,
         )
 

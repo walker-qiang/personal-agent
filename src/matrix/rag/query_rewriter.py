@@ -32,6 +32,20 @@ _REWRITE_SYSTEM = """你是一个查询重写助手。你的任务是将用户�
 - "帮我看看腾讯和阿里哪家更值得买" → {"rewritten": "腾讯 阿里 投资 对比", "sub_queries": ["腾讯基本面分析", "阿里巴巴基本面分析", "腾讯阿里估值对比"]}
 """
 
+_REWRITE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["rewritten", "sub_queries"],
+    "properties": {
+        "rewritten": {"type": "string", "minLength": 1},
+        "sub_queries": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {"type": "string", "minLength": 1},
+        },
+    },
+    "additionalProperties": False,
+}
+
 
 class QueryRewriter:
     """Rewrites user queries for better retrieval using LLM.
@@ -70,6 +84,7 @@ class QueryRewriter:
             result = self._llm.complete_json(
                 _REWRITE_SYSTEM,
                 [{"role": "user", "content": f"改写以下查询：\n{query}"}],
+                schema=_REWRITE_SCHEMA,
                 temperature=0.1,
             )
 
