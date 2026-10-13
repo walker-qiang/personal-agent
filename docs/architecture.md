@@ -558,6 +558,13 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/memory/lessons` | GET | 查询跨会话经验教训 |
 | `/memory/lessons/{id}` | DELETE | 删除经验教训 |
 
+### 投研（stock v3）
+
+| 路径 | 方法 | 功能 |
+|------|------|------|
+| `/api/research/stock.v3/capabilities` | GET | stock v3 协议能力与预算上限（`supported`/`model`/`limits`） |
+| `/api/research/stock.v3` | POST | 结构化投研（`plan`/`context`/`documents`）；模型预算未配置时返回 503 |
+
 ### 认证
 
 | 路径 | 方法 | 功能 |
@@ -592,14 +599,14 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/mcp/servers` | POST | 添加 MCP 服务器 |
 | `/mcp/servers/{name}` | PUT | 更新 MCP 服务器配置 |
 | `/mcp/servers/{name}` | DELETE | 删除 MCP 服务器 |
-| `/mcp/servers/{name}/toggle` | POST | 切换启用/禁用状态
+| `/mcp/servers/{name}/toggle` | POST | 切换启用/禁用状态 |
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
 | 后端框架 | Python 3.10+, FastAPI, LangGraph |
-| LLM | Codex CLI, DeepSeek；Agnes 用于图片/视频生成 |
+| LLM | DeepSeek（`llm/deepseek.py`）；Agnes 用于图片/视频生成 |
 | 向量检索 | ChromaDB, sentence-transformers, BM25 |
 | 可观测 | OpenTelemetry (OTLP), SQLite Trace |
 | 存储 | SQLite (会话), 本地文件系统 (技能) |

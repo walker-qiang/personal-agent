@@ -29,16 +29,19 @@ personal-agent/                     # 独立 Git 仓库
 │   ├── context/                    # 上下文管理（DataBus、Compaction、Budget）
 │   ├── evaluation/                 # 评估框架（Eval runner、baseline、metrics）
 │   ├── guardrails/                 # 安全护栏（输入/输出/间接注入/隐私/Tool）
-│   ├── llm/                        # LLM 客户端（Codex / DeepSeek；Agnes 用于媒体生成）
+│   ├── llm/                        # LLM 客户端（DeepSeek；Agnes 用于媒体生成）
 │   ├── memory/                     # 记忆演化（MemoryEvolution 4 阶段管线）
 │   ├── observability/              # 可观测性（SQLite Trace、OTel）
 │   ├── orchestration/              # LangGraph 编排（图、节点、状态、反幻觉）
 │   ├── rag/                        # 向量检索（ChromaDB + BM25）
+│   ├── runtime/                    # 独立 Runtime Core（operation 生命周期、model/tool loop、approval、effect）
 │   ├── server/                     # FastAPI API 服务（路由、中间件）
 │   ├── skills/                     # 技能加载与执行
 │   ├── tools/                      # 工具注册（finance/agnes/code/web/mcp/rag）
 │   ├── config.py                   # 统一配置
-│   └── store.py                    # 持久化存储（SQLite）
+│   ├── rate_limiter.py             # 请求限流
+│   ├── store.py                    # 持久化存储（SQLite）
+│   └── vault_client.py             # personal-os 受控 Vault API 客户端（Memory / Skill mutation）
 ├── docs/                           # 项目文档
 │   ├── architecture.md             # 当前系统架构
 │   ├── quality-gate-plan.md        # 当前质量门禁
@@ -135,6 +138,13 @@ cp .env.example .env
 | `/memory/evolve` | POST | 手动触发记忆演化 |
 | `/memory/lessons` | GET | 查询跨会话经验教训 |
 | `/memory/lessons/{id}` | DELETE | 删除经验教训 |
+
+### 投研（stock v3）
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/research/stock.v3/capabilities` | GET | stock v3 协议能力与预算上限（`supported`/`model`/`limits`） |
+| `/api/research/stock.v3` | POST | 结构化投研（`plan`/`context`/`documents`）；模型预算未配置时返回 503 |
 
 ### 其他
 

@@ -51,6 +51,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# 注意：当前没有测试带 integration marker，`-m 'not integration'` 实际是空操作；
+# 后续补 live case 时需先打 marker，否则该过滤形同不存在。
 addopts = "-v --tb=short -m 'not integration'"
 markers = [
     "integration: optional tests requiring external services or heavyweight dependencies",
