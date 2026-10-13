@@ -134,6 +134,9 @@ class TestEntityExtractor:
 
 # ---- KnowledgeGraph ----
 
+# KnowledgeGraph / GraphRetriever 依赖可选 rag extra 的 networkx，
+# 属"需专门准备环境"的可选能力，默认门禁用 `-m 'not integration'` 跳过。
+@pytest.mark.integration
 class TestKnowledgeGraph:
     @pytest.fixture
     def kg(self):
@@ -278,6 +281,7 @@ class TestKnowledgeGraph:
 
 # ---- GraphRetriever ----
 
+@pytest.mark.integration
 class TestGraphRetriever:
     @pytest.fixture
     def graph_retriever(self):

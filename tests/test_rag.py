@@ -3,15 +3,26 @@
 External embedding models and ChromaDB persistence are intentionally excluded
 from the default unit-test gate. They are optional capabilities and should be
 validated separately when the environment is explicitly prepared.
+
+本文件标记为 integration：默认运行（`addopts` 含 `-m 'not integration'`）会跳过，
+准备环境后用 `uv sync --extra rag && pytest -m integration` 单独验证。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from matrix.rag.embedder import _hash_embedding
-from matrix.rag.indexer import RagSourcePolicy, _split_paragraphs
-from matrix.rag.retriever import _rrf_fuse
+import pytest
+
+# 可选能力：缺少 rag extra 时整个文件标记为 skipped，而不是收集期报错。
+# 必须在导入 matrix.rag.* 之前执行（indexer 在模块层 import chromadb）。
+pytest.importorskip("chromadb", reason="tests/test_rag.py 需要可选 rag extra：uv sync --extra rag")
+
+from matrix.rag.embedder import _hash_embedding  # noqa: E402
+from matrix.rag.indexer import RagSourcePolicy, _split_paragraphs  # noqa: E402
+from matrix.rag.retriever import _rrf_fuse  # noqa: E402
+
+pytestmark = pytest.mark.integration
 
 
 def test_hash_embedding_fallback_is_deterministic() -> None:
