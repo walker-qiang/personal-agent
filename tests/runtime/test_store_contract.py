@@ -14,7 +14,7 @@ from matrix.runtime.domain.events import RuntimeEventType
 from matrix.runtime.domain.messages import Message
 from matrix.runtime.domain.operations import OperationPhase, OperationState, StateTransition
 from matrix.runtime.domain.results import RunOutcome
-from matrix.runtime.domain.tools import RecoveryPolicy, ToolSpec
+from matrix.runtime.domain.tools import RecoveryPolicy, ToolRequest, ToolSpec
 from matrix.runtime.ports.model import ModelResponse
 from matrix.runtime.testing.fake_model import FakeModel, tool_call
 from matrix.runtime.testing.fake_tools import FakeToolExecutor
@@ -105,6 +105,58 @@ def test_sqlite_store_recovers_interrupted_operation_durably(tmp_path) -> None:
     assert events[-1].payload["previous_phase"] == "preparing"
     assert store.recover_incomplete() == []
     store.close()
+
+
+def test_sqlite_recovery_sweeps_effect_left_executing_after_recovery(tmp_path) -> None:
+    db_path = tmp_path / "runtime-recovery-effect.db"
+    store = SQLiteRuntimeStore(db_path)
+    operation = _operation()
+    store.create(operation)
+    request = ToolRequest(
+        operation_id=operation.operation_id,
+        call_id="call-external",
+        name="external-tool",
+        idempotency_key="effect-1",
+    )
+    store.begin_tool_effect(request, RecoveryPolicy.MANUAL)
+    store.mark_recovery_required(
+        operation.operation_id,
+        owner_id=operation.owner_id,
+        reason="initial_recovery",
+    )
+
+    # Reproduce a legacy partial-recovery row: the operation is already
+    # recovered, but its effect journal still says the external outcome is
+    # unknown and execution was in progress.
+    conn = store._get_conn()
+    conn.execute(
+        "UPDATE runtime_tool_effects SET status='executing', error='' "
+        "WHERE operation_id=? AND tool_call_id=?",
+        (operation.operation_id, request.call_id),
+    )
+    conn.commit()
+    store.close()
+
+    reopened = SQLiteRuntimeStore(db_path)
+    before = reopened.load(operation.owner_id, operation.operation_id)
+    before_events = reopened.list_events(operation.owner_id, operation.operation_id)
+    assert before is not None
+    assert before.phase is OperationPhase.RECOVERY_REQUIRED
+
+    assert reopened.recover_incomplete(reason="test_restart") == []
+
+    after = reopened.load(operation.owner_id, operation.operation_id)
+    effect = reopened.list_tool_effects(operation.owner_id, operation.operation_id)[0]
+    after_events = reopened.list_events(operation.owner_id, operation.operation_id)
+    assert after is not None
+    assert after.version == before.version
+    assert len(after_events) == len(before_events)
+    assert effect["status"] == "recovery_required"
+    assert effect["tool_call_id"] == request.call_id
+    assert effect["tool_name"] == request.name
+    assert effect["idempotency_key"] == request.idempotency_key
+    assert "external outcome is unknown" in effect["error"]
+    reopened.close()
 
 
 def _suspend_sqlite(store: SQLiteRuntimeStore) -> tuple[str, str]:

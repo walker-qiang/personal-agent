@@ -130,7 +130,8 @@ class SQLiteRuntimeStore:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     """SELECT o.* FROM runtime_operations o
-                       WHERE o.phase <> 'recovery_required'
+                       WHERE (
+                         o.phase <> 'recovery_required'
                          AND (
                            o.phase NOT IN
                              ('completed','failed','aborted','waiting_approval')
@@ -140,9 +141,25 @@ class SQLiteRuntimeStore:
                                AND e.status='executing'
                            )
                          )
+                       ) OR (
+                         o.phase = 'recovery_required'
+                         AND EXISTS (
+                           SELECT 1 FROM runtime_tool_effects e
+                           WHERE e.operation_id=o.operation_id
+                             AND e.status='executing'
+                         )
+                       )
                        ORDER BY o.created_at"""
                 ).fetchall()
                 for row in rows:
+                    if row["phase"] == OperationPhase.RECOVERY_REQUIRED.value:
+                        # A previous recovery may have committed the operation
+                        # snapshot before its effect journal update. Sweep the
+                        # effect without emitting a duplicate recovery event.
+                        _mark_executing_effects_recovery_required(
+                            conn, row["operation_id"], now, reason,
+                        )
+                        continue
                     recovered_operation = _recover_operation_row(
                         conn, row, reason, now,
                     )
