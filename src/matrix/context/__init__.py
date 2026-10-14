@@ -15,7 +15,15 @@ from .compaction import (
 )
 
 from .databus import build_data_index
-from .budget import check_budget, check_budget_compact, BUDGET_REJECT_THRESHOLD, BUDGET_WARN_THRESHOLD
+from .budget import (
+    BUDGET_REJECT_THRESHOLD,
+    BUDGET_WARN_THRESHOLD,
+    BudgetMeasurement,
+    check_budget,
+    check_budget_compact,
+    measure_budget,
+    measure_json_budget,
+)
 
 __all__ = [
     "ToolResultRefStore",
@@ -25,6 +33,9 @@ __all__ = [
     "build_data_index",
     "check_budget",
     "check_budget_compact",
+    "BudgetMeasurement",
+    "measure_budget",
+    "measure_json_budget",
     "BUDGET_REJECT_THRESHOLD",
     "BUDGET_WARN_THRESHOLD",
     "COMPACTION_THRESHOLD",

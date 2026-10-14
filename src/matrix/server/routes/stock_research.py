@@ -12,7 +12,9 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ...context.budget import measure_budget
 from ...llm.errors import LLMAuthError, LLMError, LLMRateLimitError, LLMTransientError
+from ..request_limits import RequestBodyTooLarge, problem_response, read_json_object
 
 router = APIRouter()
 logger = logging.getLogger("matrix.stock_research")
@@ -22,6 +24,20 @@ _MAX_NEW_DOCUMENTS = 12
 _MAX_SYNTHESIS_CALLS = 2
 _MAX_REPAIR_CALLS = 1
 _EVIDENCE_SEGMENT_MAX_CHARS = 240
+_MAX_EVIDENCE_SEGMENTS = 48
+_MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT = 6
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+_STOCK_REQUEST_MAX_BYTES = _positive_env_int(
+    "MATRIX_STOCK_V3_REQUEST_BYTES", 1 << 20,
+)
 
 
 def _model_error_code(error: BaseException) -> str:
@@ -71,13 +87,6 @@ def _usage(value: Any) -> dict[str, int] | None:
             or input_tokens < 0 or output_tokens < 0):
         return None
     return {"input_tokens": input_tokens, "output_tokens": output_tokens}
-
-
-def _estimate_input_tokens(value: str) -> int:
-    """Conservative admission estimate; provider usage remains authoritative."""
-    ascii_units = sum(1 for char in value if ord(char) < 128)
-    non_ascii_units = len(value) - ascii_units
-    return (ascii_units + 3) // 4 + non_ascii_units * 2
 
 
 def _structured_result(value: Any) -> bool:
@@ -224,7 +233,11 @@ def _evidence_segments(documents: list[dict[str, Any]]) -> list[dict[str, str]]:
             if not line.strip():
                 continue
             start = 0
-            while start < len(line):
+            while (
+                start < len(line)
+                and segment_index < _MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT
+                and len(segments) < _MAX_EVIDENCE_SEGMENTS
+            ):
                 end = min(start + _EVIDENCE_SEGMENT_MAX_CHARS, len(line))
                 text = line[start:end].strip()
                 if text:
@@ -235,6 +248,10 @@ def _evidence_segments(documents: list[dict[str, Any]]) -> list[dict[str, str]]:
                     })
                     segment_index += 1
                 start = end
+            if len(segments) >= _MAX_EVIDENCE_SEGMENTS:
+                break
+        if len(segments) >= _MAX_EVIDENCE_SEGMENTS:
+            break
     return segments
 
 
@@ -591,6 +608,11 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "max_new_documents": _MAX_NEW_DOCUMENTS,
         "max_synthesis_calls": _MAX_SYNTHESIS_CALLS,
         "max_repair_calls": _MAX_REPAIR_CALLS,
+        "request_limits": {
+            "max_body_bytes": _STOCK_REQUEST_MAX_BYTES,
+            "max_evidence_segments": _MAX_EVIDENCE_SEGMENTS,
+            "max_evidence_segments_per_document": _MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT,
+        },
     }
 
 
@@ -598,9 +620,16 @@ async def capabilities(request: Request) -> dict[str, Any]:
 async def stock_research(request: Request):
     cap = await capabilities(request)
     if not cap["supported"]:
-        return JSONResponse({"error": "stock v3 model budget is not configured"}, status_code=503)
+        return problem_response(
+            status_code=503,
+            code="stock_v3_budget_unavailable",
+            detail="stock v3 model budget is not configured",
+            retryable=True,
+        )
     try:
-        body = await request.json()
+        body = await read_json_object(
+            request, max_bytes=_STOCK_REQUEST_MAX_BYTES,
+        )
         plan, context, documents = body["plan"], body["context"], body["documents"]
         if not isinstance(plan, dict) or not isinstance(context, dict) or not isinstance(documents, list):
             raise ValueError("plan, context and documents must be structured")
@@ -737,37 +766,67 @@ async def stock_research(request: Request):
         )}]
         # Reserve framing explicitly, but avoid treating every UTF-8 byte as a
         # token. Provider-reported usage is checked again after each request.
-        input_bound = (
-            _estimate_input_tokens(evidence_system if max_synthesis_calls > 1 and not facts_only else system)
-            + _estimate_input_tokens(messages[0]["content"])
-            + 2048
-        )
+        budget_adjustments: list[str] = []
         output = budget["output_tokens"]
         wants_second_synthesis = max_synthesis_calls > 1 and not facts_only
+        first_system = evidence_system if wants_second_synthesis else system
+        first_measurement = measure_budget(
+            [first_system, messages[0]["content"]],
+            output_tokens=output,
+            overhead_tokens=2048,
+        )
+        input_bound = first_measurement.input_tokens
         second_reserve = 0
         if wants_second_synthesis:
-            second_reserve = (
-                _estimate_input_tokens(synthesis_system)
-                + _estimate_input_tokens(json.dumps(
-                    {"request": model_request, "evidence_draft": ""},
-                    ensure_ascii=False,
-                ))
-                + output
-                + 2048
+            second_measurement = measure_budget(
+                [
+                    synthesis_system,
+                    json.dumps(
+                        {"request": model_request, "evidence_draft": ""},
+                        ensure_ascii=False,
+                    ),
+                ],
+                output_tokens=output,
+                overhead_tokens=2048,
             )
+            second_reserve = second_measurement.total_tokens
         if input_bound > budget["input_tokens"]:
             logger.warning(
                 "stock v3 estimated synthesis input exceeds soft per-call budget; "
-                "continuing for quality plan_id=%s estimated=%d budget=%d",
+                "rejecting oversized context plan_id=%s estimated=%d budget=%d",
                 plan["plan_id"], input_bound, budget["input_tokens"],
             )
-        if input_bound + output + second_reserve > budget["total_tokens"]:
+            return problem_response(
+                status_code=422,
+                code="input_context_too_large",
+                detail="stock research context exceeds the per-call input budget",
+                details={
+                    "estimated_input_tokens": input_bound,
+                    "input_token_budget": budget["input_tokens"],
+                    "input_bytes": first_measurement.input_bytes,
+                    "evidence_segments": len(evidence_segments),
+                },
+            )
+        if first_measurement.total_tokens > budget["total_tokens"]:
+            return problem_response(
+                status_code=422,
+                code="total_context_budget_exceeded",
+                detail="stock research first model call exceeds the total token budget",
+                details={
+                    "estimated_total_tokens": first_measurement.total_tokens,
+                    "total_token_budget": budget["total_tokens"],
+                    "evidence_segments": len(evidence_segments),
+                },
+            )
+        if wants_second_synthesis and first_measurement.total_tokens + second_reserve > budget["total_tokens"]:
             logger.warning(
-                "stock v3 estimated synthesis usage exceeds soft cumulative budget "
+                "stock v3 optional second synthesis exceeds cumulative budget; skipping "
                 "plan_id=%s estimated=%d budget=%d",
-                plan["plan_id"], input_bound + output + second_reserve,
+                plan["plan_id"], first_measurement.total_tokens + second_reserve,
                 budget["total_tokens"],
             )
+            budget_adjustments.append("second_synthesis_skipped_total_budget")
+            wants_second_synthesis = False
         client = _client(request)
         result_schema = _v3_result_schema(facts_only=facts_only)
         result, first_usage = await asyncio.to_thread(
@@ -789,35 +848,39 @@ async def stock_research(request: Request):
                 draft_request, ensure_ascii=False,
             )}]
             second_bound = (
-                _estimate_input_tokens(synthesis_system)
-                + _estimate_input_tokens(second_messages[0]["content"])
-                + 2048
+                measure_budget(
+                    [synthesis_system, second_messages[0]["content"]],
+                    overhead_tokens=2048,
+                ).input_tokens
             )
             call_bounds.append(second_bound + output)
             if second_bound > budget["input_tokens"]:
                 logger.warning(
-                    "stock v3 second synthesis exceeds input ceiling; "
-                    "keeping bounded evidence draft plan_id=%s estimated=%d budget=%d",
+                    "stock v3 second synthesis exceeds input ceiling; skipping "
+                    "plan_id=%s estimated=%d budget=%d",
                     plan["plan_id"], second_bound, budget["input_tokens"],
                 )
+                budget_adjustments.append("second_synthesis_skipped_input_budget")
             else:
                 consumed = sum(part["input_tokens"] + part["output_tokens"] for part in first_parts)
                 if first_parts and consumed + second_bound + output > budget["total_tokens"]:
                     logger.warning(
-                        "stock v3 provider usage exceeds soft cumulative budget before "
-                        "second synthesis plan_id=%s consumed=%d next=%d budget=%d",
+                        "stock v3 provider usage exceeds cumulative budget before "
+                        "second synthesis; skipping plan_id=%s consumed=%d next=%d budget=%d",
                         plan["plan_id"], consumed, second_bound + output,
                         budget["total_tokens"],
                     )
-                result, second_usage = await asyncio.to_thread(
-                    client.complete_json_budgeted,
-                    synthesis_system,
-                    second_messages,
-                    output,
-                    schema=result_schema,
-                )
-                usage = {"evidence": first_usage, "synthesis": second_usage}
-                calls = 2
+                    budget_adjustments.append("second_synthesis_skipped_provider_budget")
+                else:
+                    result, second_usage = await asyncio.to_thread(
+                        client.complete_json_budgeted,
+                        synthesis_system,
+                        second_messages,
+                        output,
+                        schema=result_schema,
+                    )
+                    usage = {"evidence": first_usage, "synthesis": second_usage}
+                    calls = 2
         if not isinstance(result, dict):
             raise ValueError("synthesis result must be a JSON object")
         result_errors = _v3_result_errors(
@@ -837,9 +900,10 @@ async def stock_research(request: Request):
                 ensure_ascii=False,
             )
             repair_bound = (
-                _estimate_input_tokens(repair_system)
-                + _estimate_input_tokens(repair_input)
-                + 2048
+                measure_budget(
+                    [repair_system, repair_input],
+                    overhead_tokens=2048,
+                ).input_tokens
             )
             usage_parts = _usage_parts(usage)
             if repair_bound > budget["input_tokens"]:
@@ -848,6 +912,7 @@ async def stock_research(request: Request):
                     "keeping current evidence draft plan_id=%s estimated=%d budget=%d",
                     plan["plan_id"], repair_bound, budget["input_tokens"],
                 )
+                budget_adjustments.append("repair_skipped_input_budget")
             else:
                 known_usage = len(usage_parts) == calls
                 consumed = (
@@ -856,25 +921,27 @@ async def stock_research(request: Request):
                 )
                 if consumed + repair_bound + output > budget["total_tokens"]:
                     logger.warning(
-                        "stock v3 repair exceeds soft cumulative budget; continuing within "
-                        "repair call limit plan_id=%s estimated_or_actual=%d repair=%d budget=%d "
+                        "stock v3 repair exceeds cumulative budget; skipping repair "
+                        "plan_id=%s estimated_or_actual=%d repair=%d budget=%d "
                         "usage_complete=%s",
                         plan["plan_id"], consumed, repair_bound + output,
                         budget["total_tokens"], known_usage,
                     )
-                result, repair_usage = await asyncio.to_thread(
-                    client.complete_json_budgeted,
-                    repair_system, [{"role": "user", "content": repair_input}], output,
-                    schema=result_schema,
-                )
-                calls += 1
-                if isinstance(usage, dict) and _usage(usage) is None:
-                    usage["repair"] = repair_usage
+                    budget_adjustments.append("repair_skipped_provider_budget")
                 else:
-                    usage = {"synthesis": usage, "repair": repair_usage}
-                result_errors = _v3_result_errors(
-                    result, documents, evidence_segments, facts_only=facts_only,
-                )
+                    result, repair_usage = await asyncio.to_thread(
+                        client.complete_json_budgeted,
+                        repair_system, [{"role": "user", "content": repair_input}], output,
+                        schema=result_schema,
+                    )
+                    calls += 1
+                    if isinstance(usage, dict) and _usage(usage) is None:
+                        usage["repair"] = repair_usage
+                    else:
+                        usage = {"synthesis": usage, "repair": repair_usage}
+                    result_errors = _v3_result_errors(
+                        result, documents, evidence_segments, facts_only=facts_only,
+                    )
         if result_errors:
             result, salvage = _salvage_v3_result(
                 result, evidence_segments, facts_only=facts_only,
@@ -893,12 +960,16 @@ async def stock_research(request: Request):
         actual = _usage_parts(usage)
         usage_complete = len(actual) == calls
         if result_errors:
-            return JSONResponse(
-                {"error": "v3 result contract invalid after repair",
-                 "error_code": "result_contract_invalid",
-                 "details": result_errors[:20], "usage": usage,
-                 "usage_complete": usage_complete, "model_calls": calls},
+            return problem_response(
                 status_code=422,
+                code="result_contract_invalid",
+                detail="v3 result contract invalid after repair",
+                details={
+                    "validation_errors": result_errors[:20],
+                    "usage": usage,
+                    "usage_complete": usage_complete,
+                    "model_calls": calls,
+                },
             )
         result = _materialize_v3_result(result, evidence_segments)
         if usage_complete:
@@ -913,17 +984,30 @@ async def stock_research(request: Request):
                     "keeping successful result plan_id=%s usage=%s budget=%s",
                     plan["plan_id"], actual, budget,
                 )
+                budget_adjustments.append("provider_per_call_budget_exceeded")
             if total > budget["total_tokens"]:
                 logger.warning(
-                    "stock v3 provider usage exceeded soft cumulative budget after "
+                    "stock v3 provider usage exceeded cumulative budget after "
                     "successful result plan_id=%s actual=%d budget=%d",
                     plan["plan_id"], total, budget["total_tokens"],
                 )
+                budget_adjustments.append("provider_total_budget_exceeded")
         return {"protocol": cap["protocol"], "plan_id": plan["plan_id"],
                 "result": result, "usage": usage, "usage_complete": usage_complete,
-                "model_calls": calls}
+                "model_calls": calls, "budget_adjustments": budget_adjustments}
+    except RequestBodyTooLarge as exc:
+        return problem_response(
+            status_code=413,
+            code="request_body_too_large",
+            detail="stock research request body exceeds the configured limit",
+            details={"max_bytes": exc.limit_bytes},
+        )
     except (KeyError, TypeError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=422)
+        return problem_response(
+            status_code=422,
+            code="research_request_invalid",
+            detail=str(exc),
+        )
     except LLMError as exc:
         error_code = _model_error_code(exc)
         detail = _safe_error_detail(exc)
@@ -937,14 +1021,13 @@ async def stock_research(request: Request):
             error_code,
             detail,
         )
-        return JSONResponse(
-            {
-                "error": "stock research model request failed",
-                "error_code": error_code,
-                "detail": detail,
-                "no_automatic_retry": True,
-            },
+        retryable = isinstance(exc, (LLMRateLimitError, LLMTransientError))
+        return problem_response(
             status_code=502,
+            code=error_code,
+            detail="stock research model request failed",
+            retryable=retryable,
+            details={"provider_detail": detail},
         )
     except Exception as exc:
         error_code = _model_error_code(exc)
@@ -959,12 +1042,9 @@ async def stock_research(request: Request):
             error_code,
             detail,
         )
-        return JSONResponse(
-            {
-                "error": "stock research request failed",
-                "error_code": error_code,
-                "detail": detail,
-                "no_automatic_retry": True,
-            },
+        return problem_response(
             status_code=502,
+            code=error_code,
+            detail="stock research request failed",
+            details={"provider_detail": detail},
         )

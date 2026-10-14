@@ -14,6 +14,9 @@ Design:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from collections.abc import Iterable
+import json
 import logging
 from typing import Any
 
@@ -26,6 +29,50 @@ logger = logging.getLogger("matrix.context")
 BUDGET_REJECT_THRESHOLD = 0.98  # Free model: near-full, just prevent errors
 BUDGET_WARN_THRESHOLD = 0.90    # Warn when approaching limit
 RESERVE_OUTPUT_TOKENS = 4096    # Reserve for the model's response
+
+
+@dataclass(frozen=True)
+class BudgetMeasurement:
+    """Provider-neutral measurements used for admission and diagnostics."""
+
+    input_bytes: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+def measure_budget(
+    texts: Iterable[str],
+    *,
+    output_tokens: int = 0,
+    overhead_tokens: int = 0,
+) -> BudgetMeasurement:
+    """Measure a request using the same conservative estimator everywhere."""
+    values = [str(value) for value in texts]
+    input_bytes = sum(len(value.encode("utf-8")) for value in values)
+    input_tokens = sum(estimate_tokens(value) for value in values) + max(0, overhead_tokens)
+    output_tokens = max(0, output_tokens)
+    return BudgetMeasurement(
+        input_bytes=input_bytes,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+    )
+
+
+def measure_json_budget(
+    value: Any,
+    *,
+    output_tokens: int = 0,
+    overhead_tokens: int = 0,
+) -> BudgetMeasurement:
+    """Serialize a JSON request once, then measure its actual UTF-8 payload."""
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return measure_budget(
+        [encoded],
+        output_tokens=output_tokens,
+        overhead_tokens=overhead_tokens,
+    )
 
 
 def check_budget(
