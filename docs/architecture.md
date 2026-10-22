@@ -558,12 +558,29 @@ PUT/POST/DELETE mutation 由 `personal-os` 执行 durable write；本服务只�
 | `/memory/lessons` | GET | 查询跨会话经验教训 |
 | `/memory/lessons/{id}` | DELETE | 删除经验教训 |
 
-### 投研（stock v3）
+### 投研（股票与基金 V3）
 
 | 路径 | 方法 | 功能 |
 |------|------|------|
-| `/api/research/stock.v3/capabilities` | GET | stock v3 协议能力与预算上限（`supported`/`model`/`limits`） |
-| `/api/research/stock.v3` | POST | 结构化投研（`plan`/`context`/`documents`）；模型预算未配置时返回 503 |
+| `/api/research/investment.v3/capabilities` | GET | V3 股票与基金能力、模型和预算上限 |
+| `/api/research/investment.v3` | POST | 结构化研究；`object_type=stock|fund`，缺少预算时失败关闭 |
+| `/api/research/stock.v3` | POST | 旧股票 V3 客户端兼容入口，不接受基金，不作为当前 App 入口 |
+
+两类标的复用研究回合、证据片段、预算和修复流程。基金启用底层暴露、成本效率、
+跟踪表现与交易条件视角，不使用公司财务判断字段。产品登记摘要标记为未核验上下文，
+不替代官方证据。默认拒绝含持仓的请求，只有计划明确 `include_portfolio=true` 才接收
+最小持仓 DTO。模型无文件写入或交易权限，结果仍由 `personal-os` 校验和受控写回。
+预算沿用现有 `MATRIX_STOCK_V3_*` 配置，股票与基金共享同一组执行上限。
+
+质量增强采用 `paragraph-v2` 选段：PDF 短行按连续原文字符区间组合，按问题相关性
+排序并跨资料分配预算；片段 ID、字符位置和原文精确子串由应用层生成，模型不生成
+引文正文。报告期单独传递，API 接收后将引用定位回完整原件的字节位置及可用页码。
+入选量仍受已确认预算约束，空正文且没有核验数值时不调用模型。
+
+增强计划要求对 Scope 中每条判断返回 `claim_checks`；支持/削弱必须引用有效来源，
+仍未解决时必须给出包含字段、资料位置和完成标准的 `next_step`。API 独立复核范围、
+引用和当前判断，不把模型自报完成视为核验成功。结果增加选段规模诊断，历史旧回合
+不自动升级为已核验。空持仓上下文表示未提供/未授权，不能解释为用户没有持仓。
 
 ### 认证
 
