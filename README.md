@@ -139,12 +139,19 @@ cp .env.example .env
 | `/memory/lessons` | GET | 查询跨会话经验教训 |
 | `/memory/lessons/{id}` | DELETE | 删除经验教训 |
 
-### 投研（stock v3）
+### 投研（股票与基金 V3）
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/research/stock.v3/capabilities` | GET | stock v3 协议能力与预算上限（`supported`/`model`/`limits`） |
-| `/api/research/stock.v3` | POST | 结构化投研（`plan`/`context`/`documents`）；模型预算未配置时返回 503 |
+| `/api/research/investment.v3/capabilities` | GET | 股票与基金 V3 协议能力、模型与预算上限（`supported`/`model`/`limits`） |
+| `/api/research/investment.v3` | POST | 统一结构化研究（`plan`/`context`/`documents`），支持 `object_type=stock|fund`；预算缺失时失败关闭 |
+| `/api/research/stock.v3/capabilities` | GET | 旧股票 V3 客户端的能力兼容入口 |
+| `/api/research/stock.v3` | POST | 旧股票 V3 客户端兼容入口，不接受基金，不作为当前 App 入口 |
+
+研究由 `personal-os` 的主动操作及不可变计划驱动，Agent 不自行调度全池研究。
+两阶段综合、至多一次修复和所有恢复均受同一资料权限、范围与预算限制。最新引用修复的
+离线验证不等于真实模型复查已经成功，详见
+[引用校验修复记录](docs/plans/2026-10-18-research-reference-repair.md)。
 
 ### 其他
 
