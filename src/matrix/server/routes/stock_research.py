@@ -435,6 +435,64 @@ def _evidence_reference_catalog(
     return sorted(refs | catalog.keys()), [catalog[ref] for ref in sorted(catalog)]
 
 
+def _materialize_catalog_cited_candidates(
+    value: Any,
+    evidence_segments: list[dict[str, str]],
+    reference_catalog: dict[str, dict[str, str]],
+) -> Any:
+    """Restore omitted candidates only for exact, source-backed catalog citations."""
+
+    if not isinstance(value, dict):
+        return value
+    candidates = value.get("evidence_candidates")
+    if not isinstance(candidates, list):
+        return value
+
+    existing_refs = {
+        f"{candidate['source_id']}:{candidate['fact_id']}"
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and isinstance(candidate.get("source_id"), str)
+        and isinstance(candidate.get("fact_id"), str)
+    }
+    cited_refs: set[str] = set()
+    episode = value.get("episode")
+    checks = episode.get("claim_checks") if isinstance(episode, dict) else None
+    for check in checks if isinstance(checks, list) else []:
+        refs = check.get("evidence_refs") if isinstance(check, dict) else None
+        if isinstance(refs, list):
+            cited_refs.update(ref for ref in refs if isinstance(ref, str))
+    patches = value.get("thesis_patch")
+    for patch in patches if isinstance(patches, list) else []:
+        refs = patch.get("evidence_refs") if isinstance(patch, dict) else None
+        if isinstance(refs, list):
+            cited_refs.update(ref for ref in refs if isinstance(ref, str))
+
+    segments_by_id = {segment["excerpt_id"]: segment for segment in evidence_segments}
+    added: list[dict[str, str]] = []
+    for ref in sorted(cited_refs - existing_refs):
+        entry = reference_catalog.get(ref)
+        if entry is None:
+            continue
+        segment = segments_by_id.get(entry.get("excerpt_id", ""))
+        if segment is None or segment.get("source_id") != entry.get("source_id"):
+            continue
+        if ref != f"{entry['source_id']}:{entry['fact_id']}":
+            continue
+        added.append({
+            "source_id": entry["source_id"],
+            "excerpt_id": entry["excerpt_id"],
+            "fact_id": entry["fact_id"],
+            "statement": segment["text"],
+        })
+    if not added:
+        return value
+
+    materialized = dict(value)
+    materialized["evidence_candidates"] = candidates + added
+    return materialized
+
+
 def _compact_synthesis_request(
     context: dict[str, Any],
     documents: list[dict[str, Any]],
@@ -1367,6 +1425,9 @@ async def stock_research(request: Request):
                             item["evidence_ref"]: item
                             for item in repair_request["available_evidence_candidates"]
                         }
+                        result = _materialize_catalog_cited_candidates(
+                            result, evidence_segments, repair_catalog,
+                        )
                     calls += 1
                     if isinstance(usage, dict) and _usage(usage) is None:
                         usage["repair"] = repair_usage

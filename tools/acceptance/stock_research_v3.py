@@ -317,7 +317,10 @@ class Request:
 
 async def verify_reference_repair(base_payload):
     """Real provider adapter + fake HTTP; never contact a model endpoint."""
-    for mode in ("repaired", "unrepaired", "renamed", "rebound", "missing", "partial-numeric"):
+    for mode in (
+        "repaired", "unrepaired", "renamed", "rebound", "missing",
+        "partial-numeric", "catalog-ref-missing-candidate",
+    ):
         payload = json.loads(json.dumps(base_payload))
         plan, context = payload["plan"], payload["context"]
         plan["scope"]["claim_ids"] = ["legacy-claim-1"]
@@ -334,9 +337,10 @@ async def verify_reference_repair(base_payload):
         plan["documents"] = payload["documents"]
         outgoing = []
         other_excerpt_id = ""
+        catalog_candidate = None
 
         def fake_http(url, body, headers, timeout):
-            nonlocal other_excerpt_id
+            nonlocal other_excerpt_id, catalog_candidate
             assert url == "https://api.deepseek.com/chat/completions"
             assert headers["authorization"] == "Bearer fixture-only"
             assert body["max_tokens"] == plan["budget"]["output_tokens"]
@@ -385,21 +389,29 @@ async def verify_reference_repair(base_payload):
                     cited_ref = good_ref
                     candidate["excerpt_id"] = other_excerpt_id
                     assert good_ref in allowed and other_excerpt_id != segment["excerpt_id"]
+                elif mode == "catalog-ref-missing-candidate":
+                    catalog_candidate = request["available_evidence_candidates"][0]
+                    cited_ref = catalog_candidate["evidence_ref"]
             checks = [{
                 "claim_id": "legacy-claim-1", "status": "supported",
                 "finding": "构造的核验结果。", "evidence_refs": [cited_ref],
             }]
             if mode == "missing" and len(outgoing) == 3:
                 checks = []
+            candidates = [candidate]
+            patches = [{
+                "entity": "decision", "id": "", "field": "confidence",
+                "before": "low", "after": "medium", "change_type": "strengthened",
+                "reason": "构造的判断建议。", "evidence_refs": [patch_ref],
+            }]
+            if mode == "catalog-ref-missing-candidate" and len(outgoing) == 3:
+                candidates = []
+                patches = []
             result = {
                 "episode": {"summary": "仅用于离线验收。", "pending_questions": [],
                             "claim_checks": checks},
-                "evidence_candidates": [candidate],
-                "thesis_patch": [{
-                    "entity": "decision", "id": "", "field": "confidence",
-                    "before": "low", "after": "medium", "change_type": "strengthened",
-                    "reason": "构造的判断建议。", "evidence_refs": [patch_ref],
-                }],
+                "evidence_candidates": candidates,
+                "thesis_patch": patches,
             }
             return {
                 "choices": [{"finish_reason": "tool_calls", "message": {
@@ -415,7 +427,7 @@ async def verify_reference_repair(base_payload):
         with patch("matrix.llm.deepseek.post_json", fake_http):
             response = await route.stock_research(Request(client, payload))
         assert len(outgoing) == 3, (mode, len(outgoing))
-        if mode in {"repaired", "partial-numeric"}:
+        if mode in {"repaired", "partial-numeric", "catalog-ref-missing-candidate"}:
             assert isinstance(response, dict), getattr(response, "body", response)
             assert response["result"]["episode"]["claim_checks"][0]["status"] == "supported"
             assert response["model_calls"] == 3 and response["usage_complete"]
@@ -424,6 +436,15 @@ async def verify_reference_repair(base_payload):
                 assert response["result_incomplete"] and not diagnostic["post_filter_errors"]
                 assert diagnostic["filter_counts"] == {"dropped_candidates": 1, "dropped_patches": 0}
                 assert any("unknown excerpt_id" in error for error in diagnostic["validation_errors"])
+            elif mode == "catalog-ref-missing-candidate":
+                assert catalog_candidate is not None
+                materialized = response["result"]["evidence_candidates"]
+                assert len(materialized) == 1
+                assert materialized[0]["source_id"] == catalog_candidate["source_id"]
+                assert materialized[0]["excerpt_id"] == catalog_candidate["excerpt_id"]
+                assert materialized[0]["fact_id"] == catalog_candidate["fact_id"]
+                assert materialized[0]["limited_quote"] == materialized[0]["statement"]
+                assert not response["result_incomplete"]
             else:
                 assert not response["result_incomplete"]
         else:
