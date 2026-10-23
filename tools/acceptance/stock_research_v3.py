@@ -319,7 +319,7 @@ async def verify_reference_repair(base_payload):
     """Real provider adapter + fake HTTP; never contact a model endpoint."""
     for mode in (
         "repaired", "unrepaired", "renamed", "rebound", "missing",
-        "partial-numeric", "catalog-ref-missing-candidate",
+        "partial-numeric", "catalog-ref-missing-candidate", "second-repair",
     ):
         payload = json.loads(json.dumps(base_payload))
         plan, context = payload["plan"], payload["context"]
@@ -337,10 +337,11 @@ async def verify_reference_repair(base_payload):
         plan["documents"] = payload["documents"]
         outgoing = []
         other_excerpt_id = ""
+        original_excerpt_id = ""
         catalog_candidate = None
 
         def fake_http(url, body, headers, timeout):
-            nonlocal other_excerpt_id, catalog_candidate
+            nonlocal other_excerpt_id, original_excerpt_id, catalog_candidate
             assert url == "https://api.deepseek.com/chat/completions"
             assert headers["authorization"] == "Bearer fixture-only"
             assert body["max_tokens"] == plan["budget"]["output_tokens"]
@@ -348,6 +349,7 @@ async def verify_reference_repair(base_payload):
             request = json.loads(body["messages"][-1]["content"])
             outgoing.append(request)
             if mode == "rebound" and len(outgoing) == 1:
+                original_excerpt_id = request["evidence_segments"][0]["excerpt_id"]
                 other_excerpt_id = request["evidence_segments"][1]["excerpt_id"]
             assert request["required_claim_ids"] == ["legacy-claim-1"]
             source = request["documents"][0]["source_id"]
@@ -361,21 +363,36 @@ async def verify_reference_repair(base_payload):
             cited_ref = source + ":revenue" if numeric else bad_ref
             patch_ref = source + ":revenue" if numeric else good_ref
             if len(outgoing) >= 2:
-                assert patch_ref in request["available_evidence_refs"]
-                assert bad_ref not in request["available_evidence_refs"]
+                assert patch_ref in request["available_evidence_refs"], (
+                    mode, len(outgoing), patch_ref, request["available_evidence_refs"],
+                )
+                assert bad_ref not in request["available_evidence_refs"], (
+                    mode, len(outgoing), bad_ref, request["available_evidence_refs"],
+                )
                 assert request["available_evidence_candidates"]
-            if len(outgoing) == 3:
+            if len(outgoing) >= 3:
                 assert request["validation_errors"]
                 schema = body["tools"][0]["function"]["parameters"]
                 allowed = schema["properties"]["episode"]["properties"]["claim_checks"]["items"][
                     "properties"]["evidence_refs"]["items"]["enum"]
                 assert allowed == request["available_evidence_refs"]
-                if not numeric:
-                    assert any("episode.claim_checks[0].evidence_refs" in error
+                if not numeric and mode == "rebound" and len(outgoing) >= 4:
+                    assert any("reference catalog binding" in error
                                for error in request["validation_errors"])
+                elif mode == "missing" and len(outgoing) >= 4:
+                    errors = " ".join(request["validation_errors"])
+                    assert "claim_checks must cover" in errors
+                    assert "missing=['legacy-claim-1']" in errors
+                elif not numeric:
+                    assert any("episode.claim_checks[0].evidence_refs" in error
+                               for error in request["validation_errors"]), (
+                        mode, len(outgoing), request["validation_errors"],
+                    )
                     assert not any("missing=['legacy-claim-1']" in error
                                    for error in request["validation_errors"])
-                if mode == "repaired":
+                if (mode == "repaired" and len(outgoing) == 3) or (
+                    mode == "second-repair" and len(outgoing) == 4
+                ):
                     cited_ref = good_ref
                 elif mode == "renamed":
                     # Even a newly grounded candidate cannot rename the
@@ -388,7 +405,7 @@ async def verify_reference_repair(base_payload):
                     # original excerpt, not another span from that source.
                     cited_ref = good_ref
                     candidate["excerpt_id"] = other_excerpt_id
-                    assert good_ref in allowed and other_excerpt_id != segment["excerpt_id"]
+                    assert good_ref in allowed and other_excerpt_id != original_excerpt_id
                 elif mode == "catalog-ref-missing-candidate":
                     catalog_candidate = request["available_evidence_candidates"][0]
                     cited_ref = catalog_candidate["evidence_ref"]
@@ -396,7 +413,7 @@ async def verify_reference_repair(base_payload):
                 "claim_id": "legacy-claim-1", "status": "supported",
                 "finding": "构造的核验结果。", "evidence_refs": [cited_ref],
             }]
-            if mode == "missing" and len(outgoing) == 3:
+            if mode == "missing" and len(outgoing) >= 3:
                 checks = []
             candidates = [candidate]
             patches = [{
@@ -426,11 +443,14 @@ async def verify_reference_repair(base_payload):
         client = DeepSeekClient(api_key="fixture-only", model="mock-budgeted")
         with patch("matrix.llm.deepseek.post_json", fake_http):
             response = await route.stock_research(Request(client, payload))
-        assert len(outgoing) == 3, (mode, len(outgoing))
-        if mode in {"repaired", "partial-numeric", "catalog-ref-missing-candidate"}:
+        expected_calls = 4 if mode in {
+            "second-repair", "unrepaired", "renamed", "rebound", "missing", "partial-numeric",
+        } else 3
+        assert len(outgoing) == expected_calls, (mode, len(outgoing))
+        if mode in {"repaired", "partial-numeric", "catalog-ref-missing-candidate", "second-repair"}:
             assert isinstance(response, dict), getattr(response, "body", response)
             assert response["result"]["episode"]["claim_checks"][0]["status"] == "supported"
-            assert response["model_calls"] == 3 and response["usage_complete"]
+            assert response["model_calls"] == expected_calls and response["usage_complete"]
             if mode == "partial-numeric":
                 diagnostic = response["validation_diagnostics"]
                 assert response["result_incomplete"] and not diagnostic["post_filter_errors"]
@@ -452,7 +472,7 @@ async def verify_reference_repair(base_payload):
             failure = json.loads(response.body)
             details = failure["details"]
             assert failure["error_code"] == "result_contract_invalid"
-            assert details["model_calls"] == 3 and details["usage_complete"]
+            assert details["model_calls"] == expected_calls and details["usage_complete"]
             assert details["post_filter_errors"] and details["validation_errors"]
             assert details["filter_counts"] == {"dropped_candidates": 0, "dropped_patches": 0}
             errors = " ".join(details["validation_errors"])
@@ -515,7 +535,7 @@ async def main():
     two_stage_plan["scope"] = {
         "max_new_documents": 12,
         "max_synthesis_calls": 2,
-        "max_repair_calls": 1,
+        "max_repair_calls": 2,
     }
     two_stage_payload = dict(payload)
     two_stage_payload["plan"] = two_stage_plan
@@ -625,7 +645,7 @@ async def main():
     scoped_plan = {
         **missing_plan, "documents": documents, "evidence_selection_version": "paragraph-v2",
         "scope": {"claim_ids": ["claim-2", "claim-1"], "max_new_documents": 12,
-                  "max_synthesis_calls": 2, "max_repair_calls": 1},
+                  "max_synthesis_calls": 2, "max_repair_calls": 2},
     }
     scoped_context = {
         **missing_context,
@@ -648,10 +668,10 @@ async def main():
         assert not scoped_result["result"]["thesis_patch"]
     failed_llm = ScopedLLM("missing", repairable=False)
     failed_result = await route.stock_research(Request(failed_llm, scoped_payload))
-    assert failed_result.status_code == 422 and len(failed_llm.calls) == 3
+    assert failed_result.status_code == 422 and len(failed_llm.calls) == 4
     failure = json.loads(failed_result.body)
     assert failure["error_code"] == "result_contract_invalid"
-    assert failure["details"]["model_calls"] == 3 and failure["details"]["usage_complete"]
+    assert failure["details"]["model_calls"] == 4 and failure["details"]["usage_complete"]
     assert "input_tokens" in json.dumps(failure["details"]["usage"])
     assert "missing=['claim-2']" in " ".join(failure["details"]["validation_errors"])
     empty_schema = route._v3_result_schema(facts_only=False, required_claim_ids=set())
@@ -683,7 +703,7 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result.status_code == 503 and not llm.calls
     print(json.dumps({"status": "passed", "checks": [
-        "two-stage synthesis", "one bounded repair", "repair without provider usage",
+        "two-stage synthesis", "up to two bounded repairs", "repair without provider usage",
         "immutable documents",
         "immutable API calculations", "private context/excerpt blocked", "explicit V3 portfolio consent",
         "missing budget fails closed", "short PDF lines and table context",

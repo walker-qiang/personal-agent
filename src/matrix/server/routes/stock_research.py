@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ...build_info import BUILD_SHA
 from ...context.budget import measure_budget
 from ...llm.errors import LLMAuthError, LLMError, LLMRateLimitError, LLMTransientError
 from ..request_limits import RequestBodyTooLarge, problem_response, read_json_object
@@ -23,7 +24,7 @@ logger = logging.getLogger("matrix.stock_research")
 _MAX_ERROR_DETAIL = 1000
 _MAX_NEW_DOCUMENTS = 12
 _MAX_SYNTHESIS_CALLS = 2
-_MAX_REPAIR_CALLS = 1
+_MAX_REPAIR_CALLS = 2
 _EVIDENCE_SEGMENT_MAX_CHARS = 240
 _MAX_EVIDENCE_SEGMENTS = 48
 _MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT = 24
@@ -951,6 +952,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
     return {
         "protocol": ("stock-research-v3" if _legacy_stock_request(request)
                      else "investment-research-v3"),
+        "build_sha": BUILD_SHA,
         "object_types": ["stock"] if _legacy_stock_request(request) else ["stock", "fund"],
         "evidence_selection_version": _EVIDENCE_SELECTION_VERSION,
         "supported": bool(all(limits.values()) and limits["output_tokens"] <= limits["total_tokens"]
@@ -1059,7 +1061,7 @@ async def stock_research(request: Request):
             required_claim_ids = set(claim_ids)
         max_documents = scope.get("max_new_documents", 5)
         max_synthesis_calls = scope.get("max_synthesis_calls", 1)
-        max_repair_calls = scope.get("max_repair_calls", 1)
+        max_repair_calls = scope.get("max_repair_calls", _MAX_REPAIR_CALLS)
         if (not isinstance(max_documents, int) or isinstance(max_documents, bool)
                 or not 1 <= max_documents <= cap["max_new_documents"]):
             raise ValueError("research document limit is outside the server capability")
@@ -1356,6 +1358,7 @@ async def stock_research(request: Request):
         )
         repair_refs: set[str] | None = None
         repair_catalog: dict[str, dict[str, str]] | None = None
+        repair_evidence_segments: list[dict[str, str]] | None = None
         if result_errors and max_repair_calls > 0:
             repair_system = (
                 system + " Repair the draft into the exact investment-research-v3 contract. "
@@ -1375,27 +1378,46 @@ async def stock_research(request: Request):
                 "supply an honest statement and use its evidence_ref verbatim. "
                 "Return only the corrected JSON object."
             )
-            repair_request = _compact_synthesis_request(
-                context, documents, evidence_segments, result,
-                required_claim_ids=required_claim_ids,
-                validation_errors=result_errors,
-            )
-            repair_input = json.dumps(repair_request, ensure_ascii=False)
-            repair_bound = (
-                measure_budget(
-                    [repair_system, repair_input],
-                    overhead_tokens=2048,
-                ).input_tokens
-            )
-            usage_parts = _usage_parts(usage)
-            if repair_bound > budget["input_tokens"]:
-                logger.warning(
-                    "stock v3 repair exceeds input ceiling; "
-                    "keeping current evidence draft plan_id=%s estimated=%d budget=%d",
-                    plan["plan_id"], repair_bound, budget["input_tokens"],
+            synthesis_usage = usage
+            repair_usages: dict[str, Any] = {}
+            for repair_attempt in range(max_repair_calls):
+                if not result_errors:
+                    break
+                repair_request = _compact_synthesis_request(
+                    context, documents, evidence_segments, result,
+                    required_claim_ids=required_claim_ids,
+                    validation_errors=result_errors,
                 )
-                budget_adjustments.append("repair_skipped_input_budget")
-            else:
+                if repair_refs is not None and repair_catalog is not None:
+                    repair_request["available_evidence_refs"] = sorted(repair_refs)
+                    repair_request["available_evidence_candidates"] = [
+                        repair_catalog[ref] for ref in sorted(repair_catalog)
+                    ]
+                    if repair_evidence_segments is not None:
+                        repair_request["evidence_segments"] = repair_evidence_segments
+                elif "available_evidence_refs" in repair_request:
+                    repair_refs = set(repair_request["available_evidence_refs"])
+                    repair_catalog = {
+                        item["evidence_ref"]: item
+                        for item in repair_request["available_evidence_candidates"]
+                    }
+                    repair_evidence_segments = repair_request["evidence_segments"]
+                repair_input = json.dumps(repair_request, ensure_ascii=False)
+                repair_bound = (
+                    measure_budget(
+                        [repair_system, repair_input],
+                        overhead_tokens=2048,
+                    ).input_tokens
+                )
+                usage_parts = _usage_parts(usage)
+                if repair_bound > budget["input_tokens"]:
+                    logger.warning(
+                        "stock v3 repair exceeds input ceiling; "
+                        "keeping current evidence draft plan_id=%s estimated=%d budget=%d",
+                        plan["plan_id"], repair_bound, budget["input_tokens"],
+                    )
+                    budget_adjustments.append("repair_skipped_input_budget")
+                    break
                 known_usage = len(usage_parts) == calls
                 consumed = (
                     sum(part["input_tokens"] + part["output_tokens"] for part in usage_parts)
@@ -1403,41 +1425,40 @@ async def stock_research(request: Request):
                 )
                 if consumed + repair_bound + output > budget["total_tokens"]:
                     logger.warning(
-                        "stock v3 repair exceeds cumulative budget; skipping repair "
-                        "plan_id=%s estimated_or_actual=%d repair=%d budget=%d "
+                        "stock v3 repair exceeds cumulative budget; stopping repairs "
+                        "plan_id=%s attempt=%d estimated_or_actual=%d repair=%d budget=%d "
                         "usage_complete=%s",
-                        plan["plan_id"], consumed, repair_bound + output,
+                        plan["plan_id"], repair_attempt + 1, consumed, repair_bound + output,
                         budget["total_tokens"], known_usage,
                     )
                     budget_adjustments.append("repair_skipped_provider_budget")
-                else:
-                    result, repair_usage = await asyncio.to_thread(
-                        client.complete_json_budgeted,
-                        repair_system, [{"role": "user", "content": repair_input}], output,
-                        schema=_v3_result_schema(
-                            facts_only=facts_only, required_claim_ids=required_claim_ids,
-                            available_evidence_refs=repair_request.get("available_evidence_refs"),
-                        ),
+                    break
+                call_bounds.append(repair_bound + output)
+                result, repair_usage = await asyncio.to_thread(
+                    client.complete_json_budgeted,
+                    repair_system, [{"role": "user", "content": repair_input}], output,
+                    schema=_v3_result_schema(
+                        facts_only=facts_only, required_claim_ids=required_claim_ids,
+                        available_evidence_refs=repair_request.get("available_evidence_refs"),
+                    ),
+                )
+                if "available_evidence_refs" in repair_request:
+                    repair_refs = set(repair_request["available_evidence_refs"])
+                    repair_catalog = {
+                        item["evidence_ref"]: item
+                        for item in repair_request["available_evidence_candidates"]
+                    }
+                    result = _materialize_catalog_cited_candidates(
+                        result, evidence_segments, repair_catalog,
                     )
-                    if "available_evidence_refs" in repair_request:
-                        repair_refs = set(repair_request["available_evidence_refs"])
-                        repair_catalog = {
-                            item["evidence_ref"]: item
-                            for item in repair_request["available_evidence_candidates"]
-                        }
-                        result = _materialize_catalog_cited_candidates(
-                            result, evidence_segments, repair_catalog,
-                        )
-                    calls += 1
-                    if isinstance(usage, dict) and _usage(usage) is None:
-                        usage["repair"] = repair_usage
-                    else:
-                        usage = {"synthesis": usage, "repair": repair_usage}
-                    result_errors = _v3_result_errors(
-                        result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
-                        available_evidence_refs=repair_refs,
-                        reference_catalog=repair_catalog,
-                    )
+                calls += 1
+                repair_usages[f"repair_{repair_attempt + 1}"] = repair_usage
+                usage = {"synthesis": synthesis_usage, **repair_usages}
+                result_errors = _v3_result_errors(
+                    result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
+                    available_evidence_refs=repair_refs,
+                    reference_catalog=repair_catalog,
+                )
         result_incomplete = False
         validation_diagnostics: dict[str, Any] = {}
         if result_errors:

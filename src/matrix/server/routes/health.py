@@ -6,6 +6,7 @@ import asyncio
 
 from fastapi import APIRouter, Request
 
+from ...build_info import BUILD_SHA
 from ...config import AgentConfig
 
 router = APIRouter()
@@ -16,6 +17,7 @@ async def healthz(request: Request) -> dict:
     config: AgentConfig = request.app.state.config
     response = {
         "ok": True,
+        "build_sha": BUILD_SHA,
         "mode": "read-only",
         "cache_path": str(config.cache_path),
         "cache_exists": config.cache_path.exists(),
