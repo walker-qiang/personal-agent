@@ -37,6 +37,7 @@ _FINANCIAL_METRIC_INDEX = (
     ("operating_margin_pct", "营业利润率"),
     ("operating_cash_flow_to_net_profit", "现金转化"),
     ("liability_to_assets_pct", "资产负债率"),
+    ("total_liability_change_since_year_start_pct", "负债总额较年初变化"),
     ("equity_to_assets_pct", "权益资产比"),
 )
 _FINANCIAL_METRIC_IDS = {item[0] for item in _FINANCIAL_METRIC_INDEX}
@@ -119,7 +120,8 @@ def _structured_result(value: Any) -> bool:
 
 _V3_RESULT_KEYS = {"episode", "thesis_patch", "evidence_candidates"}
 _V3_EPISODE_KEYS = {
-    "summary", "pending_questions", "numeric_claims", "claim_checks", "conclusion", "next_step",
+    "summary", "pending_questions", "numeric_claims", "claim_checks", "conclusion",
+    "next_step", "investment_advice",
 }
 _V3_PATCH_KEYS = {
     "entity", "id", "field", "before", "after", "change_type",
@@ -129,7 +131,7 @@ _V3_MODEL_EVIDENCE_KEYS = {"source_id", "excerpt_id", "fact_id", "statement"}
 _V3_CHANGE_TYPES = {"strengthened", "weakened", "falsified", "retired", "calibrated"}
 
 
-def _v3_contract_prompt(*, facts_only: bool) -> str:
+def _v3_contract_prompt(*, facts_only: bool, advice_required: bool = False) -> str:
     numeric_claims = (
         ', "numeric_claims":[{"metric_id":"<metric id>","value":"<exact supplied value>"}]'
         if facts_only else ""
@@ -142,10 +144,17 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
         '"impact":"<one sentence on the current judgment>"}'
         if not facts_only else ""
     )
+    advice = (
+        ',"investment_advice":{"new_money":"wait","existing_position":"not_assessed",'
+        '"reason":"<why this action is appropriate now>","conditions":"<what changes it>",'
+        '"review_trigger":"<when to reassess>","evidence_refs":[]}'
+        if advice_required else ""
+    )
     episode_example = (
         '{"summary":"<analysis>","pending_questions":["<question>"]'
         + numeric_claims
         + claim_checks
+        + advice
         + "}"
     )
     return (
@@ -206,6 +215,30 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
         '{"question":"<one answerable question>","required_fields":["<needed field>"],'
         '"source_hint":"<report/section to check>","completion_criteria":"<what would answer it>"}. '
         "Do not repeat a broad historical risk as the next task. "
+        + (
+            "Always provide episode.investment_advice as the actual decision output. "
+            "new_money is consider_buy, wait or avoid. existing_position is hold, "
+            "reduce, exit or not_assessed; use not_assessed without an authorized "
+            "target_holding. A buy recommendation needs a recent available market_context "
+            "with price and source-backed valuation reasoning; otherwise say wait or "
+            "avoid and explain the missing input. Cite supplied evidence_refs for "
+            "factual premises, never invent price thresholds. A falling liability-to-assets "
+            "ratio does not prove absolute debt fell; total_liability_change_since_year_start_pct "
+            "measures total liabilities, not interest-bearing debt. Before saying there "
+            "is no direct evidence, inspect supplied report explanations for qualitative "
+            "causes; distinguish known causes from missing numerical attribution. "
+            "If a report explains a profit decline qualitatively, name and cite those "
+            "drivers in investment_advice.reason; do not say the cause is unknown just "
+            "because the report does not quantify each driver's contribution. Check "
+            "the direction of expense changes before describing a cost as a headwind. "
+            "Qualify calculated_metrics marked provider_unverified as provisional. "
+            "Use background_claims to consider other risks in the investment advice, "
+            "but treat them as unverified context, not cited facts or additional checked claims. "
+            "Give the action now, "
+            "its conditions and a review trigger. pending_questions alone are not advice. "
+            if advice_required else ""
+        )
+        +
         "Distinguish checked claims from unresolved questions; an unchanged judgment "
         "does not mean that evidence is missing. If all scoped checks are unresolved, "
         "leave thesis_patch empty and explain the limitation in the episode."
@@ -215,6 +248,7 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
 def _v3_result_schema(
     *, facts_only: bool, required_claim_ids: set[str] | None = None,
     available_evidence_refs: list[str] | None = None,
+    advice_required: bool = False,
 ) -> dict[str, Any]:
     """Canonical provider schema for the investment V3 result DTO.
 
@@ -234,6 +268,25 @@ def _v3_result_schema(
         },
     }
     if not facts_only:
+        if advice_required:
+            episode_properties["investment_advice"] = {
+                "type": "object",
+                "required": ["new_money", "existing_position", "reason",
+                             "conditions", "review_trigger", "evidence_refs"],
+                "properties": {
+                    "new_money": {"type": "string", "enum": ["consider_buy", "wait", "avoid"]},
+                    "existing_position": {"type": "string", "enum": [
+                        "hold", "reduce", "exit", "not_assessed",
+                    ]},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "conditions": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "review_trigger": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "evidence_refs": {
+                        "type": "array", "items": reference_items, **reference_limit,
+                    },
+                },
+                "additionalProperties": False,
+            }
         episode_properties["claim_checks"] = {
             "type": "array",
             **({"minItems": len(required_claim_ids), "maxItems": len(required_claim_ids)}
@@ -299,7 +352,8 @@ def _v3_result_schema(
                 "type": "object",
                 "required": ["summary", "pending_questions"]
                 + (["claim_checks"] if required_claim_ids is not None else [])
-                + (["conclusion"] if required_claim_ids else []),
+                + (["conclusion"] if required_claim_ids else [])
+                + (["investment_advice"] if advice_required else []),
                 "properties": episode_properties,
                 "additionalProperties": False,
             },
@@ -506,12 +560,15 @@ def _canonicalize_catalog_refs(
 
     normalized = dict(value)
     episode = value.get("episode")
-    if isinstance(episode, dict) and isinstance(episode.get("claim_checks"), list):
+    if isinstance(episode, dict):
         updated_episode = dict(episode)
-        updated_episode["claim_checks"] = [
-            normalize_refs(check) if isinstance(check, dict) else check
-            for check in episode["claim_checks"]
-        ]
+        if isinstance(episode.get("claim_checks"), list):
+            updated_episode["claim_checks"] = [
+                normalize_refs(check) if isinstance(check, dict) else check
+                for check in episode["claim_checks"]
+            ]
+        if isinstance(episode.get("investment_advice"), dict):
+            updated_episode["investment_advice"] = normalize_refs(episode["investment_advice"])
         normalized["episode"] = updated_episode
     patches = value.get("thesis_patch")
     if isinstance(patches, list):
@@ -557,6 +614,10 @@ def _materialize_catalog_cited_candidates(
         refs = check.get("evidence_refs") if isinstance(check, dict) else None
         if isinstance(refs, list):
             cited_refs.update(ref for ref in refs if isinstance(ref, str))
+    advice = episode.get("investment_advice") if isinstance(episode, dict) else None
+    refs = advice.get("evidence_refs") if isinstance(advice, dict) else None
+    if isinstance(refs, list):
+        cited_refs.update(ref for ref in refs if isinstance(ref, str))
     patches = value.get("thesis_patch")
     for patch in patches if isinstance(patches, list) else []:
         refs = patch.get("evidence_refs") if isinstance(patch, dict) else None
@@ -597,7 +658,7 @@ def _compact_synthesis_request(
     required_claim_ids: set[str] | None = None,
     validation_errors: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build a bounded follow-up request from the first-pass selections."""
+    """Keep bounded source spans so synthesis can correct first-pass omissions."""
 
     selected_ids: set[str] = set()
     if isinstance(evidence_draft, dict):
@@ -611,11 +672,11 @@ def _compact_synthesis_request(
     selected_segments = [
         segment for segment in evidence_segments
         if segment["excerpt_id"] in selected_ids
-    ][:32]
-    if not selected_segments:
-        # A malformed draft may have no valid selections. Keep a bounded
-        # source-backed fallback so synthesis/repair can still cite evidence.
-        selected_segments = evidence_segments[:12]
+    ]
+    selected_segments.extend(
+        segment for segment in evidence_segments
+        if segment["excerpt_id"] not in selected_ids
+    )
     result = {
         "subject": context["subject"],
         "question": context["question"],
@@ -624,7 +685,8 @@ def _compact_synthesis_request(
         "evidence_segments": selected_segments,
         "evidence_draft": evidence_draft,
     }
-    for field in ("thesis", "portfolio_context", "product_context", "calculated_metrics"):
+    for field in ("thesis", "portfolio_context", "product_context",
+                  "calculated_metrics", "market_context", "background_claims"):
         if field in context:
             result[field] = context[field]
     if "thesis" in context:
@@ -649,6 +711,9 @@ def _v3_result_errors(
     required_claim_ids: set[str] | None = None,
     available_evidence_refs: set[str] | None = None,
     reference_catalog: dict[str, dict[str, str]] | None = None,
+    advice_required: bool = False,
+    market_context: dict[str, Any] | None = None,
+    has_target_holding: bool = False,
 ) -> list[str]:
     """Validate the complete v3 DTO before crossing the Agent boundary."""
 
@@ -775,6 +840,39 @@ def _v3_result_errors(
     elif not documents and (candidates or patches):
         errors.append("result without documents must not contain evidence or thesis patches")
     if isinstance(episode, dict):
+        advice = episode.get("investment_advice")
+        if advice_required and advice is None:
+            errors.append("episode.investment_advice is required for this decision run")
+        if advice is not None:
+            fields = {"new_money", "existing_position", "reason",
+                      "conditions", "review_trigger", "evidence_refs"}
+            if (facts_only or not isinstance(advice, dict) or set(advice) != fields
+                    or advice.get("new_money") not in {"consider_buy", "wait", "avoid"}
+                    or advice.get("existing_position") not in {
+                        "hold", "reduce", "exit", "not_assessed",
+                    }
+                    or any(not isinstance(advice.get(field), str)
+                           or not advice[field].strip() or len(advice[field]) > 240
+                           for field in ("reason", "conditions", "review_trigger"))
+                    or not isinstance(advice.get("evidence_refs"), list)
+                    or any(not isinstance(ref, str) or ref not in candidate_refs
+                           or available_evidence_refs is not None
+                           and ref not in available_evidence_refs
+                           for ref in advice["evidence_refs"])):
+                errors.append("episode.investment_advice has invalid fields or evidence references")
+            else:
+                if not has_target_holding and advice["existing_position"] != "not_assessed":
+                    errors.append("existing-position advice requires an authorized target holding")
+                if advice["new_money"] == "consider_buy" and (
+                    not market_context or market_context.get("status") != "available"
+                    or not isinstance(market_context.get("price"), (int, float))
+                    or market_context.get("pe_approx") is None
+                    and market_context.get("pb_approx") is None
+                    or not advice["evidence_refs"]
+                ):
+                    errors.append("consider_buy requires a recent quote, valuation data and cited evidence")
+                if advice["new_money"] == "avoid" and not advice["evidence_refs"]:
+                    errors.append("avoid requires cited evidence")
         conclusion = episode.get("conclusion")
         if required_claim_ids and conclusion is None:
             errors.append("episode.conclusion is required for scoped research")
@@ -1295,6 +1393,11 @@ async def stock_research(request: Request):
         ):
             raise ValueError("budget exceeds server limits or is missing")
         facts_only = plan.get("facts_only") is True
+        if "advice_required" in plan and not isinstance(plan["advice_required"], bool):
+            raise ValueError("advice_required must be a boolean")
+        advice_required = plan.get("advice_required") is True
+        if advice_required and (object_type != "stock" or facts_only):
+            raise ValueError("investment advice is only enabled for full stock research")
         if facts_only:
             if (set(context) - {"question", "subject", "calculated_metrics", "pending_questions"}
                     or set(context.get("subject", {})) != {"name"}):
@@ -1307,6 +1410,26 @@ async def stock_research(request: Request):
             allowed_context = {
                 "question", "subject", "thesis", "portfolio_context", "pending_questions", "calculated_metrics",
             }
+            if advice_required:
+                allowed_context.update({"market_context", "background_claims"})
+                market = plan.get("market_context")
+                if (not isinstance(market, dict)
+                        or market.get("status") not in {"available", "unavailable"}
+                        or set(market) - {
+                            "status", "price", "quote_datetime", "pe_approx", "pb_approx",
+                            "latest_report_period", "basis",
+                        } or context.get("market_context") != market):
+                    raise ValueError("market context is invalid or differs from the confirmed plan")
+                background = plan.get("background_claims")
+                if (not isinstance(background, list) or len(background) > 6
+                        or context.get("background_claims") != background
+                        or any(not isinstance(item, dict)
+                               or set(item) != {"statement", "calibration_status"}
+                               or not isinstance(item["statement"], str)
+                               or not item["statement"].strip()
+                               or len(item["statement"]) > 700
+                               for item in background)):
+                    raise ValueError("background claims are invalid or differ from the confirmed plan")
             if object_type == "fund":
                 allowed_context.add("product_context")
             if set(context) - allowed_context or set(context.get("subject", {})) != {"code", "name"}:
@@ -1396,7 +1519,9 @@ async def stock_research(request: Request):
             "An empty portfolio context means not supplied/not authorized, not that the user has no holdings or trades. "
             "No trading actions or file writes."
         )
-        system += " " + _v3_contract_prompt(facts_only=facts_only)
+        system += " " + _v3_contract_prompt(
+            facts_only=facts_only, advice_required=advice_required,
+        )
         if object_type == "fund":
             system += (
                 " Research a fund, not an operating company. Focus on underlying exposure, "
@@ -1416,7 +1541,8 @@ async def stock_research(request: Request):
                 "(attractive/reasonable/demanding/unknown), confidence, confidence_reason, action. "
                 " Financial metric index: revenue_yoy_pct, net_profit_yoy_pct, net_margin_pct, "
                 "operating_margin_pct, operating_cash_flow_to_net_profit, "
-                "liability_to_assets_pct, equity_to_assets_pct. Analyze only metrics selected "
+                "liability_to_assets_pct, total_liability_change_since_year_start_pct, "
+                "equity_to_assets_pct. Analyze only metrics selected "
                 "and calculated by personal-os; never estimate missing values or recalculate them. "
             )
         system += (
@@ -1450,7 +1576,11 @@ async def stock_research(request: Request):
             " Act as the final decision synthesizer. Review the evidence draft supplied in "
             "the request, discard unsupported claims, preserve valid citations, and make the "
             "summary explicitly state what changed, what did not change, the strongest "
-            "counter-evidence and the impact on the current judgment."
+            "counter-evidence and the impact on the current judgment. Recheck original "
+            "report explanations even if the evidence draft omitted them: distinguish "
+            "disclosed qualitative drivers from missing numerical attribution, and "
+            "verify whether each expense increased or decreased before naming it as "
+            "a cause of weaker profit. Carry these distinctions into the investment advice."
         )
         # The application protocol has already validated the boundary. The model
         # receives only the explicit research DTO, never the original plan envelope.
@@ -1475,6 +1605,9 @@ async def stock_research(request: Request):
                 "documents": _model_document_index(documents),
                 "pending_questions": context.get("pending_questions", []),
             }
+            if advice_required:
+                model_request["market_context"] = context["market_context"]
+                model_request["background_claims"] = context["background_claims"]
             if object_type == "fund":
                 model_request["product_context"] = context["product_context"]
             if "calculated_metrics" in context:
@@ -1608,6 +1741,7 @@ async def stock_research(request: Request):
         result_schema = _v3_result_schema(
             facts_only=facts_only, required_claim_ids=required_claim_ids,
             available_evidence_refs=reference_refs if not facts_only else None,
+            advice_required=advice_required,
         )
         result, first_usage = await asyncio.to_thread(
             client.complete_json_budgeted,
@@ -1649,6 +1783,7 @@ async def stock_research(request: Request):
                 facts_only=facts_only,
                 required_claim_ids=required_claim_ids,
                 available_evidence_refs=sorted(draft_refs) if not facts_only else None,
+                advice_required=advice_required,
             )
             second_bound = (
                 measure_budget(
@@ -1699,6 +1834,9 @@ async def stock_research(request: Request):
             required_claim_ids=required_claim_ids,
             available_evidence_refs=active_refs,
             reference_catalog=active_catalog,
+            advice_required=advice_required,
+            market_context=context.get("market_context"),
+            has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
         )
         repair_refs = active_refs
         repair_catalog = active_catalog
@@ -1715,6 +1853,9 @@ async def stock_research(request: Request):
                 "For partial evidence with valid references use partially_supported, "
                 "without proposing judgment or calibration changes. Include the "
                 "three concise episode.conclusion fields for scoped research. "
+                + ("Include a concrete episode.investment_advice with valid evidence "
+                   "and a permitted existing_position; wait when price or evidence is missing. "
+                   if advice_required else "") +
                 "Use only available_evidence_refs for repaired citations and preserve "
                 "their matching valid evidence_candidates. Do not rename fact IDs, guess "
                 "a replacement reference or create a new unsupported citation. If none "
@@ -1787,6 +1928,7 @@ async def stock_research(request: Request):
                     schema=_v3_result_schema(
                         facts_only=facts_only, required_claim_ids=required_claim_ids,
                         available_evidence_refs=repair_request.get("available_evidence_refs"),
+                        advice_required=advice_required,
                     ),
                 )
                 if "available_evidence_refs" in repair_request:
@@ -1808,6 +1950,9 @@ async def stock_research(request: Request):
                     required_claim_ids=required_claim_ids,
                     available_evidence_refs=repair_refs,
                     reference_catalog=repair_catalog,
+                    advice_required=advice_required,
+                    market_context=context.get("market_context"),
+                    has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
                 )
         result_incomplete = False
         validation_diagnostics: dict[str, Any] = {}
@@ -1823,6 +1968,9 @@ async def stock_research(request: Request):
                 result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
                 available_evidence_refs=repair_refs,
                 reference_catalog=repair_catalog,
+                advice_required=advice_required,
+                market_context=context.get("market_context"),
+                has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
             )
             validation_diagnostics = _validation_diagnostics(
                 pre_filter_errors, salvaged_errors, salvage,

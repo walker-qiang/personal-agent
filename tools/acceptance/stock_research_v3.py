@@ -125,10 +125,27 @@ class IntegrationLLM(FakeLLM):
             context = {
                 key: value for key, value in payload.items()
                 if key in {"question", "subject", "thesis", "portfolio_context",
-                           "product_context", "pending_questions", "calculated_metrics"}
+                           "product_context", "pending_questions", "calculated_metrics",
+                           "market_context", "background_claims"}
             }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
+        advice_required = "investment_advice" in (
+            schema.get("properties", {}).get("episode", {}).get("required", [])
+            if isinstance(schema, dict) else []
+        )
+
+        def add_advice(episode, evidence_refs=None):
+            if advice_required:
+                episode["investment_advice"] = {
+                    "new_money": "wait", "existing_position": "not_assessed",
+                    "reason": "现有证据不足以支持新增，暂不新增。",
+                    "conditions": "核验当前估值和现金流后再评估。",
+                    "review_trigger": "取得新的官方报告或近期行情估值时。",
+                    "evidence_refs": evidence_refs or [],
+                }
+            return episode
+
         if "required_claim_ids" in payload:
             checklist = schema["properties"]["episode"]["properties"]["claim_checks"]
             assert checklist["minItems"] == checklist["maxItems"] == len(payload["required_claim_ids"])
@@ -245,20 +262,27 @@ class IntegrationLLM(FakeLLM):
                 }]
             elif plan["question"] == "quality-numeric":
                 assert any(d.get("numeric_facts") for d in documents) and context.get("calculated_metrics")
-            return {"episode": episode, "thesis_patch": [], "evidence_candidates": candidates}, self._usage()
+            return {"episode": add_advice(episode, [
+                        document["source_id"] + ":fact-a",
+                    ] if candidates else []), "thesis_patch": [],
+                    "evidence_candidates": candidates}, self._usage()
         expected_context_keys = {
             "subject", "question", "thesis", "portfolio_context",
             "pending_questions",
         }
+        if advice_required:
+            expected_context_keys.update({"market_context", "background_claims"})
         if plan.get("calculated_metrics"):
             expected_context_keys.add("calculated_metrics")
             assert context["calculated_metrics"] == plan["calculated_metrics"]
-        assert set(context) == expected_context_keys
+        assert set(context) == expected_context_keys, (
+            sorted(context), sorted(expected_context_keys),
+        )
         assert set(context["portfolio_context"]) <= {
             "version", "target_holding", "transactions", "allocation",
         }
         portfolio = context["portfolio_context"]
-        assert portfolio["target_holding"]["code"] == "sh600001"
+        assert portfolio.get("target_holding", {}).get("code") == "sh600001", portfolio
         assert portfolio["target_holding"]["current_value_yuan"] == 1000
         assert portfolio["target_holding"]["cost_basis_yuan"] == 900
         assert len(portfolio["transactions"]) == 1
@@ -331,7 +355,7 @@ class IntegrationLLM(FakeLLM):
             }
             episode.pop("next_step")
         return {
-            "episode": episode,
+            "episode": add_advice(episode, [document["source_id"] + ":" + fact_id]),
             "thesis_patch": [] if plan["question"] == "partial-support" else patch,
             "evidence_candidates": [{"source_id": document["source_id"], "fact_id": fact_id,
                                      "excerpt_id": segment["excerpt_id"], "statement": quote}],
