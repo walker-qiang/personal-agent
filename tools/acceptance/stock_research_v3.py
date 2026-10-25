@@ -534,9 +534,7 @@ async def verify_reference_repair(base_payload):
             assert isinstance(response, dict), getattr(response, "body", response)
             check = response["result"]["episode"]["claim_checks"][0]
             assert check["status"] == "unresolved" and check["evidence_refs"] == []
-            next_step = response["result"]["episode"]["next_step"]
-            assert "补充可定位的官方原文" in next_step["question"]
-            assert next_step["required_fields"] == ["来源链接或文件标识", "可定位的原文段落"]
+            assert response["result"]["episode"].get("next_step") is None
             assert not response["result"]["thesis_patch"]
             assert response["result_incomplete"]
             assert response["validation_diagnostics"]["filter_counts"] == {
@@ -842,8 +840,16 @@ async def main():
         {"episode": {"summary": "", "pending_questions": [], "claim_checks": [{
             "claim_id": "claim-1", "status": "unresolved",
             "finding": "无可用引用。", "evidence_refs": [],
-        }], "next_step": checked["episode"]["next_step"]},
+        }]},
          "thesis_patch": [], "evidence_candidates": []},
+        [], [], facts_only=False, required_claim_ids={"claim-1"}, available_evidence_refs=set(),
+    )
+    assert not route._v3_result_errors(
+        {"episode": {"summary": "现有资料不足，不调整判断。",
+                     "pending_questions": ["等待下期官方披露"], "claim_checks": [{
+                         "claim_id": "claim-1", "status": "unresolved",
+                         "finding": "尚无证据，判断保持不变。", "evidence_refs": [],
+                     }]}, "thesis_patch": [], "evidence_candidates": []},
         [], [], facts_only=False, required_claim_ids={"claim-1"}, available_evidence_refs=set(),
     )
     diagnostic = route._validation_diagnostics(
