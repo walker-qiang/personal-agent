@@ -118,7 +118,9 @@ def _structured_result(value: Any) -> bool:
 
 
 _V3_RESULT_KEYS = {"episode", "thesis_patch", "evidence_candidates"}
-_V3_EPISODE_KEYS = {"summary", "pending_questions", "numeric_claims", "claim_checks", "next_step"}
+_V3_EPISODE_KEYS = {
+    "summary", "pending_questions", "numeric_claims", "claim_checks", "conclusion", "next_step",
+}
 _V3_PATCH_KEYS = {
     "entity", "id", "field", "before", "after", "change_type",
     "reason", "evidence_refs",
@@ -134,7 +136,10 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
     )
     claim_checks = (
         ',"claim_checks":[{"claim_id":"<required claim id>","status":"unresolved",'
-        '"finding":"<what remains unverified and its judgment impact>","evidence_refs":[]}]'
+        '"finding":"<what remains unverified and its judgment impact>","evidence_refs":[]}],'
+        '"conclusion":{"supported":"<one sentence on established evidence>",'
+        '"unverified":"<one sentence on the material gap>",'
+        '"impact":"<one sentence on the current judgment>"}'
         if not facts_only else ""
     )
     episode_example = (
@@ -169,9 +174,20 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
         "risk ids, pending-question ids or other claims to that checklist. "
         "An empty required_claim_ids list requires an empty claim_checks array. "
         "For each scoped claim, return episode.claim_checks as "
-        '[{"claim_id":"<supplied claim id>","status":"supported|weakened|unresolved",'
+        '[{"claim_id":"<supplied claim id>",'
+        '"status":"supported|weakened|partially_supported|unresolved",'
         '"finding":"<what this run established>","evidence_refs":["<source_id>:<fact_id>"]}]. '
-        "supported/weakened require citations; unresolved may have empty citations. "
+        "supported/weakened require evidence for the full scoped claim; when evidence "
+        "supports only a mechanism or one part while a material link to the judgment "
+        "remains unverified, use partially_supported with citations instead. Never "
+        "calibrate or change confidence on partial support. unresolved may have empty "
+        "citations; partially_supported requires citations. "
+        "For a causal claim, evidence of the mechanism, capacity or activity alone "
+        "does not establish the claimed efficiency or economic benefit, even if the "
+        "claim says 'may' or 'possibly'; leave that material link partially_supported. "
+        "For scoped research return episode.conclusion with exactly supported, "
+        "unverified and impact, each a concise sentence of at most 120 characters. "
+        "State '无直接证据' or '无关键缺口' when appropriate, never invent data. "
         "Supplied numeric_facts can be cited directly as source_id:field, without inventing "
         "an excerpt or evidence_candidate for that numeric field. "
         "Every request includes available_evidence_refs and available_evidence_candidates. "
@@ -230,7 +246,9 @@ def _v3_result_schema(
                         "type": "string", "minLength": 1,
                         **({"enum": sorted(required_claim_ids)} if required_claim_ids else {}),
                     },
-                    "status": {"type": "string", "enum": ["supported", "weakened", "unresolved"]},
+                    "status": {"type": "string", "enum": [
+                        "supported", "weakened", "partially_supported", "unresolved",
+                    ]},
                     "finding": {"type": "string", "minLength": 1},
                     "evidence_refs": {
                         "type": "array", "items": reference_items, **reference_limit,
@@ -238,6 +256,15 @@ def _v3_result_schema(
                 },
                 "additionalProperties": False,
             },
+        }
+        episode_properties["conclusion"] = {
+            "type": "object",
+            "required": ["supported", "unverified", "impact"],
+            "properties": {
+                key: {"type": "string", "minLength": 1, "maxLength": 120}
+                for key in ("supported", "unverified", "impact")
+            },
+            "additionalProperties": False,
         }
         episode_properties["next_step"] = {
             "type": "object",
@@ -270,9 +297,9 @@ def _v3_result_schema(
         "properties": {
             "episode": {
                 "type": "object",
-                "required": ["summary", "pending_questions"] + (
-                    ["claim_checks"] if required_claim_ids is not None else []
-                ),
+                "required": ["summary", "pending_questions"]
+                + (["claim_checks"] if required_claim_ids is not None else [])
+                + (["conclusion"] if required_claim_ids else []),
                 "properties": episode_properties,
                 "additionalProperties": False,
             },
@@ -748,6 +775,17 @@ def _v3_result_errors(
     elif not documents and (candidates or patches):
         errors.append("result without documents must not contain evidence or thesis patches")
     if isinstance(episode, dict):
+        conclusion = episode.get("conclusion")
+        if required_claim_ids and conclusion is None:
+            errors.append("episode.conclusion is required for scoped research")
+        if conclusion is not None and (
+            facts_only or not isinstance(conclusion, dict)
+            or set(conclusion) != {"supported", "unverified", "impact"}
+            or any(not isinstance(conclusion.get(key), str)
+                   or not conclusion[key].strip() or len(conclusion[key]) > 120
+                   for key in ("supported", "unverified", "impact"))
+        ):
+            errors.append("episode.conclusion requires supported, unverified and impact")
         checks = episode.get("claim_checks", [])
         if required_claim_ids is not None and "claim_checks" not in episode:
             errors.append("claim_checks are required by the scoped research plan")
@@ -768,7 +806,9 @@ def _v3_result_errors(
                         or set(check) != {"claim_id", "status", "finding", "evidence_refs"}
                         or not isinstance(check["claim_id"], str) or not check["claim_id"]
                         or not isinstance(check["status"], str)
-                        or check["status"] not in {"supported", "weakened", "unresolved"}
+                        or check["status"] not in {
+                            "supported", "weakened", "partially_supported", "unresolved",
+                        }
                         or not isinstance(check["finding"], str) or not check["finding"].strip()
                         or not isinstance(check["evidence_refs"], list)
                         or any(not isinstance(ref, str) for ref in check["evidence_refs"])):
@@ -908,7 +948,7 @@ def _salvage_v3_result(
             changed = len(valid_refs) != len(refs)
             updated_check = dict(check)
             updated_check["evidence_refs"] = valid_refs
-            if check.get("status") in {"supported", "weakened"} and not valid_refs:
+            if check.get("status") in {"supported", "weakened", "partially_supported"} and not valid_refs:
                 updated_check["status"] = "unresolved"
                 updated_check["finding"] = (
                     "模型引用的证据编号无法映射到本次已提供资料，本项保持待核验。"
@@ -916,11 +956,20 @@ def _salvage_v3_result(
                 changed = True
             if changed:
                 downgraded_claim_checks += 1
-            if updated_check.get("status") in {"supported", "weakened"}:
+            if updated_check.get("status") in {"supported", "weakened", "partially_supported"}:
                 verified_refs.update(valid_refs)
             safe_checks.append(updated_check)
         updated_episode = dict(episode)
         updated_episode["claim_checks"] = safe_checks
+        if downgraded_claim_checks:
+            updated_episode["conclusion"] = {
+                "supported": (
+                    "仅保留仍有有效引用支持的事实。"
+                    if verified_refs else "本轮未形成可追溯的支持性证据。"
+                ),
+                "unverified": "原有部分引用无法映射，相关判断仍待核验。",
+                "impact": "仅依据有效引用判断，失效引用不用于上调置信度。",
+            }
         salvaged["episode"] = updated_episode
 
     safe_patches: list[dict[str, Any]] = []
@@ -1663,6 +1712,9 @@ async def stock_research(request: Request):
                 "Keep exactly one claim_check per required_claim_ids entry, even when "
                 "evidence is insufficient: use unresolved with an honest finding and "
                 "empty evidence_refs, never invent support or silently omit a claim. "
+                "For partial evidence with valid references use partially_supported, "
+                "without proposing judgment or calibration changes. Include the "
+                "three concise episode.conclusion fields for scoped research. "
                 "Use only available_evidence_refs for repaired citations and preserve "
                 "their matching valid evidence_candidates. Do not rename fact IDs, guess "
                 "a replacement reference or create a new unsupported citation. If none "

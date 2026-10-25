@@ -81,6 +81,11 @@ class ScopedLLM(FakeLLM):
                 "summary": "按本次指定范围核对；未获支持的判断保持待核验。",
                 "pending_questions": ["核对下一报告期的现金支出"],
                 "claim_checks": checks,
+                "conclusion": {
+                    "supported": "无直接证据。",
+                    "unverified": "两项判断仍待核验。",
+                    "impact": "投资判断与置信度保持不变。",
+                },
                 "next_step": {
                     "question": "核对下一报告期的资本开支",
                     "required_fields": ["资本开支", "报告期"],
@@ -167,6 +172,11 @@ class IntegrationLLM(FakeLLM):
                 "episode": {
                     "summary": "产品资料已核验，跟踪表现仍待补充。",
                     "pending_questions": ["跟踪误差是否稳定？"],
+                    "conclusion": {
+                        "supported": "产品资料中的目标信息已找到。",
+                        "unverified": "跟踪表现仍待核验。",
+                        "impact": "仅按已核实范围更新判断。",
+                    },
                     "claim_checks": [{
                         "claim_id": context["thesis"]["claims"][0]["claim_id"], "status": "supported",
                         "finding": "所选判断已有可定位的来源支持。",
@@ -197,6 +207,11 @@ class IntegrationLLM(FakeLLM):
             episode = {
                 "summary": "已核对现有来源，本次不调整当前判断。",
                 "pending_questions": ["核对下一报告期"],
+                "conclusion": {
+                    "supported": "已检查现有来源。",
+                    "unverified": "下一报告期仍待披露。",
+                    "impact": "投资判断与置信度保持不变。",
+                },
                 "next_step": {
                     "question": "核对下一报告期的现金支付",
                     "required_fields": ["现金支付", "报告期"],
@@ -286,9 +301,13 @@ class IntegrationLLM(FakeLLM):
                 if isinstance(item, dict) and isinstance(item.get("question"), str)
             ] or pending_questions
             next_step_question = pending_questions[0]
-        return {
-            "episode": {
+        episode = {
                 "summary": "", "pending_questions": pending_questions,
+                "conclusion": {
+                    "supported": "官方资料记录了本次核对的事实。",
+                    "unverified": "现金支付的后续情况仍待观察。",
+                    "impact": "仅依据已核实事实提出变更。",
+                },
                 "next_step": {
                     "question": next_step_question,
                     "required_fields": ["现金支付项目", "报告期"],
@@ -296,11 +315,24 @@ class IntegrationLLM(FakeLLM):
                     "completion_criteria": "取得可定位的直接披露并核对项目",
                 },
                 "claim_checks": [{
-                    "claim_id": claims[0]["claim_id"], "status": "supported",
-                    "finding": "本次来源支持所选判断。", "evidence_refs": [document["source_id"] + ":" + fact_id],
+                    "claim_id": claims[0]["claim_id"],
+                    "status": ("partially_supported" if plan["question"] == "partial-support"
+                               else "supported"),
+                    "finding": "本次仅找到机制的支持性证据，收益仍待核验。",
+                    "evidence_refs": [document["source_id"] + ":" + fact_id],
                 }] if claims else [],
-            },
-            "thesis_patch": patch,
+        }
+        if plan["question"] == "partial-support":
+            episode["summary"] = "只有机制有来源支持，收益传导仍待证实。"
+            episode["conclusion"] = {
+                "supported": "官方资料描述了相关机制。",
+                "unverified": "收益传导尚无充分证据。",
+                "impact": "当前判断与置信度不调整。",
+            }
+            episode.pop("next_step")
+        return {
+            "episode": episode,
+            "thesis_patch": [] if plan["question"] == "partial-support" else patch,
             "evidence_candidates": [{"source_id": document["source_id"], "fact_id": fact_id,
                                      "excerpt_id": segment["excerpt_id"], "statement": quote}],
         }, {"input_tokens": 150, "output_tokens": 20}
@@ -497,6 +529,11 @@ async def verify_reference_repair(base_payload):
                 patch_ref = cited_ref
             result = {
                 "episode": {"summary": "仅用于离线验收。", "pending_questions": [],
+                            "conclusion": {
+                                "supported": "已核对来源。",
+                                "unverified": "仍需观察。",
+                                "impact": "仅依据有效证据调整判断。",
+                            },
                             "claim_checks": checks},
                 "evidence_candidates": candidates,
                 "thesis_patch": patches,
@@ -535,6 +572,7 @@ async def verify_reference_repair(base_payload):
             check = response["result"]["episode"]["claim_checks"][0]
             assert check["status"] == "unresolved" and check["evidence_refs"] == []
             assert response["result"]["episode"].get("next_step") is None
+            assert "未形成可追溯" in response["result"]["episode"]["conclusion"]["supported"]
             assert not response["result"]["thesis_patch"]
             assert response["result_incomplete"]
             assert response["validation_diagnostics"]["filter_counts"] == {
@@ -783,6 +821,11 @@ async def main():
     ]}
     checked = {
         "episode": {"summary": "来源数据已核对。", "pending_questions": [],
+                    "conclusion": {
+                        "supported": "已核对披露数值。",
+                        "unverified": "资本开支仍待核验。",
+                        "impact": "判断保持不变。",
+                    },
                     "claim_checks": [{"claim_id": "claim-1", "status": "supported",
                                       "finding": "已核对披露数值。", "evidence_refs": ["numeric-ref:revenue"]}],
                     "next_step": {"question": "核对资本开支", "required_fields": ["购建资产现金支出"],
@@ -792,6 +835,21 @@ async def main():
     assert not route._v3_result_errors(checked, [numeric_doc], [], facts_only=False)
     assert not route._v3_result_errors(
         checked, [numeric_doc], [], facts_only=False, required_claim_ids={"claim-1"},
+    )
+    partial = json.loads(json.dumps(checked))
+    partial["episode"]["claim_checks"][0]["status"] = "partially_supported"
+    assert not route._v3_result_errors(
+        partial, [numeric_doc], [], facts_only=False, required_claim_ids={"claim-1"},
+    )
+    partial["thesis_patch"] = [{
+        "entity": "decision", "id": "", "field": "confidence",
+        "before": "low", "after": "medium", "change_type": "strengthened",
+        "reason": "单项事实不足以升级判断。", "evidence_refs": ["numeric-ref:revenue"],
+    }]
+    assert "judgment or calibration changes require a cited checked claim" in (
+        route._v3_result_errors(
+            partial, [numeric_doc], [], facts_only=False, required_claim_ids={"claim-1"},
+        )
     )
     checked["episode"]["claim_checks"][0]["evidence_refs"] = ["forged:revenue"]
     assert route._v3_result_errors(checked, [numeric_doc], [], facts_only=False)
@@ -829,6 +887,9 @@ async def main():
     assert "missing=['claim-2']" in " ".join(failure["details"]["validation_errors"])
     empty_schema = route._v3_result_schema(facts_only=False, required_claim_ids=set())
     assert empty_schema["properties"]["episode"]["properties"]["claim_checks"]["maxItems"] == 0
+    assert "conclusion" in route._v3_result_schema(
+        facts_only=False, required_claim_ids={"claim-1"},
+    )["properties"]["episode"]["required"]
     await verify_reference_repair(scoped_payload)
     empty_refs = route._v3_result_schema(
         facts_only=False, required_claim_ids={"claim-1"}, available_evidence_refs=[],
@@ -837,7 +898,9 @@ async def main():
     assert empty_refs["properties"]["episode"]["properties"]["claim_checks"]["items"][
         "properties"]["evidence_refs"]["maxItems"] == 0
     assert not route._v3_result_errors(
-        {"episode": {"summary": "", "pending_questions": [], "claim_checks": [{
+        {"episode": {"summary": "", "pending_questions": [],
+                     "conclusion": {"supported": "无直接证据。", "unverified": "仍待核验。",
+                                    "impact": "判断不调整。"}, "claim_checks": [{
             "claim_id": "claim-1", "status": "unresolved",
             "finding": "无可用引用。", "evidence_refs": [],
         }]},
@@ -846,6 +909,8 @@ async def main():
     )
     assert not route._v3_result_errors(
         {"episode": {"summary": "现有资料不足，不调整判断。",
+                     "conclusion": {"supported": "无直接证据。", "unverified": "仍待核验。",
+                                    "impact": "判断不调整。"},
                      "pending_questions": ["等待下期官方披露"], "claim_checks": [{
                          "claim_id": "claim-1", "status": "unresolved",
                          "finding": "尚无证据，判断保持不变。", "evidence_refs": [],
