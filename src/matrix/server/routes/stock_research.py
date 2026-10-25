@@ -1464,6 +1464,7 @@ async def stock_research(request: Request):
             if required_claim_ids is not None:
                 model_request["required_claim_ids"] = sorted(required_claim_ids)
         evidence_segments = _evidence_segments(documents, context)
+        had_text_evidence = bool(evidence_segments)
         numeric_fact_count = sum(len(d.get("numeric_facts", [])) for d in documents)
         if not facts_only and not evidence_segments and not numeric_fact_count:
             return problem_response(
@@ -1519,7 +1520,7 @@ async def stock_research(request: Request):
             )
             if "evidence_trimmed_to_budget" not in budget_adjustments:
                 budget_adjustments.append("evidence_trimmed_to_budget")
-        if not facts_only and not evidence_segments and not numeric_fact_count:
+        if not facts_only and not evidence_segments and (had_text_evidence or not numeric_fact_count):
             return problem_response(
                 status_code=422,
                 code="input_context_too_large",

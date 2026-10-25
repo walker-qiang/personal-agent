@@ -768,6 +768,18 @@ async def main():
     assert isinstance(trimmed, dict), getattr(trimmed, "body", trimmed)
     assert trimmed["evidence_selection"]["budget_trimmed"] and trim_llm.calls
     assert 0 < trimmed["evidence_selection"]["selected_char_count"] < 11520
+    numeric_text_documents = [{**large_documents[0], "numeric_facts": [
+        {"field": "revenue", "value": "1000", "period": "2026-06-30",
+         "currency": "CNY", "unit": "yuan"},
+    ]}]
+    exhausted_plan = {**missing_plan, "documents": numeric_text_documents,
+                      "budget": {"input_tokens": 1, "output_tokens": 1500, "total_tokens": 20000}}
+    exhausted_llm = FakeLLM()
+    exhausted = await route.stock_research(Request(exhausted_llm, {
+        "plan": exhausted_plan, "context": missing_context, "documents": numeric_text_documents,
+    }))
+    assert exhausted.status_code == 422 and not exhausted_llm.calls
+    assert json.loads(exhausted.body)["code"] == "input_context_too_large"
     numeric_doc = {"source_id": "numeric-ref", "numeric_facts": [
         {"field": "revenue", "value": "1000", "period": "2026-06-30", "currency": "CNY", "unit": "yuan"},
     ]}
