@@ -177,9 +177,10 @@ def _v3_contract_prompt(*, facts_only: bool) -> str:
         "supported/weakened require citations; unresolved may have empty citations. "
         "Supplied numeric_facts can be cited directly as source_id:field, without inventing "
         "an excerpt or evidence_candidate for that numeric field. "
-        "In follow-up requests, available_evidence_refs lists exact reusable references "
-        "grounded in the supplied excerpts or numeric facts; copy them verbatim rather "
-        "than guessing reference IDs from the prose. "
+        "Every request includes available_evidence_refs and available_evidence_candidates. "
+        "Use only those exact references in claim_checks and thesis_patch; copy them "
+        "verbatim instead of using evidence_segments excerpt_id values or inventing IDs. "
+        "If no listed reference supports a claim, mark it unresolved with empty references. "
         "Do not reuse a numeric field name as an evidence_candidate.fact_id. "
         "When pending_questions is nonempty, return episode.next_step as "
         '{"question":"<one answerable question>","required_fields":["<needed field>"],'
@@ -448,6 +449,48 @@ def _evidence_reference_catalog(
     return sorted(refs | catalog.keys()), [catalog[ref] for ref in sorted(catalog)]
 
 
+def _canonicalize_catalog_refs(
+    value: Any, reference_catalog: dict[str, dict[str, str]] | None,
+) -> Any:
+    """Map an exact supplied excerpt ID to its deterministic evidence reference."""
+
+    if not isinstance(value, dict) or not reference_catalog:
+        return value
+    excerpt_refs = {
+        item["excerpt_id"]: item["evidence_ref"]
+        for item in reference_catalog.values()
+        if item.get("excerpt_id") and item.get("evidence_ref")
+    }
+
+    def normalize_refs(container: dict[str, Any]) -> dict[str, Any]:
+        refs = container.get("evidence_refs")
+        if not isinstance(refs, list):
+            return container
+        updated = dict(container)
+        updated["evidence_refs"] = [
+            excerpt_refs.get(ref, ref) if isinstance(ref, str) else ref
+            for ref in refs
+        ]
+        return updated
+
+    normalized = dict(value)
+    episode = value.get("episode")
+    if isinstance(episode, dict) and isinstance(episode.get("claim_checks"), list):
+        updated_episode = dict(episode)
+        updated_episode["claim_checks"] = [
+            normalize_refs(check) if isinstance(check, dict) else check
+            for check in episode["claim_checks"]
+        ]
+        normalized["episode"] = updated_episode
+    patches = value.get("thesis_patch")
+    if isinstance(patches, list):
+        normalized["thesis_patch"] = [
+            normalize_refs(patch) if isinstance(patch, dict) else patch
+            for patch in patches
+        ]
+    return normalized
+
+
 def _materialize_catalog_cited_candidates(
     value: Any,
     evidence_segments: list[dict[str, str]],
@@ -461,13 +504,21 @@ def _materialize_catalog_cited_candidates(
     if not isinstance(candidates, list):
         return value
 
-    existing_refs = {
-        f"{candidate['source_id']}:{candidate['fact_id']}"
-        for candidate in candidates
-        if isinstance(candidate, dict)
-        and isinstance(candidate.get("source_id"), str)
-        and isinstance(candidate.get("fact_id"), str)
-    }
+    existing_refs: set[str] = set()
+    for candidate in candidates:
+        if (not isinstance(candidate, dict)
+                or not isinstance(candidate.get("source_id"), str)
+                or not isinstance(candidate.get("fact_id"), str)):
+            continue
+        ref = f"{candidate['source_id']}:{candidate['fact_id']}"
+        entry = reference_catalog.get(ref)
+        if entry and (
+            candidate.get("source_id") != entry.get("source_id")
+            or candidate.get("excerpt_id") != entry.get("excerpt_id")
+            or candidate.get("fact_id") != entry.get("fact_id")
+        ):
+            continue
+        existing_refs.add(ref)
     cited_refs: set[str] = set()
     episode = value.get("episode")
     checks = episode.get("claim_checks") if isinstance(episode, dict) else None
@@ -770,6 +821,8 @@ def _salvage_v3_result(
     *,
     facts_only: bool,
     documents: list[dict[str, Any]] | None = None,
+    available_evidence_refs: set[str] | None = None,
+    reference_catalog: dict[str, dict[str, str]] | None = None,
 ) -> tuple[Any, dict[str, int]]:
     """Drop only unsupported evidence proposals after bounded repair.
 
@@ -782,11 +835,22 @@ def _salvage_v3_result(
     """
 
     if not isinstance(value, dict):
-        return value, {"dropped_candidates": 0, "dropped_patches": 0}
+        return value, {
+            "dropped_candidates": 0, "dropped_patches": 0,
+            "downgraded_claim_checks": 0,
+        }
+    value = _canonicalize_catalog_refs(value, reference_catalog)
+    if reference_catalog:
+        value = _materialize_catalog_cited_candidates(
+            value, evidence_segments, reference_catalog,
+        )
     candidates = value.get("evidence_candidates")
     patches = value.get("thesis_patch")
     if not isinstance(candidates, list) or not isinstance(patches, list):
-        return value, {"dropped_candidates": 0, "dropped_patches": 0}
+        return value, {
+            "dropped_candidates": 0, "dropped_patches": 0,
+            "downgraded_claim_checks": 0,
+        }
 
     segments_by_id = {segment["excerpt_id"]: segment for segment in evidence_segments}
     safe_candidates: list[dict[str, Any]] = []
@@ -809,9 +873,86 @@ def _salvage_v3_result(
         if ref in seen_refs or ref in numeric_refs:
             dropped_candidates += 1
             continue
+        catalog_entry = (reference_catalog or {}).get(ref)
+        if catalog_entry and (
+            candidate["source_id"] != catalog_entry["source_id"]
+            or candidate["excerpt_id"] != catalog_entry["excerpt_id"]
+            or candidate["fact_id"] != catalog_entry["fact_id"]
+        ):
+            dropped_candidates += 1
+            continue
         seen_refs.add(ref)
         candidate_refs.add(ref)
         safe_candidates.append(candidate)
+
+    def valid_reference(ref: Any) -> bool:
+        return (
+            isinstance(ref, str)
+            and ref in candidate_refs
+            and (available_evidence_refs is None or ref in available_evidence_refs)
+        )
+
+    salvaged = dict(value)
+    downgraded_claim_checks = 0
+    verified_refs: set[str] = set()
+    episode = value.get("episode")
+    if isinstance(episode, dict) and isinstance(episode.get("claim_checks"), list):
+        safe_checks: list[Any] = []
+        for check in episode["claim_checks"]:
+            if (not isinstance(check, dict)
+                    or set(check) != {"claim_id", "status", "finding", "evidence_refs"}
+                    or not isinstance(check.get("evidence_refs"), list)):
+                safe_checks.append(check)
+                continue
+            refs = check["evidence_refs"]
+            valid_refs = [ref for ref in refs if valid_reference(ref)]
+            changed = len(valid_refs) != len(refs)
+            updated_check = dict(check)
+            updated_check["evidence_refs"] = valid_refs
+            if check.get("status") in {"supported", "weakened"} and not valid_refs:
+                updated_check["status"] = "unresolved"
+                updated_check["finding"] = (
+                    "模型引用的证据编号无法映射到本次已提供资料，本项保持待核验。"
+                )
+                changed = True
+            if changed:
+                downgraded_claim_checks += 1
+            if updated_check.get("status") in {"supported", "weakened"}:
+                verified_refs.update(valid_refs)
+            safe_checks.append(updated_check)
+        updated_episode = dict(episode)
+        updated_episode["claim_checks"] = safe_checks
+        unresolved = any(
+            isinstance(check, dict) and check.get("status") == "unresolved"
+            for check in safe_checks
+        )
+        if downgraded_claim_checks and unresolved:
+            step = updated_episode.get("next_step")
+            step_keys = {
+                "question", "required_fields", "source_hint", "completion_criteria",
+            }
+            valid_step = (
+                isinstance(step, dict)
+                and set(step) == step_keys
+                and all(
+                    isinstance(step.get(key), str) and step[key].strip()
+                    for key in ("question", "source_hint", "completion_criteria")
+                )
+                and isinstance(step.get("required_fields"), list)
+                and 1 <= len(step["required_fields"]) <= 8
+                and all(
+                    isinstance(field, str) and field.strip()
+                    for field in step["required_fields"]
+                )
+            )
+            if not valid_step:
+                updated_episode["next_step"] = {
+                    "question": "补充可定位的官方原文后，重新核验本次未能映射的判断",
+                    "required_fields": ["来源链接或文件标识", "可定位的原文段落"],
+                    "source_hint": "公司公告、定期报告或监管披露原文",
+                    "completion_criteria": "取得与判断直接相关的原文，并将引用映射到本次研究证据",
+                }
+        salvaged["episode"] = updated_episode
 
     safe_patches: list[dict[str, Any]] = []
     dropped_patches = 0
@@ -830,22 +971,23 @@ def _salvage_v3_result(
             and isinstance(patch["reason"], str) and patch["reason"].strip()
             and isinstance(patch["evidence_refs"], list)
             and patch["evidence_refs"]
-            and all(isinstance(ref, str) and ref in candidate_refs for ref in patch["evidence_refs"])
+            and all(valid_reference(ref) and ref in verified_refs for ref in patch["evidence_refs"])
         )
         if valid:
             safe_patches.append(patch)
         else:
             dropped_patches += 1
 
-    salvaged = dict(value)
     salvaged["evidence_candidates"] = safe_candidates
     salvaged["thesis_patch"] = safe_patches
-    # A required check is an audit assertion, not an optional proposal. Never
-    # erase it, relabel it unresolved or replace it with a fabricated finding.
-    # Keeping it lets the strict validator report the original reference error.
+    if reference_catalog:
+        salvaged = _materialize_catalog_cited_candidates(
+            salvaged, evidence_segments, reference_catalog,
+        )
     return salvaged, {
         "dropped_candidates": dropped_candidates,
         "dropped_patches": dropped_patches,
+        "downgraded_claim_checks": downgraded_claim_checks,
     }
 
 
@@ -1330,6 +1472,23 @@ async def stock_research(request: Request):
                 detail="No source-backed text or verified numeric facts were extracted; no model was called.",
             )
         model_request["evidence_segments"] = evidence_segments
+        reference_refs: list[str] = []
+        reference_catalog: dict[str, dict[str, str]] = {}
+
+        def update_reference_catalog() -> None:
+            nonlocal reference_refs, reference_catalog
+            reference_refs, candidates = _evidence_reference_catalog(
+                {}, documents, evidence_segments,
+            )
+            reference_catalog = {
+                item["evidence_ref"]: item for item in candidates
+            }
+            if not facts_only:
+                model_request["available_evidence_refs"] = reference_refs
+                model_request["available_evidence_candidates"] = candidates
+
+        if not facts_only:
+            update_reference_catalog()
         messages = [{"role": "user", "content": json.dumps(
             model_request, ensure_ascii=False,
         )}]
@@ -1351,6 +1510,8 @@ async def stock_research(request: Request):
             or first_measurement.total_tokens > budget["total_tokens"]
         ):
             evidence_segments.pop()
+            if not facts_only:
+                update_reference_catalog()
             messages[0]["content"] = json.dumps(model_request, ensure_ascii=False)
             first_measurement = measure_budget(
                 [first_system, messages[0]["content"]],
@@ -1427,6 +1588,7 @@ async def stock_research(request: Request):
         client = _client(request)
         result_schema = _v3_result_schema(
             facts_only=facts_only, required_claim_ids=required_claim_ids,
+            available_evidence_refs=reference_refs if not facts_only else None,
         )
         result, first_usage = await asyncio.to_thread(
             client.complete_json_budgeted,
@@ -1438,6 +1600,16 @@ async def stock_research(request: Request):
         calls = 1
         usage: Any = first_usage
         call_bounds = [input_bound + output]
+        active_refs: set[str] | None = set(reference_refs) if not facts_only else None
+        active_catalog: dict[str, dict[str, str]] | None = (
+            reference_catalog if not facts_only else None
+        )
+        active_segments = evidence_segments
+        if not facts_only:
+            result = _canonicalize_catalog_refs(result, active_catalog)
+            result = _materialize_catalog_cited_candidates(
+                result, active_segments, active_catalog or {},
+            )
         if wants_second_synthesis:
             first_parts = _usage_parts(first_usage)
             draft_request = _compact_synthesis_request(
@@ -1447,6 +1619,18 @@ async def stock_research(request: Request):
             second_messages = [{"role": "user", "content": json.dumps(
                 draft_request, ensure_ascii=False,
             )}]
+            draft_refs = set(draft_request.get("available_evidence_refs", []))
+            draft_catalog = {
+                item["evidence_ref"]: item
+                for item in draft_request.get("available_evidence_candidates", [])
+                if isinstance(item, dict) and item.get("evidence_ref")
+            }
+            draft_segments = draft_request.get("evidence_segments", evidence_segments)
+            synthesis_schema = _v3_result_schema(
+                facts_only=facts_only,
+                required_claim_ids=required_claim_ids,
+                available_evidence_refs=sorted(draft_refs) if not facts_only else None,
+            )
             second_bound = (
                 measure_budget(
                     [synthesis_system, second_messages[0]["content"]],
@@ -1477,18 +1661,29 @@ async def stock_research(request: Request):
                         synthesis_system,
                         second_messages,
                         output,
-                        schema=result_schema,
+                        schema=synthesis_schema,
                     )
                     usage = {"evidence": first_usage, "synthesis": second_usage}
                     calls = 2
+                    if not facts_only:
+                        active_refs = draft_refs
+                        active_catalog = draft_catalog
+                        active_segments = draft_segments
+                        result = _canonicalize_catalog_refs(result, active_catalog)
+                        result = _materialize_catalog_cited_candidates(
+                            result, active_segments, active_catalog,
+                        )
         if not isinstance(result, dict):
             raise ValueError("synthesis result must be a JSON object")
         result_errors = _v3_result_errors(
-            result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
+            result, documents, evidence_segments, facts_only=facts_only,
+            required_claim_ids=required_claim_ids,
+            available_evidence_refs=active_refs,
+            reference_catalog=active_catalog,
         )
-        repair_refs: set[str] | None = None
-        repair_catalog: dict[str, dict[str, str]] | None = None
-        repair_evidence_segments: list[dict[str, str]] | None = None
+        repair_refs = active_refs
+        repair_catalog = active_catalog
+        repair_evidence_segments = active_segments
         if result_errors and max_repair_calls > 0:
             repair_system = (
                 system + " Repair the draft into the exact investment-research-v3 contract. "
@@ -1578,14 +1773,17 @@ async def stock_research(request: Request):
                         item["evidence_ref"]: item
                         for item in repair_request["available_evidence_candidates"]
                     }
+                    repair_evidence_segments = repair_request["evidence_segments"]
+                    result = _canonicalize_catalog_refs(result, repair_catalog)
                     result = _materialize_catalog_cited_candidates(
-                        result, evidence_segments, repair_catalog,
+                        result, repair_evidence_segments, repair_catalog,
                     )
                 calls += 1
                 repair_usages[f"repair_{repair_attempt + 1}"] = repair_usage
                 usage = {"synthesis": synthesis_usage, **repair_usages}
                 result_errors = _v3_result_errors(
-                    result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
+                    result, documents, evidence_segments, facts_only=facts_only,
+                    required_claim_ids=required_claim_ids,
                     available_evidence_refs=repair_refs,
                     reference_catalog=repair_catalog,
                 )
@@ -1594,7 +1792,10 @@ async def stock_research(request: Request):
         if result_errors:
             pre_filter_errors = list(result_errors)
             result, salvage = _salvage_v3_result(
-                result, evidence_segments, facts_only=facts_only, documents=documents,
+                result, repair_evidence_segments or evidence_segments,
+                facts_only=facts_only, documents=documents,
+                available_evidence_refs=repair_refs,
+                reference_catalog=repair_catalog,
             )
             salvaged_errors = _v3_result_errors(
                 result, documents, evidence_segments, facts_only=facts_only, required_claim_ids=required_claim_ids,
@@ -1604,13 +1805,18 @@ async def stock_research(request: Request):
             validation_diagnostics = _validation_diagnostics(
                 pre_filter_errors, salvaged_errors, salvage,
             )
-            if salvage["dropped_candidates"] or salvage["dropped_patches"]:
+            if (
+                salvage["dropped_candidates"]
+                or salvage["dropped_patches"]
+                or salvage["downgraded_claim_checks"]
+            ):
                 result_incomplete = True
                 logger.warning(
-                    "stock v3 dropped unsupported model proposals after repair "
-                    "plan_id=%s candidates=%d patches=%d remaining_errors=%d",
+                    "stock v3 salvaged unsupported model proposals after repair "
+                    "plan_id=%s candidates=%d patches=%d downgraded_checks=%d remaining_errors=%d",
                     plan["plan_id"], salvage["dropped_candidates"],
-                    salvage["dropped_patches"], len(salvaged_errors),
+                    salvage["dropped_patches"], salvage["downgraded_claim_checks"],
+                    len(salvaged_errors),
                 )
             result_errors = salvaged_errors
         actual = _usage_parts(usage)

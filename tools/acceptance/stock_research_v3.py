@@ -359,6 +359,7 @@ async def verify_reference_repair(base_payload):
     for mode in (
         "repaired", "unrepaired", "renamed", "rebound", "missing",
         "partial-numeric", "catalog-ref-missing-candidate", "second-repair",
+        "one-shot-segment-reference", "one-shot-invalid-reference-budget",
     ):
         payload = json.loads(json.dumps(base_payload))
         plan, context = payload["plan"], payload["context"]
@@ -373,6 +374,16 @@ async def verify_reference_repair(base_payload):
                 "field": "revenue", "value": "1000", "period": "2026-06-30",
                 "currency": "CNY", "unit": "yuan",
             }]
+        if mode.startswith("one-shot-"):
+            plan["scope"] = {
+                "claim_ids": ["legacy-claim-1"],
+                "max_new_documents": 12, "max_synthesis_calls": 1,
+                "max_repair_calls": 2,
+            }
+        if mode == "one-shot-invalid-reference-budget":
+            plan["budget"] = {
+                "input_tokens": 25000, "output_tokens": 1500, "total_tokens": 14000,
+            }
         plan["documents"] = payload["documents"]
         outgoing = []
         other_excerpt_id = ""
@@ -397,10 +408,27 @@ async def verify_reference_repair(base_payload):
             numeric = mode == "partial-numeric"
             candidate = {"source_id": source, "excerpt_id": segment["excerpt_id"],
                          "fact_id": "fact-a", "statement": "构造的原文事实。"}
+            if len(outgoing) == 1 and not numeric:
+                schema = body["tools"][0]["function"]["parameters"]
+                allowed = schema["properties"]["episode"]["properties"]["claim_checks"]["items"][
+                    "properties"]["evidence_refs"]["items"]["enum"]
+                assert allowed == request["available_evidence_refs"], (
+                    mode, allowed, request["available_evidence_refs"],
+                )
+                assert request["available_evidence_candidates"]
+                if mode == "one-shot-segment-reference":
+                    catalog_candidate = next(
+                        item for item in request["available_evidence_candidates"]
+                        if item["excerpt_id"] == segment["excerpt_id"]
+                    )
             if numeric:
                 candidate["excerpt_id"] = "forged-excerpt"
             cited_ref = source + ":revenue" if numeric else bad_ref
             patch_ref = source + ":revenue" if numeric else good_ref
+            if mode == "one-shot-segment-reference":
+                cited_ref = patch_ref = segment["excerpt_id"]
+            elif mode == "one-shot-invalid-reference-budget":
+                cited_ref = patch_ref = source + ":segment-9999"
             if len(outgoing) >= 2:
                 assert patch_ref in request["available_evidence_refs"], (
                     mode, len(outgoing), patch_ref, request["available_evidence_refs"],
@@ -463,12 +491,21 @@ async def verify_reference_repair(base_payload):
             if mode == "catalog-ref-missing-candidate" and len(outgoing) == 3:
                 candidates = []
                 patches = []
+            if mode == "one-shot-segment-reference":
+                candidates = []
+            if mode == "one-shot-invalid-reference-budget":
+                patch_ref = cited_ref
             result = {
                 "episode": {"summary": "仅用于离线验收。", "pending_questions": [],
                             "claim_checks": checks},
                 "evidence_candidates": candidates,
                 "thesis_patch": patches,
             }
+            usage = (
+                {"prompt_tokens": 11157, "completion_tokens": 1216, "total_tokens": 12373}
+                if mode == "one-shot-invalid-reference-budget"
+                else {"prompt_tokens": 150, "completion_tokens": 20, "total_tokens": 170}
+            )
             return {
                 "choices": [{"finish_reason": "tool_calls", "message": {
                     "role": "assistant", "content": None,
@@ -476,24 +513,52 @@ async def verify_reference_repair(base_payload):
                         "name": "return_json", "arguments": json.dumps(result, ensure_ascii=False),
                     }}],
                 }}],
-                "usage": {"prompt_tokens": 150, "completion_tokens": 20, "total_tokens": 170},
+                "usage": usage,
             }
 
         client = DeepSeekClient(api_key="fixture-only", model="mock-budgeted")
         with patch("matrix.llm.deepseek.post_json", fake_http):
             response = await route.stock_research(Request(client, payload))
-        expected_calls = 4 if mode in {
+        expected_calls = 1 if mode.startswith("one-shot-") else 4 if mode in {
             "second-repair", "unrepaired", "renamed", "rebound", "missing", "partial-numeric",
         } else 3
         assert len(outgoing) == expected_calls, (mode, len(outgoing))
-        if mode in {"repaired", "partial-numeric", "catalog-ref-missing-candidate", "second-repair"}:
+        if mode == "one-shot-segment-reference":
+            assert isinstance(response, dict), getattr(response, "body", response)
+            check = response["result"]["episode"]["claim_checks"][0]
+            assert check["status"] == "supported"
+            assert check["evidence_refs"] == [catalog_candidate["evidence_ref"]]
+            assert response["result"]["evidence_candidates"][0]["excerpt_id"] == catalog_candidate["excerpt_id"]
+            assert not response["result_incomplete"]
+        elif mode == "one-shot-invalid-reference-budget":
+            assert isinstance(response, dict), getattr(response, "body", response)
+            check = response["result"]["episode"]["claim_checks"][0]
+            assert check["status"] == "unresolved" and check["evidence_refs"] == []
+            next_step = response["result"]["episode"]["next_step"]
+            assert "补充可定位的官方原文" in next_step["question"]
+            assert next_step["required_fields"] == ["来源链接或文件标识", "可定位的原文段落"]
+            assert not response["result"]["thesis_patch"]
+            assert response["result_incomplete"]
+            assert response["validation_diagnostics"]["filter_counts"] == {
+                "dropped_candidates": 0, "dropped_patches": 1,
+                "downgraded_claim_checks": 1,
+            }
+        elif mode in {"unrepaired", "renamed"}:
+            assert isinstance(response, dict), getattr(response, "body", response)
+            check = response["result"]["episode"]["claim_checks"][0]
+            assert check["status"] == "unresolved" and check["evidence_refs"] == []
+            assert not response["result"]["thesis_patch"] and response["result_incomplete"]
+        elif mode in {"repaired", "partial-numeric", "catalog-ref-missing-candidate", "second-repair"}:
             assert isinstance(response, dict), getattr(response, "body", response)
             assert response["result"]["episode"]["claim_checks"][0]["status"] == "supported"
             assert response["model_calls"] == expected_calls and response["usage_complete"]
             if mode == "partial-numeric":
                 diagnostic = response["validation_diagnostics"]
                 assert response["result_incomplete"] and not diagnostic["post_filter_errors"]
-                assert diagnostic["filter_counts"] == {"dropped_candidates": 1, "dropped_patches": 0}
+                assert diagnostic["filter_counts"] == {
+                    "dropped_candidates": 1, "dropped_patches": 0,
+                    "downgraded_claim_checks": 0,
+                }
                 assert any("unknown excerpt_id" in error for error in diagnostic["validation_errors"])
             elif mode == "catalog-ref-missing-candidate":
                 assert catalog_candidate is not None
@@ -506,6 +571,12 @@ async def verify_reference_repair(base_payload):
                 assert not response["result_incomplete"]
             else:
                 assert not response["result_incomplete"]
+        elif mode == "rebound":
+            assert isinstance(response, dict), getattr(response, "body", response)
+            assert response["result_incomplete"]
+            materialized = response["result"]["evidence_candidates"]
+            assert len(materialized) == 1
+            assert materialized[0]["excerpt_id"] == original_excerpt_id
         else:
             assert response.status_code == 422, response
             failure = json.loads(response.body)
@@ -513,16 +584,12 @@ async def verify_reference_repair(base_payload):
             assert failure["error_code"] == "result_contract_invalid"
             assert details["model_calls"] == expected_calls and details["usage_complete"]
             assert details["post_filter_errors"] and details["validation_errors"]
-            assert details["filter_counts"] == {"dropped_candidates": 0, "dropped_patches": 0}
+            assert details["filter_counts"] == {
+                "dropped_candidates": 0, "dropped_patches": int(mode == "missing"),
+                "downgraded_claim_checks": 0,
+            }
             errors = " ".join(details["validation_errors"])
             assert ("missing=['legacy-claim-1']" in errors) == (mode == "missing"), (mode, errors)
-            if mode == "unrepaired":
-                assert "episode.claim_checks[0].evidence_refs" in errors and "wrong-fact" in errors
-                assert "judgment or calibration changes require a cited checked claim" in errors
-            if mode == "renamed":
-                assert "available_evidence_refs" in errors
-            if mode == "rebound":
-                assert "reference catalog binding" in errors
             assert len(json.dumps(details)) < 2000
 
 
