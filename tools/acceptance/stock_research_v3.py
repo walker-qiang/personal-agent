@@ -22,6 +22,7 @@ class FakeLLM:
 
     def __init__(self):
         self.calls = []
+        self.metric_plan_calls = []
         self.repair = False
         self.omit_usage = False
 
@@ -94,6 +95,15 @@ class ScopedLLM(FakeLLM):
 class IntegrationLLM(FakeLLM):
     def complete_json_budgeted(self, system, messages, maximum, schema=None):
         payload = json.loads(messages[0]["content"])
+        if (isinstance(schema, dict)
+                and "metric_ids" in schema.get("properties", {})):
+            self.metric_plan_calls.append(payload)
+            return {
+                "metric_ids": [
+                    "revenue_yoy_pct", "net_profit_yoy_pct",
+                    "operating_cash_flow_to_net_profit",
+                ],
+            }, self._usage()
         if "request" in payload:
             payload = payload["request"]
         plan = payload.get("plan", {})
@@ -123,6 +133,11 @@ class IntegrationLLM(FakeLLM):
             return {"episode": {"summary": "", "pending_questions": []},
                     "thesis_patch": [], "evidence_candidates": []}, {
                         "input_tokens": 150, "output_tokens": 20}
+        for container in (plan, context):
+            metrics = container.get("calculated_metrics", [])
+            assert all(not {
+                "source_id", "sources", "url", "raw_response_hash",
+            }.intersection(metric) for metric in metrics), metrics
         document = documents[0]
         if plan.get("facts_only"):
             assert set(context) == {"question", "subject", "calculated_metrics", "pending_questions"}
@@ -196,22 +211,34 @@ class IntegrationLLM(FakeLLM):
             candidates = []
             if plan["question"] == "quality-maintained":
                 segment = payload["evidence_segments"][0]
+                pending = [
+                    item["question"] for item in context["pending_questions"]
+                    if isinstance(item, dict) and isinstance(item.get("question"), str)
+                ]
+                if pending:
+                    episode["pending_questions"] = pending
+                    episode["next_step"]["question"] = pending[0]
                 candidates = [{
-                    "source_id": document["source_id"], "fact_id": "maintained-fact",
-                    "excerpt_id": segment["excerpt_id"], "statement": "已核对官方原文。",
+                    "source_id": document["source_id"], "fact_id": "fact-a",
+                    "excerpt_id": segment["excerpt_id"],
+                    "statement": "The consideration was paid in cash.",
                 }]
                 episode["claim_checks"] = [{
                     "claim_id": claims[0]["claim_id"], "status": "supported",
                     "finding": "本次来源支持所选判断，未提出调整。",
-                    "evidence_refs": [document["source_id"] + ":maintained-fact"],
+                    "evidence_refs": [document["source_id"] + ":fact-a"],
                 }]
             elif plan["question"] == "quality-numeric":
                 assert any(d.get("numeric_facts") for d in documents) and context.get("calculated_metrics")
             return {"episode": episode, "thesis_patch": [], "evidence_candidates": candidates}, self._usage()
-        assert set(context) == {
+        expected_context_keys = {
             "subject", "question", "thesis", "portfolio_context",
             "pending_questions",
         }
+        if plan.get("calculated_metrics"):
+            expected_context_keys.add("calculated_metrics")
+            assert context["calculated_metrics"] == plan["calculated_metrics"]
+        assert set(context) == expected_context_keys
         assert set(context["portfolio_context"]) <= {
             "version", "target_holding", "transactions", "allocation",
         }
@@ -251,11 +278,19 @@ class IntegrationLLM(FakeLLM):
             fact_id = citation["fact_id"]
             for proposed in patch:
                 proposed["evidence_refs"] = [citation["evidence_ref"]]
+        pending_questions = ["Can the cash payment be reconciled?"]
+        next_step_question = "核对现金支付对应的报告期与项目"
+        if plan["question"].startswith(("首次校准历史判断：", "核验当前判断：")):
+            pending_questions = [
+                item["question"] for item in context["pending_questions"]
+                if isinstance(item, dict) and isinstance(item.get("question"), str)
+            ] or pending_questions
+            next_step_question = pending_questions[0]
         return {
             "episode": {
-                "summary": "", "pending_questions": ["Can the cash payment be reconciled?"],
+                "summary": "", "pending_questions": pending_questions,
                 "next_step": {
-                    "question": "核对现金支付对应的报告期与项目",
+                    "question": next_step_question,
                     "required_fields": ["现金支付项目", "报告期"],
                     "source_hint": "官方报告现金流附注",
                     "completion_criteria": "取得可定位的直接披露并核对项目",
@@ -289,6 +324,10 @@ def serve() -> None:
     @app.get("/acceptance/calls")
     def calls():
         return {"calls": list(llm.calls)}
+
+    @app.get("/acceptance/metric-plans")
+    def metric_plans():
+        return {"calls": list(llm.metric_plan_calls)}
 
     @app.post("/acceptance/budget/{enabled}")
     def budget(enabled: int):
@@ -495,6 +534,43 @@ async def main():
     ):
         os.environ[name] = value
     budget = {"input_tokens": 25000, "output_tokens": 1500, "total_tokens": 40000}
+    metric_payload = {
+        "plan_id": "metric-fixture", "object_type": "stock", "model": "mock-budgeted",
+        "question": "核验收入与利润增长", "claims": [], "pending_questions": [],
+    }
+
+    class MetricPlannerLLM(FakeLLM):
+        def __init__(self, metric_ids):
+            super().__init__()
+            self.metric_ids = metric_ids
+
+        def complete_json_budgeted(self, system, messages, maximum, schema=None):
+            self.calls.append((system, messages, maximum))
+            assert schema["properties"]["metric_ids"]["items"]["enum"] == sorted(
+                route._FINANCIAL_METRIC_IDS
+            )
+            return {"metric_ids": self.metric_ids}, self._usage()
+
+    metric_llm = MetricPlannerLLM(["revenue_yoy_pct", "net_profit_yoy_pct"])
+    metric_result = await route.plan_financial_metrics(Request(metric_llm, metric_payload))
+    assert metric_result["metric_ids"] == ["revenue_yoy_pct", "net_profit_yoy_pct"]
+    assert metric_result["planner_version"] == route._FINANCIAL_METRIC_PLANNER_VERSION
+    assert metric_result["usage_complete"] and len(metric_llm.calls) == 1
+    assert set(json.loads(metric_llm.calls[0][1][0]["content"])) == {
+        "question", "claims", "pending_questions",
+    }
+    assert "公式" in metric_llm.calls[0][0] and len(metric_llm.calls[0][0]) < 500
+    invalid_metric_llm = MetricPlannerLLM(["unregistered_metric"])
+    invalid_metric_result = await route.plan_financial_metrics(
+        Request(invalid_metric_llm, metric_payload)
+    )
+    assert invalid_metric_result.status_code == 422 and len(invalid_metric_llm.calls) == 1
+    empty_metric_llm = MetricPlannerLLM([])
+    empty_metric_result = await route.plan_financial_metrics(
+        Request(empty_metric_llm, metric_payload)
+    )
+    assert empty_metric_result["metric_ids"] == [] and len(empty_metric_llm.calls) == 1
+
     documents = [{"source_id": "fixture-source",
                   "excerpt": "Official source: operating cash flow, interest and capital expenditure."}]
     plan = {"plan_id": "fixture", "object_type": "stock", "model": "mock-budgeted",
@@ -710,6 +786,7 @@ async def main():
         "exact original span mapping", "empty evidence skips model",
         "numeric citations and executable next step", "evidence trimmed within confirmed budget",
         "exact scoped IDs in all stages and provider schema",
+        "financial metric planner whitelist and bounded response",
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",
         "real DeepSeek adapter with fake HTTP: precise reference repair/failure",

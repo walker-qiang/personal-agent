@@ -29,6 +29,18 @@ _EVIDENCE_SEGMENT_MAX_CHARS = 240
 _MAX_EVIDENCE_SEGMENTS = 48
 _MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT = 24
 _EVIDENCE_SELECTION_VERSION = "paragraph-v2"
+_FINANCIAL_METRIC_PLANNER_VERSION = "financial-metrics-v1"
+_FINANCIAL_METRIC_INDEX = (
+    ("revenue_yoy_pct", "营收同比"),
+    ("net_profit_yoy_pct", "归母净利润同比"),
+    ("net_margin_pct", "净利率"),
+    ("operating_margin_pct", "营业利润率"),
+    ("operating_cash_flow_to_net_profit", "现金转化"),
+    ("liability_to_assets_pct", "资产负债率"),
+    ("equity_to_assets_pct", "权益资产比"),
+)
+_FINANCIAL_METRIC_IDS = {item[0] for item in _FINANCIAL_METRIC_INDEX}
+_FINANCIAL_METRIC_PLAN_MAX_OUTPUT = 256
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -955,6 +967,8 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "build_sha": BUILD_SHA,
         "object_types": ["stock"] if _legacy_stock_request(request) else ["stock", "fund"],
         "evidence_selection_version": _EVIDENCE_SELECTION_VERSION,
+        "financial_metric_planner_version": _FINANCIAL_METRIC_PLANNER_VERSION,
+        "financial_metric_ids": [item[0] for item in _FINANCIAL_METRIC_INDEX],
         "supported": bool(all(limits.values()) and limits["output_tokens"] <= limits["total_tokens"]
                           and request.app.state.config.llm_available
                           and callable(getattr(client, "complete_json_budgeted", None))),
@@ -969,6 +983,118 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "max_evidence_segments_per_document": _MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT,
         },
     }
+
+
+@router.post("/api/research/investment.v3/metric-plan")
+async def plan_financial_metrics(request: Request):
+    cap = await capabilities(request)
+    if not cap["supported"]:
+        return problem_response(
+            status_code=503,
+            code="stock_v3_budget_unavailable",
+            detail="stock v3 model budget is not configured",
+            retryable=True,
+        )
+    try:
+        body = await read_json_object(
+            request, max_bytes=min(_STOCK_REQUEST_MAX_BYTES, 1 << 16),
+        )
+        if set(body) - {
+            "plan_id", "object_type", "model", "question", "claims", "pending_questions",
+        }:
+            raise ValueError("metric planning request contains unauthorized fields")
+        if (body.get("object_type") != "stock" or body.get("model") != cap["model"]
+                or not isinstance(body.get("plan_id"), str) or not body["plan_id"]
+                or not isinstance(body.get("question"), str)
+                or not body["question"].strip() or len(body["question"]) > 1000):
+            raise ValueError("stock metric planning requires a plan id, model and question")
+        claims = body.get("claims", [])
+        pending = body.get("pending_questions", [])
+        if (not isinstance(claims, list) or len(claims) > 12
+                or any(not isinstance(item, str) or len(item) > 500 for item in claims)
+                or not isinstance(pending, list) or len(pending) > 5
+                or any(not isinstance(item, str) or len(item) > 500 for item in pending)):
+            raise ValueError("metric planning context must contain bounded claim and question strings")
+
+        index = "; ".join(f"{metric_id}={label}" for metric_id, label in _FINANCIAL_METRIC_INDEX)
+        system = (
+            "为股票研究问题选择最相关的财报原子指标。指标索引："
+            + index
+            + "。只返回指标 ID 数组，最多 7 项，可为空；不得新增指标、公式或数据需求。"
+            "优先选择能直接回答问题的少量指标，不要为了覆盖目录而全选。"
+        )
+        payload = json.dumps({
+            "question": body["question"].strip(),
+            "claims": claims,
+            "pending_questions": pending,
+        }, ensure_ascii=False, separators=(",", ":"))
+        output_tokens = min(_FINANCIAL_METRIC_PLAN_MAX_OUTPUT, cap["limits"]["output_tokens"])
+        measurement = measure_budget(
+            [system, payload], output_tokens=output_tokens, overhead_tokens=512,
+        )
+        if (measurement.input_tokens > cap["limits"]["input_tokens"]
+                or measurement.total_tokens > cap["limits"]["total_tokens"]):
+            return problem_response(
+                status_code=422,
+                code="metric_plan_budget_exceeded",
+                detail="stock metric planning context exceeds the configured model budget",
+            )
+        schema = {
+            "type": "object",
+            "required": ["metric_ids"],
+            "properties": {
+                "metric_ids": {
+                    "type": "array", "maxItems": len(_FINANCIAL_METRIC_INDEX),
+                    "uniqueItems": True,
+                    "items": {"type": "string", "enum": sorted(_FINANCIAL_METRIC_IDS)},
+                },
+            },
+            "additionalProperties": False,
+        }
+        result, usage = await asyncio.to_thread(
+            _client(request).complete_json_budgeted,
+            system,
+            [{"role": "user", "content": payload}],
+            output_tokens,
+            schema=schema,
+        )
+        if (not isinstance(result, dict) or set(result) != {"metric_ids"}
+                or not isinstance(result["metric_ids"], list)
+                or len(result["metric_ids"]) > len(_FINANCIAL_METRIC_INDEX)
+                or any(not isinstance(item, str) or item not in _FINANCIAL_METRIC_IDS
+                       for item in result["metric_ids"])
+                or len(set(result["metric_ids"])) != len(result["metric_ids"])):
+            raise ValueError("metric planner returned an invalid or duplicate metric ID")
+        return {
+            "protocol": "investment-research-v3",
+            "plan_id": body["plan_id"],
+            "planner_version": _FINANCIAL_METRIC_PLANNER_VERSION,
+            "metric_ids": result["metric_ids"],
+            "model_calls": 1,
+            "usage": usage,
+            "usage_complete": _usage(usage) is not None,
+        }
+    except RequestBodyTooLarge as exc:
+        return problem_response(
+            status_code=413,
+            code="request_body_too_large",
+            detail="stock metric planning request exceeds the configured limit",
+            details={"max_bytes": exc.limit_bytes},
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return problem_response(
+            status_code=422,
+            code="metric_plan_invalid",
+            detail=str(exc),
+        )
+    except LLMError as exc:
+        return problem_response(
+            status_code=502,
+            code=_model_error_code(exc),
+            detail="stock metric planning model request failed",
+            retryable=isinstance(exc, (LLMRateLimitError, LLMTransientError)),
+            details={"provider_detail": _safe_error_detail(exc)},
+        )
 
 
 @router.post("/api/research/stock.v3")
@@ -1128,6 +1254,10 @@ async def stock_research(request: Request):
                 "and counter-evidence. Allowed decision fields: company_quality "
                 "(strong/medium/weak/unknown), valuation_attractiveness "
                 "(attractive/reasonable/demanding/unknown), confidence, confidence_reason, action. "
+                " Financial metric index: revenue_yoy_pct, net_profit_yoy_pct, net_margin_pct, "
+                "operating_margin_pct, operating_cash_flow_to_net_profit, "
+                "liability_to_assets_pct, equity_to_assets_pct. Analyze only metrics selected "
+                "and calculated by personal-os; never estimate missing values or recalculate them. "
             )
         system += (
             " Decision patches use id=\"\"; claim patches use a supplied claim_id. "
