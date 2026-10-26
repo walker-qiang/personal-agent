@@ -232,6 +232,12 @@ def _v3_contract_prompt(*, facts_only: bool, advice_required: bool = False) -> s
             "because the report does not quantify each driver's contribution. Check "
             "the direction of expense changes before describing a cost as a headwind. "
             "Qualify calculated_metrics marked provider_unverified as provisional. "
+            "Compare disclosures on the same event by their stated as-of date; "
+            "a newer repurchase progress notice supersedes an older not-yet-started notice. "
+            "Before finalizing the action, inspect material negative calculated_metrics "
+            "including operating_cash_flow_yoy_pct and explain significant deterioration "
+            "in investment_advice.reason even if the cash-flow-to-profit ratio remains positive. "
+            "Do not describe estimated PE/PB without their financial-report basis. "
             "Use background_claims to consider other risks in the investment advice, "
             "but treat them as unverified context, not cited facts or additional checked claims. "
             "Give the action now, "
@@ -702,6 +708,49 @@ def _compact_synthesis_request(
     return result
 
 
+def _advice_quality_errors(
+    advice: dict[str, Any],
+    documents: list[dict[str, Any]],
+    calculated_metrics: list[dict[str, Any]] | None,
+) -> list[str]:
+    errors: list[str] = []
+    text = advice["reason"] + " " + advice["conditions"]
+    if "回购尚未实施" in text or "暂未实施本次回购" in text:
+        for document in documents:
+            excerpt = str(document.get("excerpt") or "")
+            match = re.search(r"累计回购股份数量为\s*([1-9][\d,]*)\s*股", excerpt)
+            if match and int(match.group(1).replace(",", "")) > 0:
+                errors.append(
+                    "investment_advice contradicts a supplied official repurchase "
+                    "progress notice; compare the as-of dates and remove the stale claim"
+                )
+                break
+    latest_period, decline = "", ""
+    for metric in calculated_metrics or []:
+        if (metric.get("name") != "operating_cash_flow_yoy_pct"
+                or metric.get("status") != "computed"):
+            continue
+        try:
+            value = float(metric["value"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        period = str(metric.get("period") or "")
+        if value <= -20 and period >= latest_period:
+            latest_period, decline = period, str(metric["value"])
+    reason = advice["reason"]
+    decline_explained = "现金流" in reason and (
+        decline in reason or any(
+            word in reason for word in ("下降", "下滑", "减少", "同比为负")
+        )
+    )
+    if decline and not decline_explained:
+        errors.append(
+            f"investment_advice.reason must explain {latest_period} "
+            f"operating_cash_flow_yoy_pct={decline}% despite a positive cash conversion ratio"
+        )
+    return errors
+
+
 def _v3_result_errors(
     value: Any,
     documents: list[dict[str, Any]],
@@ -714,6 +763,7 @@ def _v3_result_errors(
     advice_required: bool = False,
     market_context: dict[str, Any] | None = None,
     has_target_holding: bool = False,
+    calculated_metrics: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Validate the complete v3 DTO before crossing the Agent boundary."""
 
@@ -873,6 +923,7 @@ def _v3_result_errors(
                     errors.append("consider_buy requires a recent quote, valuation data and cited evidence")
                 if advice["new_money"] == "avoid" and not advice["evidence_refs"]:
                     errors.append("avoid requires cited evidence")
+                errors.extend(_advice_quality_errors(advice, documents, calculated_metrics))
         conclusion = episode.get("conclusion")
         if required_claim_ids and conclusion is None:
             errors.append("episode.conclusion is required for scoped research")
@@ -1837,6 +1888,7 @@ async def stock_research(request: Request):
             advice_required=advice_required,
             market_context=context.get("market_context"),
             has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
+            calculated_metrics=context.get("calculated_metrics"),
         )
         repair_refs = active_refs
         repair_catalog = active_catalog
@@ -1951,6 +2003,7 @@ async def stock_research(request: Request):
                     available_evidence_refs=repair_refs,
                     reference_catalog=repair_catalog,
                     advice_required=advice_required,
+                    calculated_metrics=context.get("calculated_metrics"),
                     market_context=context.get("market_context"),
                     has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
                 )
@@ -1969,6 +2022,7 @@ async def stock_research(request: Request):
                 available_evidence_refs=repair_refs,
                 reference_catalog=repair_catalog,
                 advice_required=advice_required,
+                calculated_metrics=context.get("calculated_metrics"),
                 market_context=context.get("market_context"),
                 has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
             )

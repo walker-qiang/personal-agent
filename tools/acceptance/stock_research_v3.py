@@ -860,6 +860,34 @@ async def main():
     assert not route._v3_result_errors(
         checked, [numeric_doc], [], facts_only=False, required_claim_ids={"claim-1"},
     )
+    advised = json.loads(json.dumps(checked))
+    advised["episode"]["investment_advice"] = {
+        "new_money": "wait", "existing_position": "not_assessed",
+        "reason": "回购尚未实施，现金转换仍良好，暂不新增。",
+        "conditions": "收入企稳再评估。", "review_trigger": "下一份财报。",
+        "evidence_refs": ["numeric-ref:revenue"],
+    }
+    official_progress = {
+        "source_id": "repurchase-progress",
+        "excerpt": "截至2026年8月31日，公司以集中竞价方式累计回购股份数量为 1,740,000 股。",
+    }
+    adverse_metrics = [{
+        "name": "operating_cash_flow_yoy_pct", "value": "-33.60",
+        "status": "computed", "period": "2026-06-30",
+    }]
+    advice_errors = route._v3_result_errors(
+        advised, [numeric_doc, official_progress], [], facts_only=False,
+        advice_required=True, calculated_metrics=adverse_metrics,
+    )
+    assert any("repurchase progress" in issue for issue in advice_errors), advice_errors
+    assert any("operating_cash_flow_yoy_pct" in issue for issue in advice_errors), advice_errors
+    advised["episode"]["investment_advice"]["reason"] = (
+        "截至8月末已实施回购；经营现金流同比下降33.60%，暂不新增。"
+    )
+    assert not route._v3_result_errors(
+        advised, [numeric_doc, official_progress], [], facts_only=False,
+        advice_required=True, calculated_metrics=adverse_metrics,
+    )
     partial = json.loads(json.dumps(checked))
     partial["episode"]["claim_checks"][0]["status"] = "partially_supported"
     assert not route._v3_result_errors(
