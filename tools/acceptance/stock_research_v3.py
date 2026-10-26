@@ -126,7 +126,7 @@ class IntegrationLLM(FakeLLM):
                 key: value for key, value in payload.items()
                 if key in {"question", "subject", "thesis", "portfolio_context",
                            "product_context", "pending_questions", "calculated_metrics",
-                           "market_context", "background_claims"}
+                           "market_context", "background_claims", "decision_context"}
             }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
@@ -144,6 +144,21 @@ class IntegrationLLM(FakeLLM):
                     "review_trigger": "取得新的官方报告或近期行情估值时。",
                     "evidence_refs": evidence_refs or [],
                 }
+                if context.get("decision_context"):
+                    episode["investment_advice"].update({
+                        "valuation": {
+                            "status": "unknown", "basis": "缺少可核验的估值比较依据，不能只按 PE 判断低估。",
+                            "evidence_refs": [],
+                        },
+                        "recommendation": "watch",
+                        "metric_assessments": [
+                            {"metric_id": metric_id, "impact": "negative",
+                             "explanation": "该项经营指标显著恶化，削弱当前买入依据。"}
+                            for metric_id in context["decision_context"]["required_metric_ids"]
+                        ],
+                    })
+                    if plan["question"] == "decision-invalid":
+                        episode["investment_advice"]["recommendation"] = "buy"
             return episode
 
         if "required_claim_ids" in payload:
@@ -160,6 +175,12 @@ class IntegrationLLM(FakeLLM):
             assert all(not {
                 "source_id", "sources", "url", "raw_response_hash",
             }.intersection(metric) for metric in metrics), metrics
+        if context.get("decision_context") and any(
+            fact.get("field") == "operating_cash_flow"
+            for doc in documents for fact in doc.get("numeric_facts", [])
+        ):
+            assert any(metric["name"] == "operating_cash_flow_yoy_pct"
+                       for metric in context["calculated_metrics"])
         document = documents[0]
         if plan.get("facts_only"):
             assert set(context) == {"question", "subject", "calculated_metrics", "pending_questions"}
@@ -271,7 +292,7 @@ class IntegrationLLM(FakeLLM):
             "pending_questions",
         }
         if advice_required:
-            expected_context_keys.update({"market_context", "background_claims"})
+            expected_context_keys.update({"market_context", "background_claims", "decision_context"})
         if plan.get("calculated_metrics"):
             expected_context_keys.add("calculated_metrics")
             assert context["calculated_metrics"] == plan["calculated_metrics"]
@@ -289,6 +310,23 @@ class IntegrationLLM(FakeLLM):
         assert portfolio["transactions"][0]["amount_yuan"] == 900
         assert any(item["allocation_bucket"] == "growth" for item in portfolio["allocation"])
         assert "permissions" not in document and "content_hash" not in document
+        if context.get("decision_context") and (
+            "高估、正常还是低估" in plan["question"] or plan["question"] == "decision-invalid"
+        ):
+            return {
+                "episode": add_advice({
+                    "summary": "隔离场景缺少估值依据，不编造行动前提。",
+                    "pending_questions": [],
+                    "claim_checks": [
+                        {"claim_id": item, "status": "unresolved", "finding": "现有资料不足。",
+                         "evidence_refs": []}
+                        for item in payload.get("required_claim_ids", [])
+                    ],
+                    "conclusion": {"supported": "无直接证据。", "unverified": "估值依据仍缺失。",
+                                   "impact": "不据此买入。"},
+                }),
+                "thesis_patch": [], "evidence_candidates": [],
+            }, self._usage()
         quote = "The consideration was paid in cash."
         segment = next(
             item for item in payload.get("evidence_segments", [])
@@ -653,6 +691,98 @@ async def verify_reference_repair(base_payload):
             assert len(json.dumps(details)) < 2000
 
 
+async def verify_decision_contract(base_payload):
+    """Replay the real route with fake models; this is not investment-quality proof."""
+    for code, valuation, action, fault in (
+        ("sz000651", "undervalued", "buy", ""),
+        ("sh600887", "fair", "hold", ""),
+        ("sh601899", "overvalued", "sell", ""),
+        ("sz000651", "unknown", "watch", ""),
+        ("sh600887", "fair", "hold", "repair-metric"),
+        ("sh601899", "fair", "hold", "missing-metric"),
+        ("sz000651", "undervalued", "buy", "forged-valuation"),
+        ("sh600887", "unknown", "buy", "unknown-buy"),
+        ("sh601899", "fair", "hold", "missing-quote"),
+    ):
+        payload = json.loads(json.dumps(base_payload))
+        metric_id = code + ":cash-yoy"
+        decision = {
+            "version": "stock-decision-v1",
+            "objective": "评估当前估值是高估、正常还是低估，并给出买入、持有或卖出建议",
+            "required_metric_ids": [metric_id],
+        }
+        market = {"status": "unavailable"} if fault == "missing-quote" else {
+            "status": "available", "price": 30.0, "pe_approx": 8.0,
+            "quote_datetime": "2026-10-26", "basis": "isolated fixture",
+        }
+        metrics = [{
+            "id": metric_id, "name": "operating_cash_flow_yoy_pct", "value": "-33.60",
+            "unit": "percent", "status": "computed", "period": "2026-06-30",
+        }]
+        payload["plan"].update({
+            "plan_id": code + ":" + fault, "advice_required": True,
+            "decision_context": decision, "market_context": market,
+            "background_claims": [], "calculated_metrics": metrics,
+        })
+        payload["plan"]["scope"]["claim_ids"] = []
+        payload["context"].update({
+            "subject": {"code": code, "name": "离线场景"},
+            "decision_context": decision, "market_context": market,
+            "background_claims": [], "calculated_metrics": metrics,
+        })
+
+        class DecisionLLM(FakeLLM):
+            def complete_json_budgeted(self, system, messages, maximum, schema=None):
+                self.calls.append((system, messages, maximum))
+                request = json.loads(messages[0]["content"])
+                assert request["decision_context"] == decision
+                assert request["calculated_metrics"] == metrics
+                assert "stock-decision-v1" in system
+                assert '"valuation":{"status":"unknown"' in system
+                advice_schema = schema["properties"]["episode"]["properties"]["investment_advice"]
+                assert {"valuation", "recommendation", "metric_assessments"} <= set(advice_schema["required"])
+                ref = request["available_evidence_refs"][0]
+                assessment = [{"metric_id": metric_id, "impact": "negative",
+                               "explanation": "经营现金流同比降约33.6%，现金创造能力转弱，削弱新增依据。"}]
+                if fault == "missing-metric" or fault == "repair-metric" and "validation_errors" not in request:
+                    assessment = []
+                return {
+                    "episode": {
+                        "summary": "离线决策场景。", "pending_questions": [], "claim_checks": [],
+                        "investment_advice": {
+                            "new_money": {"buy": "consider_buy", "sell": "avoid"}.get(action, "wait"),
+                            "existing_position": "not_assessed",
+                            "reason": "已结合资料、估值与现金流评估当前行动。",
+                            "conditions": "盈利能力或估值依据发生实质变化时重新评估。",
+                            "review_trigger": "新的官方报告披露。",
+                            "evidence_refs": [ref],
+                            "valuation": {
+                                "status": valuation,
+                                "basis": "离线提供的经营与估值对照依据；不是用低 PE 自动判断低估。",
+                                "evidence_refs": ["forged:valuation"] if fault == "forged-valuation" else [ref],
+                            },
+                            "recommendation": action, "metric_assessments": assessment,
+                        },
+                    },
+                    "thesis_patch": [], "evidence_candidates": [],
+                }, self._usage()
+
+        llm = DecisionLLM()
+        response = await route.stock_research(Request(llm, payload))
+        if fault in {"missing-metric", "forged-valuation", "unknown-buy", "missing-quote"}:
+            assert response.status_code == 422, (code, fault, response)
+            error = json.loads(response.body)
+            assert error["code"] == "result_contract_invalid"
+            assert error["details"]["model_calls"] == 4
+        else:
+            assert isinstance(response, dict), getattr(response, "body", response)
+            advice = response["result"]["episode"]["investment_advice"]
+            assert advice["recommendation"] == action and advice["valuation"]["status"] == valuation
+            assert advice["metric_assessments"][0]["metric_id"] == metric_id
+            assert response["model_calls"] == (3 if fault == "repair-metric" else 2)
+    return "decision-v1 cross-target valuation/actions, same evidence across synthesis/repair, no prose false positive"
+
+
 async def main():
     for name, value in (
         ("MATRIX_STOCK_V3_INPUT_TOKENS", "25000"),
@@ -918,6 +1048,7 @@ async def main():
         ]},
     }
     scoped_payload = {"plan": scoped_plan, "context": scoped_context, "documents": documents}
+    decision_check = await verify_decision_contract(scoped_payload)
     for mode in ("missing", "extra", "duplicate", "forged"):
         scoped_llm = ScopedLLM(mode)
         scoped_result = await route.stock_research(Request(scoped_llm, scoped_payload))
@@ -989,6 +1120,7 @@ async def main():
         "numeric citations and executable next step", "evidence trimmed within confirmed budget",
         "exact scoped IDs in all stages and provider schema",
         "financial metric planner whitelist and bounded response",
+        decision_check,
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",
         "real DeepSeek adapter with fake HTTP: precise reference repair/failure",
