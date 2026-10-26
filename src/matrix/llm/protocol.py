@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol
@@ -115,6 +116,40 @@ class LLMStreamEvent:
 _MD_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL | re.IGNORECASE)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
+
+
+def parse_json_object_response(text: str) -> dict[str, Any]:
+    """Accept one complete object, optionally wrapped in a single JSON fence."""
+
+    cleaned = text.strip()
+    fence = _MD_FENCE_RE.fullmatch(cleaned)
+    if fence:
+        cleaned = fence.group(1).strip()
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("JSON object contains duplicate keys")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("JSON contains a non-finite number")
+
+    def finite_float(value: str) -> float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("JSON contains a non-finite number")
+        return number
+
+    value = json.loads(
+        cleaned, object_pairs_hook=unique_object,
+        parse_constant=reject_constant, parse_float=finite_float,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("response root must be a JSON object")
+    return value
 
 
 def parse_json_response(text: str) -> dict[str, Any] | list[Any]:

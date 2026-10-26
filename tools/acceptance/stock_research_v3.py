@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from matrix.llm import DeepSeekClient
+from matrix.llm.errors import LLMResponseFormatError, LLMTransientError
 from matrix.server.routes import stock_research as route
 import uvicorn
 
@@ -130,6 +131,12 @@ class IntegrationLLM(FakeLLM):
             }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
+        if plan["question"] == "response-failed":
+            raise LLMResponseFormatError(
+                "response root must be a JSON object",
+                draft='["PRIVATE_RESPONSE_DRAFT_MARKER"]',
+                usage=self._usage(), finish_reason="stop",
+            )
         advice_required = "investment_advice" in (
             schema.get("properties", {}).get("episode", {}).get("required", [])
             if isinstance(schema, dict) else []
@@ -311,7 +318,7 @@ class IntegrationLLM(FakeLLM):
         assert any(item["allocation_bucket"] == "growth" for item in portfolio["allocation"])
         assert "permissions" not in document and "content_hash" not in document
         if context.get("decision_context") and (
-            "高估、正常还是低估" in plan["question"] or plan["question"] == "decision-invalid"
+            "高估、正常还是低估" in plan["question"] or plan["question"] in {"decision-invalid", "response-success"}
         ):
             return {
                 "episode": add_advice({
@@ -691,6 +698,127 @@ async def verify_reference_repair(base_payload):
             assert len(json.dumps(details)) < 2000
 
 
+async def verify_response_recovery(base_payload):
+    marker = "PRIVATE_RESPONSE_DRAFT_MARKER"
+    broken = '{"episode":{"summary":"' + marker + '","pending_questions":[]}, BROKEN'
+
+    def provider_response(arguments, *, finish="tool_calls", tool=True, usage=True):
+        message = (
+            {"content": None, "tool_calls": [{
+                "id": "offline", "function": {"name": "return_json", "arguments": arguments},
+            }]} if tool else {"content": arguments}
+        )
+        result = {"choices": [{"finish_reason": finish, "message": message}]}
+        if usage:
+            result["usage"] = {"prompt_tokens": 100, "completion_tokens": 20}
+        return result
+
+    client = DeepSeekClient(api_key="fixture-only", model="mock-budgeted")
+    for text in (broken, '["' + marker + '"]', "null", '"text"', '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}'):
+        with patch("matrix.llm.deepseek.post_json", return_value=provider_response(text)) as http:
+            try:
+                client.complete_json_budgeted("Return JSON", [], 1500, schema={"type": "object"})
+            except LLMResponseFormatError as error:
+                assert error.draft == text and error.usage == {"input_tokens": 100, "output_tokens": 20}
+            else:
+                raise AssertionError("invalid object must not be accepted")
+            assert http.call_count == 1, "the adapter must never make a hidden fallback request"
+    fenced = '```json\n{"ok":true}\n```'
+    with patch("matrix.llm.deepseek.post_json", return_value=provider_response(fenced)) as http:
+        assert client.complete_json_budgeted("Return JSON", [], 1500, schema={"type": "object"})[0] == {"ok": True}
+        assert http.call_count == 1
+    metric_payload = {
+        "plan_id": "failed-metric-plan", "object_type": "stock", "model": client.model,
+        "question": "核验经营现金流", "claims": [], "pending_questions": [],
+    }
+    with patch("matrix.llm.deepseek.post_json", return_value=provider_response(broken)) as http:
+        failed_metric = await route.plan_financial_metrics(Request(client, metric_payload))
+        metric_error = json.loads(failed_metric.body)
+        assert failed_metric.status_code == 422 and http.call_count == 1
+        assert metric_error["details"]["model_calls"] == 1 and metric_error["details"]["usage_complete"]
+        assert marker in metric_error["private_diagnostics"]["response_drafts"][0]["draft"]
+
+    for mode in ("repaired", "array", "exhausted", "missing-usage", "unknown-budget",
+                 "truncated", "http-after-draft", "synthesis-format"):
+        payload = json.loads(json.dumps(base_payload))
+        if mode == "unknown-budget":
+            payload["plan"]["budget"]["total_tokens"] = 14000
+        expected_claims = payload["plan"]["scope"]["claim_ids"]
+        good = {
+            "episode": {
+                "summary": "仅报告现有来源允许的结论。", "pending_questions": [],
+                "claim_checks": [{"claim_id": item, "status": "unresolved",
+                                 "finding": "现有资料不足。", "evidence_refs": []}
+                                for item in expected_claims],
+                "conclusion": {"supported": "无直接证据。", "unverified": "仍有缺口。",
+                               "impact": "不调整原判断。"},
+            },
+            "thesis_patch": [], "evidence_candidates": [],
+        }
+        outgoing = []
+
+        def fake_http(url, body, headers, timeout):
+            request = json.loads(body["messages"][-1]["content"])
+            outgoing.append(body)
+            assert body["max_tokens"] == payload["plan"]["budget"]["output_tokens"]
+            if mode == "http-after-draft" and len(outgoing) == 2:
+                raise LLMTransientError("offline provider unavailable")
+            malformed = (
+                len(outgoing) == 1 if mode != "synthesis-format"
+                else len(outgoing) == 2
+            )
+            malformed = malformed or mode in {"array", "unknown-budget", "exhausted"}
+            if len(outgoing) > 1 and mode != "synthesis-format" or mode == "synthesis-format" and len(outgoing) == 3:
+                assert "validation_errors" in request and "untrusted_response_draft" in request
+                assert marker in request["untrusted_response_draft"] or mode == "truncated"
+                assert body.get("response_format") == {"type": "json_object"}
+                assert "tools" not in body
+            text = ('["' + marker + '"]' if mode == "array" else broken) if malformed else json.dumps(good)
+            finish = "length" if mode == "truncated" and len(outgoing) == 1 else (
+                "tool_calls" if body.get("tools") else "stop"
+            )
+            response = provider_response(
+                text, finish=finish, tool=bool(body.get("tools")),
+                usage=mode not in {"missing-usage", "unknown-budget"},
+            )
+            if mode == "exhausted":
+                response["usage"] = {"prompt_tokens": payload["plan"]["budget"]["total_tokens"],
+                                     "completion_tokens": 20}
+            return response
+
+        with patch("matrix.llm.deepseek.post_json", fake_http):
+            response = await route.stock_research(Request(client, payload))
+        failed = mode in {"array", "exhausted", "unknown-budget", "http-after-draft"}
+        envelope = json.loads(response.body) if failed else response
+        if failed:
+            assert response.status_code in (422, 502), envelope
+            details = envelope["details"]
+            assert marker not in json.dumps(details), "private drafts must not enter public diagnostics"
+            expected = 3 if mode == "array" else 2 if mode == "http-after-draft" else None
+            if expected is not None:
+                assert len(outgoing) == expected
+            if mode == "exhausted":
+                assert len(outgoing) == 1
+            if mode == "unknown-budget":
+                assert len(outgoing) <= 2
+        else:
+            assert isinstance(response, dict), getattr(response, "body", response)
+            assert response["result"]["episode"]["summary"] == good["episode"]["summary"]
+            assert marker not in json.dumps(response["result"])
+            assert len(outgoing) == (3 if mode == "synthesis-format" else 2)
+            details = response
+        assert details["model_calls"] == len(outgoing)
+        assert details["usage_complete"] == (mode not in {"missing-usage", "unknown-budget", "http-after-draft"})
+        private = envelope["private_diagnostics"]
+        assert len(private["request_id"]) == 32
+        assert len(private["attempts"]) == len(outgoing)
+        assert any(marker in item["draft"] for item in private["response_drafts"])
+        if details["usage_complete"] and mode != "exhausted":
+            assert sum(item["input_tokens"] + item["output_tokens"]
+                       for item in route._usage_parts(details["usage"])) == 120 * len(outgoing)
+    return "real adapter response failures: one HTTP call, strict object parsing, bounded repair, complete usage and private drafts"
+
+
 async def verify_decision_contract(base_payload):
     """Replay the real route with fake models; this is not investment-quality proof."""
     for code, valuation, action, fault in (
@@ -1048,6 +1176,7 @@ async def main():
         ]},
     }
     scoped_payload = {"plan": scoped_plan, "context": scoped_context, "documents": documents}
+    response_check = await verify_response_recovery(scoped_payload)
     decision_check = await verify_decision_contract(scoped_payload)
     for mode in ("missing", "extra", "duplicate", "forged"):
         scoped_llm = ScopedLLM(mode)
@@ -1121,6 +1250,7 @@ async def main():
         "exact scoped IDs in all stages and provider schema",
         "financial metric planner whitelist and bounded response",
         decision_check,
+        response_check,
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",
         "real DeepSeek adapter with fake HTTP: precise reference repair/failure",

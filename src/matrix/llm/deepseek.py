@@ -12,9 +12,9 @@ import json
 import logging
 from typing import Any, Iterator
 
-from .errors import LLMError
+from .errors import LLMError, LLMResponseFormatError
 from .http import post_json, post_json_stream, post_json_with_retry
-from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_response
+from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_object_response, parse_json_response
 from .truncate import truncate_messages
 
 
@@ -370,81 +370,37 @@ class DeepSeekClient:
             temperature=0.0,
             # DeepSeek thinking mode does not support the required tool choice.
             # It is enabled by default, so explicitly disable it for
-            # schema-enforced tool calls while keeping the legacy reasoning
-            # budget for prompt-only JSON.
+            # budgeted calls, including caller-managed JSON-mode repairs.
             reasoning_effort=None if schema is not None else "low",
-            thinking={"type": "disabled"} if schema is not None else None,
+            thinking={"type": "disabled"},
         )
         data = post_json(self._chat_url(), payload, self._headers(), self.timeout_sec)
-        result = self._parse_response(data)
-        if result.finish_reason not in {"stop", "tool_calls"}:
-            raise LLMError(
-                "budgeted stock research did not complete "
-                f"(finish_reason={result.finish_reason})"
-            )
-        if schema is not None:
-            if result.finish_reason != "tool_calls":
-                raise LLMError(
-                    "budgeted structured JSON response did not use the required tool "
-                    f"(finish_reason={result.finish_reason})"
-                )
-            calls = [call for call in result.tool_calls if call.name == _STRUCTURED_TOOL_NAME]
-            if len(calls) != 1:
-                raise LLMError(
-                    "budgeted structured JSON response must contain exactly one "
-                    f"{_STRUCTURED_TOOL_NAME} tool call"
-                )
-            call = calls[0]
-            if call.arguments_error:
-                if "工具参数不是有效 JSON" in call.arguments_error:
-                    # Some DeepSeek tool-call responses contain malformed
-                    # argument text even though the request used a JSON
-                    # schema. Retry once in JSON-object mode; the caller still
-                    # performs the authoritative schema and cross-reference
-                    # validation before accepting the result.
-                    logger.warning(
-                        "budgeted structured JSON tool arguments were malformed; "
-                        "retrying once with provider JSON mode",
-                    )
-                    fallback_data = post_json(
-                        self._chat_url(),
-                        self._build_payload(
-                            system,
-                            messages,
-                            json_mode=True,
-                            max_tokens=max_output_tokens,
-                            temperature=0.0,
-                            reasoning_effort="low",
-                            thinking={"type": "disabled"},
-                        ),
-                        self._headers(),
-                        self.timeout_sec,
-                    )
-                    fallback_result = self._parse_response(fallback_data)
-                    if fallback_result.finish_reason != "stop":
-                        raise LLMError(
-                            "budgeted JSON fallback did not complete "
-                            f"(finish_reason={fallback_result.finish_reason})",
-                        )
-                    try:
-                        parsed = parse_json_response(fallback_result.content)
-                    except Exception as err:
-                        raise LLMError(
-                            f"budgeted JSON fallback could not be parsed: {err}",
-                        ) from err
-                    if not isinstance(parsed, dict):
-                        raise LLMError("budgeted JSON fallback must return an object")
-                    return parsed, self._usage(fallback_data)
-                raise LLMError(
-                    f"budgeted structured JSON tool arguments invalid: {call.arguments_error}"
-                )
-            return call.arguments, self._usage(data)
+        draft, finish_reason = "", ""
         try:
-            parsed = parse_json_response(result.content)
-        except Exception as err:
-            raise LLMError(f"stock research JSON output could not be parsed: {err}") from err
-        if not isinstance(parsed, dict):
-            raise LLMError("stock research response must be a JSON object")
+            choice = data.get("choices", [])[0]
+            message = choice.get("message") or {}
+            finish_reason = str(choice.get("finish_reason") or "")
+            raw_calls = message.get("tool_calls") or []
+            if schema is not None:
+                if len(raw_calls) != 1:
+                    draft = json.dumps(message, ensure_ascii=False)
+                    raise ValueError("structured response requires exactly one return_json call")
+                function = raw_calls[0].get("function") or {}
+                arguments = function.get("arguments")
+                draft = arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+                if finish_reason != "tool_calls" or function.get("name") != _STRUCTURED_TOOL_NAME:
+                    raise ValueError("structured response did not complete the required return_json call")
+            else:
+                draft = str(message.get("content") or "")
+                if finish_reason != "stop":
+                    raise ValueError("JSON response did not complete")
+            parsed = parse_json_object_response(draft)
+        except (IndexError, AttributeError, TypeError, ValueError) as err:
+            raise LLMResponseFormatError(
+                f"budgeted JSON response invalid: {err}; "
+                "repair the response within the confirmed caller budget",
+                draft=draft, usage=self._usage(data), finish_reason=finish_reason,
+            ) from err
         return parsed, self._usage(data)
 
     def stream_complete(
