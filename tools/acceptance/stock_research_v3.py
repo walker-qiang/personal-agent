@@ -1296,6 +1296,114 @@ async def verify_capital_return_ordering(base_payload):
     return "capital returns: same-scheme source/date verification, current evidence priority, obsolete spans excluded and stale claims rejected"
 
 
+async def verify_prepared_evidence_and_comparisons(base_payload):
+    from matrix.server.routes.stock_decision_policy import validate_comparisons, validate_prepared_evidence
+    for profile, fault in (
+        ("general", ""), ("utility", ""), ("banking", ""), ("general", "compound-valid"),
+        ("general", "direction"), ("general", "missing-reference"), ("general", "historical-as-current"),
+        ("banking", "inapplicable"),
+    ):
+        payload = json.loads(json.dumps(base_payload))
+        quote = ("2026年前三季度经营活动产生的现金流量净额同比下降，剔除受限资金影响后下降24.71%，主要系销售商品收到的现金减少。"
+                 if profile != "banking" else "2026年前三季度净利润同比下降，主要系信用减值变化，不良贷款率和资本充足率已披露。")
+        documents = [{"source_id": "current-report", "report_period": "2026-09-30",
+                      "excerpt": "本报告原因说明。\n" + quote + "\n其他资料。"}]
+        explanation = {
+            "id": "reported-" + hashlib.sha256(("current-report|" + quote).encode()).hexdigest()[:20],
+            "source_id": "current-report", "period": "2026-09-30", "quote": quote,
+            "kind": "issuer_explanation" if profile == "banking" else "issuer_reported_adjustment",
+            "metric_ids": ["net_profit_yoy_pct" if profile == "banking" else "operating_cash_flow_yoy_pct"],
+        }
+        def number(code, value):
+            return {"code": code, "value": value, "unit": "ratio", "currency": "CNY",
+                    "period": "2025-12-31", "period_type": "FY", "verification": "provider_unverified"}
+        comparison = {
+            "id": "peer_cash_conversion_ttm", "metric_id": "ttm_cash_to_profit",
+            "status": "comparable", "basis": "same_period_currency_reported_ttm", "period": "2025-12-31",
+            "target": number("sz000651", "1.6000"), "peers": [number("sz000333", "1.2000"), number("sh600690", "1.4000")],
+            "median": "1.3000", "position": "higher",
+        }
+        if profile == "banking":
+            comparison = {key: value for key, value in comparison.items() if key not in {"target", "median", "position"}}
+            comparison.update({"status": "not_applicable", "period": "", "peers": [], "reason": "industry_not_applicable"})
+        policy = {
+            "version": "stock-decision-v2", "objective": "本次为离线契约验收。",
+            "as_of": "2026-10-27", "latest_report_period": "2026-09-30", "required_metric_ids": [],
+            "analysis_profile": {"kind": profile, "source_id": "current-report"},
+            "reported_explanations": [explanation], "comparisons": [comparison],
+            "valuation_methods": [{"id": "reported_assets", "name": "账面资产参考", "status": "blocked",
+                                   "metric_ids": ["pb_reported"], "missing_inputs": ["pb_reported"],
+                                   "summary": "缺少报告口径市净率，此方法暂不可用。"}],
+            "review_triggers": [{"id": "next_report", "period": "2026-12-31", "label": "下一份定期报告披露时"}],
+        }
+        validate_prepared_evidence(policy, documents)
+        validate_comparisons(policy, "sz000651")
+        if profile == "general" and not fault:
+            for field, value in (("currency", "USD"), ("period", "2026-09-30"), ("unit", "percent")):
+                bad = json.loads(json.dumps(policy))
+                bad["comparisons"][0]["peers"][0][field] = value
+                try:
+                    validate_comparisons(bad, "sz000651")
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("mixed comparison input must fail before model: " + field)
+            altered = json.loads(json.dumps(policy))
+            altered["reported_explanations"][0]["quote"] += "模型补写的原因"
+            try:
+                validate_prepared_evidence(altered, documents)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("rewritten issuer disclosure must fail")
+        market = {"status": "available", "price": 36.6, "quote_datetime": "2026-10-27",
+                  "pe_approx": None, "pb_approx": None, "basis": "isolated quote"}
+        payload["documents"] = documents
+        payload["plan"].update({"documents": documents, "advice_required": True, "decision_context": policy,
+                                "market_context": market, "background_claims": [], "calculated_metrics": []})
+        payload["plan"]["scope"].update({"claim_ids": [], "max_synthesis_calls": 1, "max_repair_calls": 0})
+        payload["context"].update({"subject": {"code": "sz000651", "name": "离线行业样例"},
+                                   "decision_context": policy, "market_context": market,
+                                   "background_claims": [], "calculated_metrics": []})
+        class PreparedLLM(FakeLLM):
+            def complete_json_budgeted(self, system, messages, maximum, schema=None):
+                self.calls.append((system, messages, maximum))
+                request = json.loads(messages[0]["content"])
+                assert "quote" not in request["decision_context"]["reported_explanations"][0]
+                assert any(quote in item["text"] for item in request["evidence_segments"])
+                ref = request["available_evidence_refs"][0]
+                reason = "仅使用已披露资本与信用质量资料，不把现金利润比用于银行质量判断。"
+                refs = []
+                if profile != "banking" or fault == "inapplicable":
+                    reason = "共同报告期的现金转换" + ("弱于同业。" if fault == "direction" else "强于同业。")
+                    if fault == "historical-as-current":
+                        reason = "当前现金转换强于同业。"
+                    if fault == "compound-valid":
+                        reason = "净利率有所下降，但现金转换强于同业。"
+                    refs = [] if fault == "missing-reference" else ["peer_cash_conversion_ttm"]
+                return {
+                    "episode": {"summary": "本次为离线验收，不验证真实投资意见。", "pending_questions": [],
+                                "claim_checks": [], "investment_advice": {
+                                    "recommendation": "watch", "existing_position": "not_assessed",
+                                    "reason": reason, "conditions": "取得适用估值输入后复查。",
+                                    "review_trigger_ids": ["next_report"], "evidence_refs": [ref],
+                                    "valuation": {"status": "unknown", "method_id": "reported_assets",
+                                                  "uncertainty": "data_missing", "rationale": "估值输入仍缺失。",
+                                                  "evidence_refs": [], "calculation_refs": refs},
+                                    "metric_assessments": [],
+                                }},
+                    "thesis_patch": [], "evidence_candidates": [],
+                }, self._usage()
+        llm = PreparedLLM()
+        response = await route.stock_research(Request(llm, payload))
+        assert len(llm.calls) == 1
+        if fault and fault != "compound-valid":
+            assert response.status_code == 422, (profile, fault, getattr(response, "body", response))
+        else:
+            assert isinstance(response, dict), getattr(response, "body", response)
+    return "prepared issuer disclosures and same-basis comparisons: manufacturing/banking/utility, no invented adjustments or mixed-period rankings"
+
+
 async def main():
     foundation = {
         "version": "fundamental-data-v1", "code": "sz000651", "as_of": "2026-10-27",
@@ -1600,6 +1708,7 @@ async def main():
     decision_check = await verify_decision_contract(scoped_payload)
     deterministic_check = await verify_deterministic_decisions(scoped_payload)
     capital_return_check = await verify_capital_return_ordering(scoped_payload)
+    prepared_check = await verify_prepared_evidence_and_comparisons(scoped_payload)
     for mode in ("missing", "extra", "duplicate", "forged"):
         scoped_llm = ScopedLLM(mode)
         scoped_result = await route.stock_research(Request(scoped_llm, scoped_payload))
@@ -1677,6 +1786,7 @@ async def main():
         decision_check,
         deterministic_check,
         capital_return_check,
+        prepared_check,
         response_check,
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",
@@ -1876,6 +1986,77 @@ async def replay_current_response(path: str) -> None:
     }))
 
 
+async def replay_prepared_response(path: str) -> None:
+    """Verify first-call inputs from a real saved run, without rewriting that run."""
+    recorded = json.loads(Path(path).read_text())
+    payload = recorded["updated_payload"]
+    policy = payload["plan"]["decision_context"]
+    explanations = policy["reported_explanations"]
+    assert any(item["kind"] == "issuer_reported_adjustment" and "24.71%" in item["quote"] for item in explanations)
+    comparison = next(item for item in policy["comparisons"] if item["id"] == "peer_cash_conversion_ttm")
+    assert comparison["status"] == "comparable" and comparison["period"] == "2025-12-31"
+    assert comparison["position"] == "higher"
+    assert all(
+        all(metric["id"] == "pe_reported_ttm" for metric in peer["metrics"])
+        for peer in payload["context"]["valuation_context"]["peers"]
+    ), "unaligned raw peer cash metrics must not be exposed"
+    original_advice = recorded["result"]["episode"]["investment_advice"]
+    assert route.comparison_claim_errors(original_advice, policy, "")
+    dishonest_ref = json.loads(json.dumps(original_advice))
+    dishonest_ref["valuation"].setdefault("calculation_refs", []).append(comparison["id"])
+    assert any("direction" in error for error in route.comparison_claim_errors(dishonest_ref, policy, ""))
+    untouched = json.dumps(recorded["result"], sort_keys=True)
+    budget = payload["plan"]["budget"]
+    env = {name: str(budget[field]) for name, field in (
+        ("MATRIX_STOCK_V3_INPUT_TOKENS", "input_tokens"),
+        ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "output_tokens"),
+        ("MATRIX_STOCK_V3_TOTAL_TOKENS", "total_tokens"),
+    )}
+    class PreparedRecordedLLM(FakeLLM):
+        model = payload["plan"]["model"]
+        def complete_json_budgeted(self, system, messages, maximum, schema=None):
+            self.calls.append((system, messages, maximum))
+            request = json.loads(messages[0]["content"])
+            evidence = next(item for item in request["evidence_segments"] if "24.71%" in item["text"])
+            ref = next(item["evidence_ref"] for item in request["available_evidence_candidates"]
+                       if item["excerpt_id"] == evidence["excerpt_id"])
+            method = next(item for item in policy["valuation_methods"] if item["status"] == "ready")
+            return {
+                "episode": {
+                    "summary": "离线输入验收，不验证真实投资建议。",
+                    "pending_questions": [],
+                    "claim_checks": [{"claim_id": claim_id, "status": "unresolved", "finding": "离线验收不校准判断。",
+                                     "evidence_refs": []} for claim_id in request["required_claim_ids"]],
+                    "conclusion": {"supported": "已取得原文原因。", "unverified": "投资价值仍需评估。", "impact": "不修改真实判断。"},
+                    "investment_advice": {
+                        "recommendation": "watch", "existing_position": "not_assessed",
+                        "reason": "应区分公司披露的调整口径与程序计算，不能跨期推断同业排名。",
+                        "conditions": "后续经营证据发生变化时复查。", "review_trigger_ids": ["next_report"],
+                        "evidence_refs": [ref],
+                        "valuation": {"status": "fair", "method_id": method["id"], "uncertainty": "business_uncertainty",
+                                      "rationale": "仅验证协议与输入，不证明投资意见正确。",
+                                      "evidence_refs": [ref], "calculation_refs": method["metric_ids"]},
+                        "metric_assessments": [{"metric_id": metric_id, "impact": "mixed",
+                                               "explanation": "需要结合已披露原因判断现金流变化。"}
+                                              for metric_id in policy["required_metric_ids"]],
+                    },
+                }, "thesis_patch": [], "evidence_candidates": [],
+            }, self._usage()
+    llm = PreparedRecordedLLM()
+    request = Request(llm, payload)
+    request.url = SimpleNamespace(path="/api/research/investment.v3")
+    with patch.dict(os.environ, env):
+        response = await route.stock_research(request)
+    assert isinstance(response, dict), getattr(response, "body", response)
+    assert len(llm.calls) == response["model_calls"] == 1
+    assert json.dumps(recorded["result"], sort_keys=True) == untouched
+    print(json.dumps({
+        "real_model_calls": 0, "first_call_has_issuer_adjustment": True,
+        "common_period_cash_comparison": comparison["period"], "wrong_comparison_rejected": True,
+        "fake_provider_calls": 1, "saved_opinion_unchanged": True, "investment_quality_verified": False,
+    }))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--serve"]:
         serve()
@@ -1885,5 +2066,7 @@ if __name__ == "__main__":
         asyncio.run(replay_recorded_response(sys.argv[2]))
     elif sys.argv[1:2] == ["--recorded-current-response"]:
         asyncio.run(replay_current_response(sys.argv[2]))
+    elif sys.argv[1:2] == ["--recorded-prepared-response"]:
+        asyncio.run(replay_prepared_response(sys.argv[2]))
     else:
         asyncio.run(main())

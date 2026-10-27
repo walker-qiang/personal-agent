@@ -25,6 +25,7 @@ from .stock_decision_policy import (
     decision_policy_errors, decision_policy_prompt, is_deterministic_decision,
     model_decision_index, project_decision_result, validate_decision_policy,
     capital_return_ranges,
+    valuation_calculation_ids, comparison_claim_errors,
 )
 
 router = APIRouter()
@@ -428,11 +429,8 @@ def _v3_result_schema(
                         },
                     },
                 })
-                if valuation_context:
-                    computed_ids = [
-                        metric["id"] for metric in valuation_context["metrics"]
-                        if metric["status"] == "computed"
-                    ]
+                if valuation_context or (decision_context or {}).get("comparisons"):
+                    computed_ids = sorted(valuation_calculation_ids(valuation_context, decision_context))
                     valuation_schema = advice_schema["properties"]["valuation"]
                     valuation_schema["required"].append("calculation_refs")
                     valuation_schema["properties"]["calculation_refs"] = {
@@ -936,10 +934,9 @@ def _decision_advice_errors(
     errors: list[str] = []
     valuation = advice.get("valuation")
     expected_fields = {"status", "basis", "evidence_refs"}
-    computed_ids = set()
+    computed_ids = valuation_calculation_ids(valuation_context, decision_context)
     if valuation_context:
         expected_fields.add("calculation_refs")
-        computed_ids = {metric["id"] for metric in valuation_context["metrics"] if metric["status"] == "computed"}
     if is_deterministic_decision(decision_context):
         expected_fields.update({"method_id", "uncertainty", "rationale", "calculation_refs"})
         errors.extend(decision_policy_errors(advice, decision_context))
@@ -1306,6 +1303,7 @@ def _v3_result_errors(
                     advice, documents, calculated_metrics, check_metric_prose=not decision_context,
                 ))
                 if decision_context:
+                    errors.extend(comparison_claim_errors(advice, decision_context, episode.get("summary", "")))
                     errors.extend(_decision_advice_errors(
                         advice, decision_context, market_context, candidate_refs, available_evidence_refs,
                         valuation_context,

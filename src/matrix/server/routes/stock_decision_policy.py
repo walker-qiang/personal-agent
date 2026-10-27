@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import re
 from typing import Any
@@ -27,7 +28,9 @@ def validate_decision_policy(
 ) -> None:
     required = {"version", "objective", "required_metric_ids", "as_of",
                 "valuation_methods", "review_triggers"}
-    if not required <= set(policy) or set(policy) - required - {"latest_report_period", "capital_return_facts"}:
+    if not required <= set(policy) or set(policy) - required - {
+        "latest_report_period", "capital_return_facts", "analysis_profile", "reported_explanations", "comparisons",
+    }:
         raise ValueError("decision-v2 requires program-owned method and review-trigger indexes")
     try:
         as_of = date.fromisoformat(policy["as_of"])
@@ -85,6 +88,154 @@ def validate_decision_policy(
             if not latest or period <= latest:
                 raise ValueError("a review report must follow the latest available report")
     validate_capital_return_facts(policy, documents or [], code)
+    validate_prepared_evidence(policy, documents or [])
+    validate_comparisons(policy, code)
+
+
+def validate_prepared_evidence(policy: dict[str, Any], documents: list[dict[str, Any]]) -> None:
+    profile = policy.get("analysis_profile")
+    if profile is None and not policy.get("reported_explanations"):
+        return
+    if any(not isinstance(item, dict) for item in documents):
+        raise ValueError("prepared evidence sources must be objects")
+    by_id = {item.get("source_id"): item for item in documents}
+    if profile is not None and (
+        not isinstance(profile, dict) or set(profile) != {"kind", "source_id"}
+        or profile.get("kind") not in ("general", "banking", "utility")
+        or not isinstance(profile.get("source_id"), str) or profile["source_id"] not in by_id
+    ):
+        raise ValueError("analysis profile must identify a prepared official source")
+    explanations = policy.get("reported_explanations", [])
+    if not isinstance(explanations, list) or len(explanations) > 3:
+        raise ValueError("reported explanations must be bounded")
+    seen: set[str] = set()
+    for item in explanations:
+        if (not isinstance(item, dict)
+                or set(item) != {"id", "kind", "source_id", "period", "metric_ids", "quote"}
+                or not isinstance(item.get("quote"), str) or not 1 <= len(item["quote"]) <= 1500
+                or item.get("kind") not in ("issuer_explanation", "issuer_reported_adjustment")
+                or not isinstance(item.get("source_id"), str) or item["source_id"] not in by_id
+                or item.get("period") != policy.get("latest_report_period")):
+            raise ValueError("reported explanation identity or period is invalid")
+        source = by_id[item["source_id"]]
+        expected = "reported-" + hashlib.sha256((item["source_id"] + "|" + item["quote"]).encode()).hexdigest()[:20]
+        if (item["id"] != expected or expected in seen or item["quote"] not in source.get("excerpt", "")
+                or source.get("report_period") != item["period"]):
+            raise ValueError("reported explanation must be an exact original source span")
+        if item["kind"] == "issuer_reported_adjustment" and not any(
+            marker in re.sub(r"\s+", "", item["quote"]).lower()
+            for marker in ("剔除", "扣除该影响", "excludingtheimpact")
+        ):
+            raise ValueError("issuer adjustment requires an explicit original disclosure qualifier")
+        seen.add(expected)
+        ids = item["metric_ids"]
+        if (not isinstance(ids, list) or not ids or any(not isinstance(metric, str) for metric in ids)
+                or len(ids) != len(set(ids))
+                or any(metric not in ("revenue_yoy_pct", "net_profit_yoy_pct", "operating_cash_flow_yoy_pct") for metric in ids)):
+            raise ValueError("reported explanation metric IDs are invalid")
+
+
+def validate_comparisons(policy: dict[str, Any], code: str) -> None:
+    comparisons = policy.get("comparisons", [])
+    if not isinstance(comparisons, list) or len(comparisons) > 3:
+        raise ValueError("financial comparisons must be bounded")
+    definitions = {
+        "peer_cash_conversion_ttm": ("ttm_cash_to_profit", "ratio", "same_period_currency_reported_ttm"),
+        "peer_net_margin_ytd": ("net_margin_pct", "percent", "same_period_type_currency_reported_ytd"),
+        "peer_operating_margin_ytd": ("operating_margin_pct", "percent", "same_period_type_currency_reported_ytd"),
+    }
+    seen: set[str] = set()
+    for item in comparisons:
+        if (not isinstance(item, dict) or set(item) - {
+            "id", "metric_id", "status", "basis", "period", "target", "peers", "median", "position", "reason",
+        } or not {"id", "metric_id", "status", "basis", "period", "peers"} <= set(item)
+                or not isinstance(item.get("id"), str) or item["id"] not in definitions or item["id"] in seen
+                or item.get("status") not in ("comparable", "not_comparable", "not_applicable")):
+            raise ValueError("financial comparison identity or status is invalid")
+        seen.add(item["id"])
+        metric, unit, basis = definitions[item["id"]]
+        if item["metric_id"] != metric or item["basis"] != basis:
+            raise ValueError("financial comparison formula differs from its index")
+        if item["status"] != "comparable":
+            if item["peers"] or any(field in item for field in ("target", "median", "position")) or not item.get("reason"):
+                raise ValueError("unavailable comparisons cannot contain a ranking")
+            continue
+        try:
+            if date.fromisoformat(item["period"]) > date.fromisoformat(policy["as_of"]):
+                raise ValueError("financial comparison period cannot be in the future")
+        except (TypeError, ValueError):
+            raise ValueError("financial comparison period is invalid") from None
+        peers, target = item.get("peers"), item.get("target")
+        if not isinstance(peers, list) or not 2 <= len(peers) <= 3 or not isinstance(target, dict):
+            raise ValueError("financial comparisons require a target and two supported peers")
+        currency, period_type = target.get("currency"), target.get("period_type")
+        codes: set[str] = set()
+        numbers: list[Decimal] = []
+        for value in [target, *peers]:
+            if (not isinstance(value, dict) or set(value) != {
+                "code", "value", "unit", "currency", "period", "period_type", "verification",
+            } or not isinstance(value.get("code"), str) or value["code"] in codes
+                    or not isinstance(value.get("value"), str) or len(value["value"]) > 64
+                    or not re.fullmatch(r"-?\d+(?:\.\d+)?", value["value"])
+                    or value.get("unit") != unit or value.get("period") != item["period"]
+                    or currency not in ("CNY", "HKD", "USD") or value.get("currency") != currency
+                    or not isinstance(value.get("period_type"), str) or not value["period_type"] or len(value["period_type"]) > 20
+                    or not isinstance(value.get("verification"), str) or len(value["verification"]) > 40
+                    or metric != "ttm_cash_to_profit" and value["period_type"] != period_type):
+                raise ValueError("financial comparison values differ in period, currency, unit or fiscal basis")
+            codes.add(value["code"])
+            numbers.append(Decimal(value["value"]))
+        if target["code"] != code:
+            raise ValueError("financial comparison target differs from the confirmed subject")
+        try:
+            with localcontext() as decimal_context:
+                decimal_context.prec = 100
+                ordered = sorted(numbers[1:])
+                middle = len(ordered) // 2
+                median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+                actual = Decimal(item["median"])
+                if not actual.is_finite() or abs(actual - median) > Decimal("0.00005"):
+                    raise ValueError("financial comparison median differs from its inputs")
+                position = "lower" if numbers[0] < median else "higher" if numbers[0] > median else "equal"
+                if item.get("position") != position:
+                    raise ValueError("financial comparison direction differs from its inputs")
+        except (KeyError, InvalidOperation, TypeError):
+            raise ValueError("financial comparison median is invalid") from None
+
+
+def valuation_calculation_ids(valuation: dict[str, Any] | None, policy: dict[str, Any] | None) -> set[str]:
+    ids = {item["id"] for item in (valuation or {}).get("metrics", []) if item["status"] == "computed"}
+    ids.update(item["id"] for item in (policy or {}).get("comparisons", []) if item["status"] == "comparable")
+    return ids
+
+
+def comparison_claim_errors(advice: dict[str, Any], policy: dict[str, Any], summary: str) -> list[str]:
+    if "comparisons" not in policy:
+        return []
+    valuation = advice.get("valuation", {})
+    if not isinstance(valuation, dict):
+        return []
+    assessments = advice.get("metric_assessments")
+    assessments = assessments if isinstance(assessments, list) else []
+    text = " ".join([advice["reason"], str(summary), str(valuation.get("rationale") or ""),
+                     *(item["explanation"] for item in assessments
+                       if isinstance(item, dict) and isinstance(item.get("explanation"), str))])
+    refs = valuation.get("calculation_refs", [])
+    known = {item["id"]: item for item in policy["comparisons"]}
+    errors = []
+    pattern = r"(?:(当前|最新|目前|当期)[^。；;，,\n]{0,6})?(现金转换|现金转化|现金利润比|净利率|营业利润率)[^。；;，,\n]{0,12}?(弱于|强于|低于|高于|优于|不及|落后于|逊于)(?:同业|同行)"
+    for temporal, name, direction in re.findall(pattern, text):
+        comparison_id = {"净利率": "peer_net_margin_ytd", "营业利润率": "peer_operating_margin_ytd"}.get(
+            name, "peer_cash_conversion_ttm",
+        )
+        record = known.get(comparison_id)
+        if not record or record["status"] != "comparable" or comparison_id not in refs:
+            errors.append("cross-company claim requires a cited same-basis comparison: " + comparison_id)
+        elif temporal and record["period"] != policy.get("latest_report_period"):
+            errors.append("a historical common period cannot establish a current peer ranking: " + comparison_id)
+        elif record["position"] != ("higher" if direction in ("强于", "高于", "优于") else "lower"):
+            errors.append("cross-company claim contradicts the computed comparison direction: " + comparison_id)
+    return errors
 
 
 def _repurchase_quote_values(quote: str) -> tuple[str, str, str]:
@@ -173,6 +324,11 @@ def capital_return_ranges(
                         break
                     target.setdefault(span["source_id"], []).append((index, index + len(quote)))
                     start = index + len(quote)
+    for item in policy.get("reported_explanations", []):
+        text, quote = by_id.get(item["source_id"], ""), item["quote"]
+        index = text.find(quote)
+        if index >= 0:
+            current.setdefault(item["source_id"], []).append((index, index + len(quote)))
     return current, obsolete
 
 
@@ -192,6 +348,28 @@ def model_decision_index(policy: dict[str, Any]) -> dict[str, Any]:
              "superseded_source_ids": sorted({span["source_id"] for span in fact["superseded"]})}
             for fact in policy["capital_return_facts"]
         ]
+    if "reported_explanations" in result:
+        result["reported_explanations"] = [
+            {key: value for key, value in item.items() if key != "quote"}
+            for item in result["reported_explanations"]
+        ]
+    if "comparisons" in result:
+        compact = []
+        for item in result["comparisons"]:
+            value = dict(item)
+            if item["status"] == "comparable":
+                target = item["target"]
+                value.update({
+                    "unit": target["unit"], "currency": target["currency"],
+                    "period_type": target["period_type"],
+                    "target": {"code": target["code"], "value": target["value"]},
+                    "peers": [{"code": peer["code"], "value": peer["value"]} for peer in item["peers"]],
+                    "verification": ("official_reconciled" if all(
+                        member["verification"] == "official_reconciled" for member in [target, *item["peers"]]
+                    ) else "provider_unverified"),
+                })
+            compact.append(value)
+        result["comparisons"] = compact
     return result
 
 
@@ -216,6 +394,14 @@ def decision_policy_prompt() -> str:
         "check expense directions before describing a cost as a headwind. Distinguish "
         "absolute liabilities from leverage ratios and from interest-bearing debt. "
         "Background claims are unverified context, not established facts. "
+        "reported_explanations identify original issuer disclosures, including issuer-reported "
+        "adjustments; they are not script calculations or normalized/free cash flow. Inspect "
+        "their prioritized evidence before requesting another read of the same report. "
+        "Cross-company cash conversion and margin claims must use comparisons with status=comparable "
+        "and cite their id in calculation_refs. A common historical period is not the latest-period ranking. "
+        "Comparison position is versus the supplied peer median, not every peer or the entire industry. "
+        "For analysis_profile.kind=banking, operating cash flow and cash/profit ratios are not "
+        "general corporate quality signals; use disclosed credit/capital evidence without inventing ratios. "
         "capital_return_facts are dated current states for distinct repurchase schemes; "
         "cite their current source_id. Superseded progress is not a current execution state, "
         "and an approved plan is not an implemented or completed plan. "
