@@ -174,7 +174,14 @@ class IntegrationLLM(FakeLLM):
 
         if plan["question"].startswith("valuation-"):
             data = context["valuation_context"]
-            assert data["version"] == "valuation-data-v1"
+            assert data["version"] == "valuation-data-v2"
+            assert data["foundation"]["version"] == "fundamental-data-v1"
+            assert len(data["foundation"]["fields"]) == 8
+            assert "attempts" not in data["foundation"]
+            assert all(
+                not {"raw_hash", "source_url"}.intersection(field.get("selected", {}))
+                for field in data["foundation"]["fields"]
+            )
             assert context["portfolio_context"] == {"version": 1, "transactions": [], "allocation": []}
             assert all("sources" not in metric for metric in data["metrics"])
             episode = add_advice({
@@ -202,6 +209,14 @@ class IntegrationLLM(FakeLLM):
                 episode["investment_advice"]["recommendation"] = "watch"
                 episode["investment_advice"]["valuation"]["status"] = "unknown"
                 episode["investment_advice"]["valuation"]["calculation_refs"] = ["dividend_yield_12m_pct"]
+            if plan["question"] == "valuation-basic-query":
+                episode["investment_advice"]["recommendation"] = "watch"
+                episode["investment_advice"]["valuation"]["status"] = "unknown"
+                episode["investment_advice"]["valuation"]["calculation_refs"] = ["pb_market_reference"]
+                episode["next_step"].update({
+                    "kind": "fetch_now", "question": "补齐报告PB与每股净资产",
+                    "required_fields": ["pb_reported", "reported_book_value_per_share"],
+                })
             return {"episode": episode, "thesis_patch": [], "evidence_candidates": []}, self._usage()
 
         if "required_claim_ids" in payload:
@@ -957,6 +972,23 @@ async def verify_decision_contract(base_payload):
 
 
 async def main():
+    foundation = {
+        "version": "fundamental-data-v1", "code": "sz000651", "as_of": "2026-10-27",
+        "data_hash": "a" * 64,
+        "fields": [{"id": key, "name": key, "status": "missing"} for key in route._FUNDAMENTAL_UNITS],
+    }
+    route._validate_fundamental_context(foundation, "sz000651")
+    for invalid in (
+        {**foundation, "code": "sh600036"},
+        {**foundation, "attempts": []},
+        {**foundation, "as_of": "2026-99-99"},
+    ):
+        try:
+            route._validate_fundamental_context(invalid, "sz000651")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid foundation identity/private metadata/date must fail")
     shape = {
         "episode": {"summary": "", "pending_questions": [],
                     "thesis_patch": [], "evidence_candidates": []},
@@ -1304,6 +1336,7 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result.status_code == 503 and not llm.calls
     print(json.dumps({"status": "passed", "checks": [
+        "foundation identity, availability, date and private metadata boundaries",
         "unambiguous envelope normalization preserves raw drafts and rejects conflicts",
         "follow-up output cap fits the unchanged total budget",
         "two-stage synthesis", "up to two bounded repairs", "repair without provider usage",
