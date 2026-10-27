@@ -134,6 +134,72 @@ _V3_MODEL_EVIDENCE_KEYS = {"source_id", "excerpt_id", "fact_id", "statement"}
 _V3_CHANGE_TYPES = {"strengthened", "weakened", "falsified", "retired", "calibrated"}
 
 
+def _normalize_result_envelope(value: Any) -> tuple[Any, list[str]]:
+    """Move misplaced arrays only when their destination is unambiguous."""
+    if not isinstance(value, dict) or set(value) - _V3_RESULT_KEYS:
+        return value, []
+    episode = value.get("episode")
+    if not isinstance(episode, dict) or set(episode) - (_V3_EPISODE_KEYS | (_V3_RESULT_KEYS - {"episode"})):
+        return value, []
+    misplaced = set(episode) & {"thesis_patch", "evidence_candidates"}
+    if not misplaced or any(key in value or not isinstance(episode[key], list) for key in misplaced):
+        return value, []
+    normalized = {**value, "episode": dict(episode)}
+    for key in sorted(misplaced):
+        normalized[key] = normalized["episode"].pop(key)
+    return normalized, sorted(misplaced)
+
+
+def _followup_output_limit(input_tokens: int, consumed: int, budget: dict[str, int]) -> int:
+    available = budget["total_tokens"] - consumed - input_tokens
+    minimum = min(1024, budget["output_tokens"])
+    return min(budget["output_tokens"], available) if available >= minimum else 0
+
+
+def _trim_uncited_repair_evidence(request: dict[str, Any], draft: Any) -> dict[str, Any] | None:
+    segments = request.get("evidence_segments", [])
+    catalog = request.get("available_evidence_candidates", [])
+    protected: set[str] = set()
+    cited: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "evidence_refs" and isinstance(child, list):
+                    cited.update(ref for ref in child if isinstance(ref, str))
+                if key == "excerpt_id" and isinstance(child, str):
+                    protected.add(child)
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(draft)
+    for item in catalog:
+        if item["evidence_ref"] in cited:
+            protected.add(item["excerpt_id"])
+    counts: dict[str, int] = {}
+    for segment in segments:
+        counts[segment["source_id"]] = counts.get(segment["source_id"], 0) + 1
+    removable = next((
+        segment for segment in reversed(segments)
+        if segment["excerpt_id"] not in protected and counts[segment["source_id"]] > 1
+    ), None)
+    if removable is None:
+        return None
+    trimmed = dict(request)
+    trimmed["evidence_segments"] = [segment for segment in segments if segment is not removable]
+    kept = {segment["excerpt_id"] for segment in trimmed["evidence_segments"]}
+    trimmed["available_evidence_candidates"] = [
+        item for item in catalog if item["excerpt_id"] in kept
+    ]
+    removed_refs = {item["evidence_ref"] for item in catalog if item["excerpt_id"] not in kept}
+    trimmed["available_evidence_refs"] = [
+        ref for ref in request.get("available_evidence_refs", []) if ref not in removed_refs
+    ]
+    return trimmed
+
+
 def _v3_contract_prompt(
     *, facts_only: bool, advice_required: bool = False, decision_required: bool = False,
     valuation_required: bool = False,
@@ -1844,7 +1910,8 @@ async def stock_research(request: Request):
             system += (
                 " This run uses stock-decision-v1. Its primary objective is the supplied "
                 "decision_context.objective; a follow-up question supplements, never replaces it. "
-                "In investment_advice also return valuation={status,basis,evidence_refs}, "
+                "In investment_advice also return valuation={status,basis,evidence_refs"
+                + (",calculation_refs" if valuation_context else "") + "}, "
                 "recommendation=buy|hold|sell|watch and metric_assessments=[{metric_id,impact,explanation}]. "
                 "valuation.status is undervalued|fair|overvalued|unknown. Explain an applicable "
                 "valuation method and its evidence in basis; low PE/PB alone does not establish "
@@ -1869,8 +1936,10 @@ async def stock_research(request: Request):
                 "personal-os; do not recompute them or infer fair value from low PE or a peer median alone. "
                 "Cite computed parent metric IDs in investment_advice.valuation.calculation_refs, never in claim_checks "
                 "or thesis patches. Reported EPS bridges are share-basis references, not normalized earnings. "
-                "Trailing ex-date payout ratios are not fiscal-year announced payout ratios. Provider-unverified "
-                "inputs remain provisional. Missing optional or inapplicable metrics do not by themselves block "
+                "Trailing ex-date payout ratios are not fiscal-year announced payout ratios. "
+                "peer_target_pe uses the latest supported common reporting period, which may predate the "
+                "target's newest report; state that period and do not call it the newest target PE. "
+                "Provider-unverified inputs remain provisional. Missing optional or inapplicable metrics do not by themselves block "
                 "every valuation method; choose the supported method and state its limits. Normalized earnings "
                 "are not a blanket prerequisite to every relative or dividend assessment. "
                 "next_step.kind=fetch_now is for inputs realistically obtainable now; kind=monitor is for future "
@@ -2098,6 +2167,7 @@ async def stock_research(request: Request):
             wants_second_synthesis = False
         client = _client(request)
         call_bounds: list[int] = []
+        call_output_limits: list[int] = []
 
         def retain_draft(draft: str, error: str, finish_reason: str = "stop") -> None:
             if format_drafts and format_drafts[-1]["call_index"] == len(model_attempts):
@@ -2109,16 +2179,20 @@ async def stock_research(request: Request):
 
         async def invoke_model(
             prompt: str, request_messages: list[dict[str, Any]], schema: dict[str, Any] | None,
-            stage: str, input_tokens: int,
+            stage: str, input_tokens: int, output_limit: int | None = None,
         ) -> tuple[dict[str, Any], dict[str, Any]]:
             nonlocal last_model_draft
             last_model_draft = ""
-            attempt: dict[str, Any] = {"stage": stage, "usage": {}}
+            maximum = output if output_limit is None else output_limit
+            attempt: dict[str, Any] = {
+                "stage": stage, "usage": {}, "input_bound": input_tokens, "output_limit": maximum,
+            }
             model_attempts.append(attempt)
-            call_bounds.append(input_tokens + output)
+            call_bounds.append(input_tokens + maximum)
+            call_output_limits.append(maximum)
             try:
                 draft, used = await asyncio.to_thread(
-                    client.complete_json_budgeted, prompt, request_messages, output, schema=schema,
+                    client.complete_json_budgeted, prompt, request_messages, maximum, schema=schema,
                 )
                 attempt["usage"] = used
                 last_model_draft = json.dumps(draft, ensure_ascii=False)
@@ -2128,7 +2202,11 @@ async def stock_research(request: Request):
                         usage=used, finish_reason="stop",
                     )
                 retain_draft(last_model_draft, "candidate")
-                return draft, used
+                normalized, moved = _normalize_result_envelope(draft)
+                if moved:
+                    attempt["envelope_fields_moved"] = moved
+                    budget_adjustments.append("result_envelope_normalized")
+                return normalized, used
             except LLMResponseFormatError as exc:
                 attempt["usage"] = exc.usage
                 retain_draft(exc.draft, _safe_error_detail(exc), exc.finish_reason)
@@ -2141,6 +2219,19 @@ async def stock_research(request: Request):
                 known = _usage(attempt["usage"])
                 total += known["input_tokens"] + known["output_tokens"] if known is not None else bound
             return total
+
+        def calibrated_input_bound(estimated: int) -> int:
+            calibrated = estimated
+            for attempt, bound, maximum in zip(model_attempts, call_bounds, call_output_limits):
+                known = _usage(attempt["usage"])
+                prior_input = bound - maximum
+                if known is not None and prior_input > 0:
+                    calibrated = max(
+                        calibrated, (estimated * known["input_tokens"] + prior_input - 1) // prior_input,
+                    )
+            if calibrated > estimated and "followup_input_calibrated_to_provider_usage" not in budget_adjustments:
+                budget_adjustments.append("followup_input_calibrated_to_provider_usage")
+            return calibrated
 
         result_schema = _v3_result_schema(
             facts_only=facts_only, required_claim_ids=required_claim_ids,
@@ -2167,6 +2258,21 @@ async def stock_research(request: Request):
             result = _materialize_catalog_cited_candidates(
                 result, active_segments, active_catalog or {},
             )
+            # Freeze grounded first-pass fact identities even when synthesis is skipped.
+            first_refs, first_catalog = _evidence_reference_catalog(result, documents, active_segments)
+            active_refs = set(first_refs)
+            active_catalog = {item["evidence_ref"]: item for item in first_catalog}
+        if wants_second_synthesis and _v3_result_errors(
+            result, documents, evidence_segments, facts_only=facts_only,
+            required_claim_ids=required_claim_ids, available_evidence_refs=active_refs,
+            reference_catalog=active_catalog, advice_required=advice_required,
+            market_context=context.get("market_context"),
+            has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
+            calculated_metrics=context.get("calculated_metrics"),
+            decision_context=decision_context, valuation_context=valuation_context,
+        ):
+            wants_second_synthesis = False
+            budget_adjustments.append("invalid_draft_prioritized_for_repair")
         if wants_second_synthesis:
             draft_request = _compact_synthesis_request(
                 context, documents, evidence_segments, result,
@@ -2196,6 +2302,7 @@ async def stock_research(request: Request):
                     overhead_tokens=2048,
                 ).input_tokens
             )
+            second_bound = calibrated_input_bound(second_bound)
             if second_bound > budget["input_tokens"]:
                 logger.warning(
                     "stock v3 second synthesis exceeds input ceiling; skipping "
@@ -2213,6 +2320,11 @@ async def stock_research(request: Request):
                         budget["total_tokens"],
                     )
                     budget_adjustments.append("second_synthesis_skipped_provider_budget")
+                elif max_repair_calls > 0 and (
+                    consumed + second_bound + output + second_bound +
+                    min(1024, output) > budget["total_tokens"]
+                ):
+                    budget_adjustments.append("second_synthesis_skipped_repair_reserve")
                 else:
                     result, second_usage = await invoke_model(
                         synthesis_system, second_messages, synthesis_schema, "synthesis", second_bound,
@@ -2280,6 +2392,9 @@ async def stock_research(request: Request):
             for repair_attempt in range(max_repair_calls):
                 if not result_errors:
                     break
+                if budget["total_tokens"] - consumed_tokens() < min(1024, output):
+                    budget_adjustments.append("repair_skipped_provider_budget")
+                    break
                 repair_request = _compact_synthesis_request(
                     context, documents, evidence_segments, result,
                     required_claim_ids=required_claim_ids,
@@ -2308,6 +2423,22 @@ async def stock_research(request: Request):
                         overhead_tokens=2048,
                     ).input_tokens
                 )
+                repair_bound = calibrated_input_bound(repair_bound)
+                last_usage = _usage(model_attempts[-1]["usage"])
+                minimum_output = min(output, max(1024, (last_usage["output_tokens"] if last_usage else 0) + 512))
+                while repair_bound > budget["input_tokens"] or (
+                    _followup_output_limit(repair_bound, consumed_tokens(), budget) < minimum_output
+                ):
+                    trimmed = _trim_uncited_repair_evidence(repair_request, result)
+                    if trimmed is None:
+                        break
+                    repair_request = trimmed
+                    repair_input = json.dumps(repair_request, ensure_ascii=False)
+                    repair_bound = calibrated_input_bound(measure_budget(
+                        [repair_system, repair_input], overhead_tokens=2048,
+                    ).input_tokens)
+                    if "repair_evidence_trimmed_to_budget" not in budget_adjustments:
+                        budget_adjustments.append("repair_evidence_trimmed_to_budget")
                 usage_parts = _usage_parts(usage)
                 if repair_bound > budget["input_tokens"]:
                     logger.warning(
@@ -2319,7 +2450,8 @@ async def stock_research(request: Request):
                     break
                 known_usage = len(usage_parts) == calls
                 consumed = consumed_tokens()
-                if consumed + repair_bound + output > budget["total_tokens"]:
+                repair_output = _followup_output_limit(repair_bound, consumed, budget)
+                if repair_output < minimum_output:
                     logger.warning(
                         "stock v3 repair exceeds cumulative budget; stopping repairs "
                         "plan_id=%s attempt=%d estimated_or_actual=%d repair=%d budget=%d "
@@ -2329,6 +2461,8 @@ async def stock_research(request: Request):
                     )
                     budget_adjustments.append("repair_skipped_provider_budget")
                     break
+                if repair_output < output:
+                    budget_adjustments.append("repair_output_reduced_to_remaining_budget")
                 result, repair_usage = await invoke_model(
                     repair_system, [{"role": "user", "content": repair_input}],
                     None if model_attempts[-1].get("format_error") else _v3_result_schema(
@@ -2338,7 +2472,7 @@ async def stock_research(request: Request):
                         decision_context=decision_context,
                         valuation_context=valuation_context,
                     ),
-                    "repair", repair_bound,
+                    "repair", repair_bound, repair_output,
                 )
                 if "available_evidence_refs" in repair_request:
                     repair_refs = set(repair_request["available_evidence_refs"])
@@ -2411,23 +2545,32 @@ async def stock_research(request: Request):
         actual = _usage_parts(usage)
         usage_complete = len(actual) == calls
         if result_errors:
+            repair_attempts = sum(item["stage"] == "repair" for item in model_attempts)
+            repair_status = (
+                "attempted" if repair_attempts else
+                "skipped_budget" if any(item.startswith("repair_skipped_") for item in budget_adjustments)
+                else "disabled"
+            )
             return _research_failure_response(
                 status_code=422,
                 code="result_contract_invalid",
-                detail="v3 result contract invalid after repair",
+                detail=f"v3 result contract invalid; repair {repair_status}",
                 attempts=model_attempts, drafts=format_drafts,
                 details={
                     **validation_diagnostics,
                     "usage": usage,
                     "usage_complete": usage_complete,
                     "model_calls": calls,
+                    "repair_attempts": repair_attempts, "repair_status": repair_status,
+                    "budget_adjustments": budget_adjustments,
                 },
             )
         result = _materialize_v3_result(result, evidence_segments)
         if usage_complete:
             per_call_overage = any(
                 part["input_tokens"] > budget["input_tokens"]
-                or part["output_tokens"] > output for part in actual
+                or part["output_tokens"] > maximum
+                for part, maximum in zip(actual, call_output_limits)
             )
             total = sum(part["input_tokens"] + part["output_tokens"] for part in actual)
             if per_call_overage:

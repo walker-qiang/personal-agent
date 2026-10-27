@@ -576,16 +576,20 @@ async def verify_reference_repair(base_payload):
                     mode, len(outgoing), bad_ref, request["available_evidence_refs"],
                 )
                 assert request["available_evidence_candidates"]
-            if len(outgoing) >= 3:
+            if "validation_errors" in request:
+                repair_number = sum(
+                    "validation_errors" in item
+                    for item in outgoing
+                )
                 assert request["validation_errors"]
                 schema = body["tools"][0]["function"]["parameters"]
                 allowed = schema["properties"]["episode"]["properties"]["claim_checks"]["items"][
                     "properties"]["evidence_refs"]["items"]["enum"]
                 assert allowed == request["available_evidence_refs"]
-                if not numeric and mode == "rebound" and len(outgoing) >= 4:
+                if not numeric and mode == "rebound" and repair_number >= 2:
                     assert any("reference catalog binding" in error
                                for error in request["validation_errors"])
-                elif mode == "missing" and len(outgoing) >= 4:
+                elif mode == "missing" and repair_number >= 2:
                     errors = " ".join(request["validation_errors"])
                     assert "claim_checks must cover" in errors
                     assert "missing=['legacy-claim-1']" in errors
@@ -596,8 +600,8 @@ async def verify_reference_repair(base_payload):
                     )
                     assert not any("missing=['legacy-claim-1']" in error
                                    for error in request["validation_errors"])
-                if (mode == "repaired" and len(outgoing) == 3) or (
-                    mode == "second-repair" and len(outgoing) == 4
+                if (mode == "repaired" and repair_number == 1) or (
+                    mode == "second-repair" and repair_number == 2
                 ):
                     cited_ref = good_ref
                 elif mode == "renamed":
@@ -619,7 +623,7 @@ async def verify_reference_repair(base_payload):
                 "claim_id": "legacy-claim-1", "status": "supported",
                 "finding": "构造的核验结果。", "evidence_refs": [cited_ref],
             }]
-            if mode == "missing" and len(outgoing) >= 3:
+            if mode == "missing" and "validation_errors" in request:
                 checks = []
             candidates = [candidate]
             patches = [{
@@ -627,7 +631,7 @@ async def verify_reference_repair(base_payload):
                 "before": "low", "after": "medium", "change_type": "strengthened",
                 "reason": "构造的判断建议。", "evidence_refs": [patch_ref],
             }]
-            if mode == "catalog-ref-missing-candidate" and len(outgoing) == 3:
+            if mode == "catalog-ref-missing-candidate" and "validation_errors" in request:
                 candidates = []
                 patches = []
             if mode == "one-shot-segment-reference":
@@ -663,9 +667,9 @@ async def verify_reference_repair(base_payload):
         client = DeepSeekClient(api_key="fixture-only", model="mock-budgeted")
         with patch("matrix.llm.deepseek.post_json", fake_http):
             response = await route.stock_research(Request(client, payload))
-        expected_calls = 1 if mode.startswith("one-shot-") else 4 if mode in {
+        expected_calls = 1 if mode.startswith("one-shot-") else 3 if mode in {
             "second-repair", "unrepaired", "renamed", "rebound", "missing", "partial-numeric",
-        } else 3
+        } else 2
         assert len(outgoing) == expected_calls, (mode, len(outgoing))
         if mode == "one-shot-segment-reference":
             assert isinstance(response, dict), getattr(response, "body", response)
@@ -939,17 +943,38 @@ async def verify_decision_contract(base_payload):
             assert response.status_code == 422, (code, fault, response)
             error = json.loads(response.body)
             assert error["code"] == "result_contract_invalid"
-            assert error["details"]["model_calls"] == 4
+            assert error["details"]["model_calls"] == 3
+            assert error["details"]["repair_attempts"] == 2
         else:
             assert isinstance(response, dict), getattr(response, "body", response)
             advice = response["result"]["episode"]["investment_advice"]
             assert advice["recommendation"] == action and advice["valuation"]["status"] == valuation
             assert advice["metric_assessments"][0]["metric_id"] == metric_id
-            assert response["model_calls"] == (3 if fault == "repair-metric" else 2)
+            assert response["model_calls"] == 2
+            if fault == "repair-metric":
+                assert "validation_errors" in json.loads(llm.calls[1][1][0]["content"])
     return "decision-v1 cross-target valuation/actions, same evidence across synthesis/repair, no prose false positive"
 
 
 async def main():
+    shape = {
+        "episode": {"summary": "", "pending_questions": [],
+                    "thesis_patch": [], "evidence_candidates": []},
+    }
+    fixed, moved = route._normalize_result_envelope(shape)
+    assert moved == ["evidence_candidates", "thesis_patch"]
+    assert fixed == {"episode": {"summary": "", "pending_questions": []},
+                     "thesis_patch": [], "evidence_candidates": []}
+    assert "thesis_patch" in shape["episode"], "normalization must not mutate the raw draft"
+    for ambiguous in (
+        {**shape, "thesis_patch": []},
+        {"episode": {**shape["episode"], "unsupported": "not an authorized field"}},
+        {"episode": {**shape["episode"], "evidence_candidates": {}}},
+    ):
+        assert route._normalize_result_envelope(ambiguous)[1] == []
+    assert route._followup_output_limit(23236, 29180, {
+        "input_tokens": 30000, "output_tokens": 10000, "total_tokens": 60000,
+    }) == 7584
     for name, value in (
         ("MATRIX_STOCK_V3_INPUT_TOKENS", "25000"),
         ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "1500"),
@@ -1220,7 +1245,7 @@ async def main():
         scoped_llm = ScopedLLM(mode)
         scoped_result = await route.stock_research(Request(scoped_llm, scoped_payload))
         assert isinstance(scoped_result, dict), getattr(scoped_result, "body", scoped_result)
-        assert scoped_result["model_calls"] == 3 and len(scoped_llm.calls) == 3
+        assert scoped_result["model_calls"] == 2 and len(scoped_llm.calls) == 2
         assert not route._v3_result_errors(
             scoped_result["result"], documents, [], facts_only=False,
             required_claim_ids={"claim-1", "claim-2"},
@@ -1229,10 +1254,10 @@ async def main():
         assert not scoped_result["result"]["thesis_patch"]
     failed_llm = ScopedLLM("missing", repairable=False)
     failed_result = await route.stock_research(Request(failed_llm, scoped_payload))
-    assert failed_result.status_code == 422 and len(failed_llm.calls) == 4
+    assert failed_result.status_code == 422 and len(failed_llm.calls) == 3
     failure = json.loads(failed_result.body)
     assert failure["error_code"] == "result_contract_invalid"
-    assert failure["details"]["model_calls"] == 4 and failure["details"]["usage_complete"]
+    assert failure["details"]["model_calls"] == 3 and failure["details"]["usage_complete"]
     assert "input_tokens" in json.dumps(failure["details"]["usage"])
     assert "missing=['claim-2']" in " ".join(failure["details"]["validation_errors"])
     empty_schema = route._v3_result_schema(facts_only=False, required_claim_ids=set())
@@ -1279,6 +1304,8 @@ async def main():
     result = await route.stock_research(Request(llm, payload))
     assert result.status_code == 503 and not llm.calls
     print(json.dumps({"status": "passed", "checks": [
+        "unambiguous envelope normalization preserves raw drafts and rejects conflicts",
+        "follow-up output cap fits the unchanged total budget",
         "two-stage synthesis", "up to two bounded repairs", "repair without provider usage",
         "immutable documents",
         "immutable API calculations", "private context/excerpt blocked", "explicit V3 portfolio consent",
@@ -1328,11 +1355,102 @@ def replay_recorded_evidence(run_id: str) -> None:
                       "new_selected_characters": sum(len(s["text"]) for s in selected),
                       "segments": len(selected), "exact_source_spans": True}))
 
+async def replay_recorded_response(path: str) -> None:
+    """Use the saved response as a fake provider, preserving the real public DTO."""
+    recorded = json.loads(Path(path).read_text())
+    payload = recorded["payload"]
+    original = recorded["result"]
+    untouched = json.dumps(original, sort_keys=True)
+    normalized, moved = route._normalize_result_envelope(original)
+    assert moved == ["evidence_candidates", "thesis_patch"]
+    assert set(normalized) == route._V3_RESULT_KEYS
+    assert json.dumps(original, sort_keys=True) == untouched
+    collision = json.loads(json.dumps(original))
+    collision["thesis_patch"] = []
+    assert route._normalize_result_envelope(collision)[1] == []
+    malformed = json.loads(json.dumps(original))
+    malformed["episode"]["evidence_candidates"] = {}
+    assert route._normalize_result_envelope(malformed)[1] == []
+    budget = payload["plan"]["budget"]
+
+    class RecordedLLM(FakeLLM):
+        def __init__(self, mode):
+            super().__init__()
+            self.model = payload["plan"]["model"]
+            self.mode = mode
+
+        def complete_json_budgeted(self, system, messages, maximum, schema=None):
+            self.calls.append((system, messages, maximum))
+            result = json.loads(json.dumps(original))
+            if self.mode != "structure" and len(self.calls) == 1:
+                result["episode"]["summary"] = None
+            used = recorded["recorded_usage"] if len(self.calls) == 1 else self._usage()
+            if self.mode == "exhausted":
+                used = {"input_tokens": budget["total_tokens"], "output_tokens": 0}
+            return result, used
+
+    env = {name: str(budget[field]) for name, field in (
+        ("MATRIX_STOCK_V3_INPUT_TOKENS", "input_tokens"),
+        ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "output_tokens"),
+        ("MATRIX_STOCK_V3_TOTAL_TOKENS", "total_tokens"),
+    )}
+    results = {}
+    with patch.dict(os.environ, env):
+        for mode in ("structure", "repair", "exhausted"):
+            llm = RecordedLLM(mode)
+            request = Request(llm, payload)
+            request.url = SimpleNamespace(path="/api/research/investment.v3")
+            response = await route.stock_research(request)
+            if mode == "exhausted":
+                assert response.status_code == 422 and len(llm.calls) == 1
+                details = json.loads(response.body)["details"]
+                assert details["repair_status"] == "skipped_budget"
+                assert details["repair_attempts"] == 0
+                continue
+            assert isinstance(response, dict), getattr(response, "status_code", type(response).__name__)
+            assert response["model_calls"] == len(llm.calls) == (1 if mode == "structure" else 2)
+            assert "result_envelope_normalized" in response["budget_adjustments"]
+            assert response["result"]["episode"]["investment_advice"]["valuation"]["status"] == "unknown"
+            assert "thesis_patch" not in response["result"]["episode"]
+            assert not response["result_incomplete"], response.get("validation_diagnostics")
+            if mode == "repair":
+                system, messages, maximum = llm.calls[-1]
+                repair = json.loads(messages[0]["content"])
+                assert 0 < maximum < budget["output_tokens"]
+                used = recorded["recorded_usage"]
+                bound = route.measure_budget(
+                    [system, messages[0]["content"]], overhead_tokens=2048,
+                ).input_tokens
+                assert bound <= budget["input_tokens"]
+                assert used["input_tokens"] + used["output_tokens"] + bound + maximum <= budget["total_tokens"]
+                assert "repair_output_reduced_to_remaining_budget" in response["budget_adjustments"]
+                assert "repair_evidence_trimmed_to_budget" in response["budget_adjustments"]
+                for field in ("thesis", "portfolio_context", "calculated_metrics", "decision_context", "valuation_context"):
+                    if field in payload["context"]:
+                        assert repair[field] == payload["context"][field], field
+                assert repair["documents"] == route._model_document_index(payload["documents"])
+                kept = {item["excerpt_id"] for item in repair["evidence_segments"]}
+                assert {item["excerpt_id"] for item in normalized["evidence_candidates"]} <= kept
+                originals = {item["excerpt_id"]: item["text"]
+                             for item in route._evidence_segments(payload["documents"], payload["context"])}
+                assert all(originals[item["excerpt_id"]] == item["text"] for item in repair["evidence_segments"])
+            results[mode] = {
+                "fake_provider_calls": len(llm.calls),
+                "last_output_limit": llm.calls[-1][2], "contract_valid": True,
+            }
+    print(json.dumps({
+        "real_model_calls": 0, "recorded_response": results,
+        "ambiguous_shapes_rejected": True, "budget_exhaustion_reported_honestly": True,
+        "investment_quality_verified": False,
+    }))
+
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--serve"]:
         serve()
     elif sys.argv[1:2] == ["--recorded-run"]:
         replay_recorded_evidence(sys.argv[2])
+    elif sys.argv[1:2] == ["--recorded-response"]:
+        asyncio.run(replay_recorded_response(sys.argv[2]))
     else:
         asyncio.run(main())
