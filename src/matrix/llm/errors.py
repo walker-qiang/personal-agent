@@ -10,15 +10,19 @@ class LLMError(Exception):
 
 
 class LLMResponseFormatError(LLMError):
-    """A completed provider request with an unusable, quarantined response."""
+    """A completed request whose raw output is retained for application validation."""
 
     def __init__(
         self, message: str, *, draft: str, usage: dict[str, Any], finish_reason: str,
+        recovered_object: dict[str, Any] | None = None,
+        normalization: str = "",
     ) -> None:
         super().__init__(message)
         self.draft = draft
         self.usage = usage
         self.finish_reason = finish_reason
+        self.recovered_object = recovered_object
+        self.normalization = normalization
 
 
 class LLMTransientError(LLMError):

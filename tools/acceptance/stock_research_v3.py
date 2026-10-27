@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -809,12 +810,16 @@ async def verify_response_recovery(base_payload):
         return result
 
     client = DeepSeekClient(api_key="fixture-only", model="mock-budgeted")
-    for text in (broken, '["' + marker + '"]', "null", '"text"', '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}'):
+    for text in (
+        broken, '["' + marker + '"]', "null", '"text"', '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}',
+        '{"a":1}{"b":2}', '{"a":1} trailing', '{"a":1,"a":2}}', '{"a":NaN}}', '{"a":1}}}}',
+    ):
         with patch("matrix.llm.deepseek.post_json", return_value=provider_response(text)) as http:
             try:
                 client.complete_json_budgeted("Return JSON", [], 1500, schema={"type": "object"})
             except LLMResponseFormatError as error:
                 assert error.draft == text and error.usage == {"input_tokens": 100, "output_tokens": 20}
+                assert error.recovered_object is None
             else:
                 raise AssertionError("invalid object must not be accepted")
             assert http.call_count == 1, "the adapter must never make a hidden fallback request"
@@ -822,6 +827,39 @@ async def verify_response_recovery(base_payload):
     with patch("matrix.llm.deepseek.post_json", return_value=provider_response(fenced)) as http:
         assert client.complete_json_budgeted("Return JSON", [], 1500, schema={"type": "object"})[0] == {"ok": True}
         assert http.call_count == 1
+    good_syntax = {
+        "episode": {"summary": "仅报告来源支持的结论。", "pending_questions": [],
+                    "claim_checks": [{"claim_id": item, "status": "unresolved",
+                                     "finding": "现有资料不足。", "evidence_refs": []}
+                                    for item in base_payload["plan"]["scope"]["claim_ids"]],
+                    "conclusion": {"supported": "无直接证据。", "unverified": "仍有缺口。",
+                                   "impact": "不调整判断。"}},
+        "thesis_patch": [], "evidence_candidates": [],
+    }
+    for tail in ("}", "} \n }"):
+        syntax_payload = json.loads(json.dumps(base_payload))
+        syntax_payload["plan"]["scope"].update({"max_synthesis_calls": 1, "max_repair_calls": 0})
+        raw = json.dumps(good_syntax, ensure_ascii=False) + tail
+        with patch("matrix.llm.deepseek.post_json", return_value=provider_response(raw)) as http:
+            response = await route.stock_research(Request(client, syntax_payload))
+        assert isinstance(response, dict), getattr(response, "body", response)
+        assert http.call_count == response["model_calls"] == 1
+        assert response["usage"] == {"input_tokens": 100, "output_tokens": 20}
+        assert "response_syntax_normalized" in response["budget_adjustments"]
+        assert response["private_diagnostics"]["response_drafts"][0]["draft"] == raw
+        assert response["private_diagnostics"]["attempts"][0]["syntax_normalization"] == "redundant_trailing_object_closers"
+    for finish, wrong_name in (("length", False), ("stop", False), ("tool_calls", True)):
+        response = provider_response(json.dumps(good_syntax) + "}", finish=finish)
+        if wrong_name:
+            response["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "wrong_tool"
+        with patch("matrix.llm.deepseek.post_json", return_value=response) as http:
+            try:
+                client.complete_json_budgeted("Return JSON", [], 1500, schema={"type": "object"})
+            except LLMResponseFormatError as error:
+                assert error.recovered_object is None
+            else:
+                raise AssertionError("an incomplete or wrong tool call must not be recovered")
+            assert http.call_count == 1
     metric_payload = {
         "plan_id": "failed-metric-plan", "object_type": "stock", "model": client.model,
         "question": "核验经营现金流", "claims": [], "pending_questions": [],
@@ -1015,6 +1053,7 @@ async def verify_deterministic_decisions(base_payload):
         ("optional-history-missing", "sh600887", "fair", "hold"),
         ("risk-outweighs-price", "sh601899", "overvalued", "sell"),
         ("business-uncertain", "sz000651", "unknown", "watch"),
+        ("known-with-business-risk", "sz000651", "undervalued", "watch"),
         ("all-blocked", "sh600887", "unknown", "watch"),
         ("false-data-gap", "sz000651", "unknown", "watch"),
         ("blocked-choice", "sh600887", "unknown", "watch"),
@@ -1106,6 +1145,8 @@ async def verify_deterministic_decisions(base_payload):
                 }
                 if scenario == "false-data-gap":
                     advice["valuation"]["uncertainty"] = "data_missing"
+                if scenario == "known-with-business-risk":
+                    advice["valuation"]["uncertainty"] = "business_uncertainty"
                 if scenario == "blocked-choice":
                     advice["valuation"].update({"method_id": "reported_assets", "uncertainty": "data_missing"})
                 if scenario == "missing-method-ref":
@@ -1132,6 +1173,7 @@ async def verify_deterministic_decisions(base_payload):
         if scenario in {
             "optional-bps-missing", "optional-history-missing", "risk-outweighs-price",
             "business-uncertain", "all-blocked",
+            "known-with-business-risk",
         }:
             assert isinstance(response, dict), getattr(response, "body", response)
             advice = response["result"]["episode"]["investment_advice"]
@@ -1152,6 +1194,106 @@ async def verify_deterministic_decisions(base_payload):
             bad_request = await route.stock_research(Request(llm, invalid))
             assert bad_request.status_code in (400, 422) and len(llm.calls) == prior_calls
     return "decision-v2 deterministic methods/actions/triggers, optional gaps isolated, invalid results fail without LLM repairs"
+
+
+async def verify_capital_return_ordering(base_payload):
+    from matrix.server.routes.stock_decision_policy import validate_capital_return_facts
+    code, scheme = "sz000651", "2026-019"
+    old_quote = "截至2026年7月31日，公司暂未实\n施本次回购"
+    current_quote = "截至2026年8月31日，公司累计回购股份数量为1,740,000\n股"
+    header = "《回购股份报告书》（公告编号：2026-019）。\n"
+    documents = [
+        {"source_id": "progress-old", "report_period": "2026-07-31", "excerpt": header + old_quote + "。"},
+        {"source_id": "progress-new", "report_period": "2026-08-31", "excerpt": header + current_quote + "。"},
+    ]
+    fact = {
+        "event_id": "repurchase-" + hashlib.sha256((code + "|" + scheme).encode()).hexdigest()[:20],
+        "scheme_ref": scheme, "as_of": "2026-08-31", "status": "in_progress",
+        "executed_shares": "1740000", "source_id": "progress-new", "quote": current_quote,
+        "superseded": [{"source_id": "progress-old", "quote": old_quote}],
+        "summary": "截至2026-08-31，该方案已累计回购1740000股，不代表方案完成。",
+    }
+    policy = {
+        "version": "stock-decision-v2", "objective": "判断当前估值与行动。",
+        "as_of": "2026-10-27", "required_metric_ids": [],
+        "valuation_methods": [{"id": "reported_assets", "name": "账面资产参考", "status": "blocked",
+                               "metric_ids": ["pb_reported"], "missing_inputs": ["pb_reported"],
+                               "summary": "报告口径市净率缺失，此方法暂不可用。"}],
+        "review_triggers": [{"id": "capital_return", "label": "新的回购进度披露时"}],
+        "capital_return_facts": [fact],
+    }
+    validate_capital_return_facts(policy, documents, code)
+    selected = route._evidence_segments(documents, {"decision_context": policy})
+    assert any(segment["source_id"] == "progress-new" and "1,740,000" in segment["text"] for segment in selected)
+    assert not any("暂未实" in segment["text"] for segment in selected)
+    assert old_quote in documents[0]["excerpt"], "raw historical source must not be rewritten"
+    for field, value in (
+        ("scheme_ref", "2026-020"), ("as_of", "2026-08-30"), ("executed_shares", "999"),
+        ("status", "not_started"), ("source_id", "missing-source"),
+    ):
+        bad = json.loads(json.dumps(policy))
+        bad["capital_return_facts"][0][field] = value
+        try:
+            validate_capital_return_facts(bad, documents, code)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("tampered capital return metadata must fail: " + field)
+    payload = json.loads(json.dumps(base_payload))
+    market = {"status": "available", "price": 36.58, "quote_datetime": "2026-10-27",
+              "pe_approx": None, "pb_approx": None, "basis": "isolated reference"}
+    payload["documents"] = documents
+    payload["plan"].update({
+        "documents": documents, "advice_required": True, "decision_context": policy,
+        "market_context": market, "background_claims": [], "calculated_metrics": [],
+    })
+    payload["plan"]["scope"].update({"claim_ids": [], "max_synthesis_calls": 1, "max_repair_calls": 0})
+    payload["context"].update({
+        "subject": {"code": code, "name": "事件进度夹具"}, "decision_context": policy,
+        "market_context": market, "background_claims": [], "calculated_metrics": [],
+    })
+    client = DeepSeekClient(api_key="fixture-only", model=payload["plan"]["model"])
+    for stale in (False, True):
+        outgoing = []
+
+        def fake_http(url, body, headers, timeout):
+            outgoing.append(body)
+            request = json.loads(body["messages"][-1]["content"])
+            assert "quote" not in request["decision_context"]["capital_return_facts"][0]
+            assert not any("暂未实" in item["text"] for item in request["evidence_segments"])
+            refs = request["available_evidence_refs"]
+            current_ref = next(ref for ref in refs if ref.startswith("progress-new:"))
+            advice = {
+                "recommendation": "watch", "existing_position": "not_assessed",
+                "reason": "回购尚未实施。" if stale else "回购已经开始，但当前估值证据仍不足。",
+                "conditions": "取得适用估值方法的输入后复查。",
+                "review_trigger_ids": ["capital_return"], "evidence_refs": [current_ref],
+                "valuation": {"status": "unknown", "method_id": "reported_assets",
+                              "uncertainty": "data_missing", "rationale": "缺少报告口径市净率。",
+                              "calculation_refs": [], "evidence_refs": []},
+                "metric_assessments": [],
+            }
+            result = {"episode": {"summary": "只读事件核验。", "pending_questions": [],
+                                  "claim_checks": [], "investment_advice": advice},
+                      "thesis_patch": [], "evidence_candidates": []}
+            return {
+                "choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{
+                    "function": {"name": "return_json", "arguments": json.dumps(result, ensure_ascii=False) + "}"},
+                }]}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            }
+
+        with patch("matrix.llm.deepseek.post_json", side_effect=fake_http):
+            response = await route.stock_research(Request(client, payload))
+        assert len(outgoing) == 1
+        if stale:
+            assert response.status_code == 422
+            assert "repurchase" in json.dumps(json.loads(response.body)["details"]["validation_errors"])
+        else:
+            assert isinstance(response, dict), getattr(response, "body", response)
+            assert response["model_calls"] == 1 and "response_syntax_normalized" in response["budget_adjustments"]
+            assert response["result"]["episode"]["investment_advice"]["reason"] == "回购已经开始，但当前估值证据仍不足。"
+    return "capital returns: same-scheme source/date verification, current evidence priority, obsolete spans excluded and stale claims rejected"
 
 
 async def main():
@@ -1457,6 +1599,7 @@ async def main():
     response_check = await verify_response_recovery(scoped_payload)
     decision_check = await verify_decision_contract(scoped_payload)
     deterministic_check = await verify_deterministic_decisions(scoped_payload)
+    capital_return_check = await verify_capital_return_ordering(scoped_payload)
     for mode in ("missing", "extra", "duplicate", "forged"):
         scoped_llm = ScopedLLM(mode)
         scoped_result = await route.stock_research(Request(scoped_llm, scoped_payload))
@@ -1533,6 +1676,7 @@ async def main():
         "financial metric planner whitelist and bounded response",
         decision_check,
         deterministic_check,
+        capital_return_check,
         response_check,
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",
@@ -1663,6 +1807,75 @@ async def replay_recorded_response(path: str) -> None:
     }))
 
 
+async def replay_current_response(path: str) -> None:
+    """Replay real malformed output without changing its investment opinion."""
+    recorded = json.loads(Path(path).read_text())
+    payload = recorded["updated_payload"]
+    policy = payload["plan"]["decision_context"]
+    raw = recorded["raw_result_draft"]
+    facts = policy["capital_return_facts"]
+    assert len(facts) == 1 and facts[0]["as_of"] == "2026-08-31"
+    assert facts[0]["executed_shares"] == "1740000"
+    assert facts[0]["scheme_ref"] == "2026-019" and facts[0]["superseded"]
+    from matrix.llm.protocol import recover_json_object_response
+    recovered = recover_json_object_response(raw)
+    assert recovered is not None, "actual redundant closing brace must be recoverable"
+    projected = route.project_decision_result(recovered, policy)
+    advice = projected["episode"]["investment_advice"]
+    assert advice["valuation"]["status"] == "undervalued" and advice["valuation"]["uncertainty"] == "business_uncertainty"
+    assert not route.decision_policy_errors(advice, policy)
+    assert route._advice_quality_errors(advice, payload["documents"], [], check_metric_prose=False), (
+        "recovery must not turn the original stale repurchase claim into a valid result"
+    )
+    budget = payload["plan"]["budget"]
+    env = {name: str(budget[field]) for name, field in (
+        ("MATRIX_STOCK_V3_INPUT_TOKENS", "input_tokens"),
+        ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "output_tokens"),
+        ("MATRIX_STOCK_V3_TOTAL_TOKENS", "total_tokens"),
+    )}
+    outgoing = []
+    client = DeepSeekClient(api_key="fixture-only", model=payload["plan"]["model"])
+
+    def fake_http(url, body, headers, timeout):
+        outgoing.append(body)
+        request = json.loads(body["messages"][-1]["content"])
+        old_source = facts[0]["superseded"][0]["source_id"]
+        old_quote = facts[0]["superseded"][0]["quote"]
+        source = next(doc["excerpt"] for doc in payload["documents"] if doc["source_id"] == old_source)
+        begin, end = source.index(old_quote), source.index(old_quote) + len(old_quote)
+        assert not any(
+            segment["source_id"] == old_source and segment["excerpt_start"] < end and begin < segment["excerpt_end"]
+            for segment in request["evidence_segments"]
+        ), "obsolete execution status must not be exposed as current evidence"
+        assert any(segment["source_id"] == facts[0]["source_id"] and "1,740,000" in segment["text"]
+                   for segment in request["evidence_segments"]), "current execution evidence must survive the input budget"
+        used = recorded["recorded_usage"]
+        return {
+            "choices": [{"finish_reason": recorded["finish_reason"], "message": {"tool_calls": [{
+                "function": {"name": "return_json", "arguments": raw},
+            }]}}],
+            "usage": {"prompt_tokens": used["input_tokens"], "completion_tokens": used["output_tokens"],
+                      "total_tokens": used["input_tokens"] + used["output_tokens"]},
+        }
+
+    request = Request(client, payload)
+    request.url = SimpleNamespace(path="/api/research/investment.v3")
+    with patch.dict(os.environ, env), patch("matrix.llm.deepseek.post_json", side_effect=fake_http):
+        response = await route.stock_research(request)
+    assert response.status_code == 422, "the unchanged stale opinion must still fail"
+    failure = json.loads(response.body)
+    assert len(outgoing) == failure["details"]["model_calls"] == 1
+    assert failure["details"]["repair_attempts"] == 0
+    assert "response_syntax_normalized" in failure["details"]["budget_adjustments"]
+    assert failure["private_diagnostics"]["response_drafts"][0]["draft"] == raw
+    print(json.dumps({
+        "real_model_calls": 0, "fake_provider_http_calls": 1,
+        "syntax_recovered": True, "known_valuation_with_business_risk_accepted": True,
+        "current_event_evidence_prepared": True, "unchanged_stale_opinion_rejected": True,
+        "investment_quality_verified": False,
+    }))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--serve"]:
         serve()
@@ -1670,5 +1883,7 @@ if __name__ == "__main__":
         replay_recorded_evidence(sys.argv[2])
     elif sys.argv[1:2] == ["--recorded-response"]:
         asyncio.run(replay_recorded_response(sys.argv[2]))
+    elif sys.argv[1:2] == ["--recorded-current-response"]:
+        asyncio.run(replay_current_response(sys.argv[2]))
     else:
         asyncio.run(main())

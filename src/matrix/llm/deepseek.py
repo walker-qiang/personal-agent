@@ -14,7 +14,10 @@ from typing import Any, Iterator
 
 from .errors import LLMError, LLMResponseFormatError
 from .http import post_json, post_json_stream, post_json_with_retry
-from .protocol import FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_object_response, parse_json_response
+from .protocol import (
+    FunctionCallResult, LLMStreamEvent, ToolCall, parse_json_object_response,
+    parse_json_response, recover_json_object_response,
+)
 from .truncate import truncate_messages
 
 
@@ -376,6 +379,7 @@ class DeepSeekClient:
         )
         data = post_json(self._chat_url(), payload, self._headers(), self.timeout_sec)
         draft, finish_reason = "", ""
+        completed = False
         try:
             choice = data.get("choices", [])[0]
             message = choice.get("message") or {}
@@ -394,12 +398,16 @@ class DeepSeekClient:
                 draft = str(message.get("content") or "")
                 if finish_reason != "stop":
                     raise ValueError("JSON response did not complete")
+            completed = True
             parsed = parse_json_object_response(draft)
         except (IndexError, AttributeError, TypeError, ValueError) as err:
+            recovered = recover_json_object_response(draft) if completed else None
             raise LLMResponseFormatError(
                 f"budgeted JSON response invalid: {err}; "
                 "repair the response within the confirmed caller budget",
                 draft=draft, usage=self._usage(data), finish_reason=finish_reason,
+                recovered_object=recovered,
+                normalization="redundant_trailing_object_closers" if recovered is not None else "",
             ) from err
         return parsed, self._usage(data)
 

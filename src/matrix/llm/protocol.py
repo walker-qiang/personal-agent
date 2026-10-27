@@ -152,6 +152,24 @@ def parse_json_object_response(text: str) -> dict[str, Any]:
     return value
 
 
+def recover_json_object_response(text: str) -> dict[str, Any] | None:
+    """Recover only redundant closing braces after one strictly valid object."""
+    if len(text) > 1 << 20:
+        return None
+    try:
+        parse_json_object_response(text)
+    except json.JSONDecodeError as error:
+        if error.msg != "Extra data" or not re.fullmatch(r"}(?:\s*})?", error.doc[error.pos:].strip()):
+            return None
+        try:
+            return parse_json_object_response(error.doc[:error.pos])
+        except ValueError:
+            return None
+    except ValueError:
+        return None
+    return None
+
+
 def parse_json_response(text: str) -> dict[str, Any] | list[Any]:
     """Parse a JSON object or array from LLM text output.
 

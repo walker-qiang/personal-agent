@@ -24,6 +24,7 @@ from .stock_decision_policy import (
     DECISION_VERSION, LEGACY_DECISION_VERSION, apply_decision_schema,
     decision_policy_errors, decision_policy_prompt, is_deterministic_decision,
     model_decision_index, project_decision_result, validate_decision_policy,
+    capital_return_ranges,
 )
 
 router = APIRouter()
@@ -591,6 +592,9 @@ def _evidence_segments(
     """Rank contiguous original spans; short PDF lines share a character budget."""
 
     terms = _evidence_terms(context or {})
+    current_ranges, obsolete_ranges = capital_return_ranges(
+        documents, (context or {}).get("decision_context"),
+    )
     groups: list[list[tuple[int, int, dict[str, Any]]]] = []
     for document in documents:
         source_id = document.get("source_id")
@@ -611,16 +615,24 @@ def _evidence_segments(
             text = raw.strip()
             if text:
                 offset = start + len(raw) - len(raw.lstrip())
+                segment_index = index
+                index += 1
+                if any(offset < stop and begin < offset + len(text)
+                       for begin, stop in obsolete_ranges.get(source_id, [])):
+                    start = end
+                    continue
                 compact = re.sub(r"\s+", "", text).lower()
                 score = sum(weight for term, weight in terms.items() if term in compact)
+                if any(offset < stop and begin < offset + len(text)
+                       for begin, stop in current_ranges.get(source_id, [])):
+                    score += 1000
                 candidates.append((score, offset, {
                     "source_id": source_id,
-                    "excerpt_id": f"{source_id}:segment-{index:04d}",
+                    "excerpt_id": f"{source_id}:segment-{segment_index:04d}",
                     "text": text,
                     "excerpt_start": offset,
                     "excerpt_end": offset + len(text),
                 }))
-                index += 1
             start = end
         candidates.sort(key=lambda item: (-item[0], item[1]))
         groups.append(candidates[:_MAX_EVIDENCE_SEGMENTS_PER_DOCUMENT])
@@ -877,6 +889,8 @@ def _advice_quality_errors(
 ) -> list[str]:
     errors: list[str] = []
     text = advice["reason"] + " " + advice["conditions"]
+    if isinstance(advice.get("valuation"), dict):
+        text += " " + str(advice["valuation"].get("rationale") or "")
     if "回购尚未实施" in text or "暂未实施本次回购" in text:
         for document in documents:
             excerpt = str(document.get("excerpt") or "")
@@ -1963,7 +1977,10 @@ async def stock_research(request: Request):
                     or len(set(decision_context["required_metric_ids"])) != len(decision_context["required_metric_ids"])):
                 raise ValueError("decision_context must match the confirmed version, objective and visible computed metric IDs")
             if is_deterministic_decision(decision_context):
-                validate_decision_policy(decision_context, valuation_context, context.get("market_context"))
+                validate_decision_policy(
+                    decision_context, valuation_context, context.get("market_context"),
+                    documents, context["subject"]["code"],
+                )
         if object_type == "fund" and facts_only:
             raise ValueError("fund research requires official product excerpts, not company financial metrics")
         scope = plan.get("scope") if isinstance(plan.get("scope"), dict) else {}
@@ -2333,16 +2350,22 @@ async def stock_research(request: Request):
                         usage=used, finish_reason="stop",
                     )
                 retain_draft(last_model_draft, "candidate")
-                normalized, moved = _normalize_result_envelope(draft)
-                if moved:
-                    attempt["envelope_fields_moved"] = moved
-                    budget_adjustments.append("result_envelope_normalized")
-                return project_decision_result(normalized, decision_context), used
             except LLMResponseFormatError as exc:
                 attempt["usage"] = exc.usage
                 retain_draft(exc.draft, _safe_error_detail(exc), exc.finish_reason)
-                attempt["format_error"] = _safe_error_detail(exc)
-                return {}, exc.usage
+                if (exc.recovered_object is None
+                        or exc.normalization != "redundant_trailing_object_closers"):
+                    attempt["format_error"] = _safe_error_detail(exc)
+                    return {}, exc.usage
+                draft, used = exc.recovered_object, exc.usage
+                attempt["syntax_normalization"] = exc.normalization
+                budget_adjustments.append("response_syntax_normalized")
+                last_model_draft = json.dumps(draft, ensure_ascii=False)
+            normalized, moved = _normalize_result_envelope(draft)
+            if moved:
+                attempt["envelope_fields_moved"] = moved
+                budget_adjustments.append("result_envelope_normalized")
+            return project_decision_result(normalized, decision_context), used
 
         def consumed_tokens() -> int:
             total = 0
