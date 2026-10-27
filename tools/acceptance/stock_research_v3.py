@@ -127,7 +127,7 @@ class IntegrationLLM(FakeLLM):
                 key: value for key, value in payload.items()
                 if key in {"question", "subject", "thesis", "portfolio_context",
                            "product_context", "pending_questions", "calculated_metrics",
-                           "market_context", "background_claims", "decision_context"}
+                           "market_context", "background_claims", "decision_context", "valuation_context"}
             }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
@@ -166,7 +166,43 @@ class IntegrationLLM(FakeLLM):
                     })
                     if plan["question"] == "decision-invalid":
                         episode["investment_advice"]["recommendation"] = "buy"
+                    if context.get("valuation_context"):
+                        episode["investment_advice"]["valuation"]["calculation_refs"] = []
+                        if isinstance(episode.get("next_step"), dict):
+                            episode["next_step"]["kind"] = "fetch_now"
             return episode
+
+        if plan["question"].startswith("valuation-"):
+            data = context["valuation_context"]
+            assert data["version"] == "valuation-data-v1"
+            assert context["portfolio_context"] == {"version": 1, "transactions": [], "allocation": []}
+            assert all("sources" not in metric for metric in data["metrics"])
+            episode = add_advice({
+                "summary": "隔离验收仅验证计算输入和建议契约。",
+                "pending_questions": [],
+                "claim_checks": [{"claim_id": item, "status": "unresolved",
+                                 "finding": "不把参考估值当作竞争优势证据。", "evidence_refs": []}
+                                for item in payload.get("required_claim_ids", [])],
+                "conclusion": {"supported": "计算输入齐备。", "unverified": "商业假设待核验。",
+                               "impact": "保留方法适用性限制。"},
+                "next_step": {"kind": "monitor", "question": "下一报告披露后复查",
+                              "required_fields": ["未来报告"], "source_hint": "下一期官方报告",
+                              "completion_criteria": "未来披露后核对变化"},
+            })
+            episode["investment_advice"]["valuation"] = {
+                "status": "fair", "basis": "离线测试的估值参考输入，不证明真实投资建议有效。",
+                "evidence_refs": [],
+                "calculation_refs": ["invalid:metric"] if plan["question"] == "valuation-invalid" else [
+                    "pe_reported_ttm", "dividend_yield_12m_pct", "peer_pe_median",
+                ],
+            }
+            episode["investment_advice"]["recommendation"] = "hold"
+            episode["next_step"]["kind"] = "monitor"
+            if plan["question"] == "valuation-missing":
+                episode["investment_advice"]["recommendation"] = "watch"
+                episode["investment_advice"]["valuation"]["status"] = "unknown"
+                episode["investment_advice"]["valuation"]["calculation_refs"] = ["dividend_yield_12m_pct"]
+            return {"episode": episode, "thesis_patch": [], "evidence_candidates": []}, self._usage()
 
         if "required_claim_ids" in payload:
             checklist = schema["properties"]["episode"]["properties"]["claim_checks"]
@@ -300,6 +336,8 @@ class IntegrationLLM(FakeLLM):
         }
         if advice_required:
             expected_context_keys.update({"market_context", "background_claims", "decision_context"})
+        if context.get("valuation_context"):
+            expected_context_keys.add("valuation_context")
         if plan.get("calculated_metrics"):
             expected_context_keys.add("calculated_metrics")
             assert context["calculated_metrics"] == plan["calculated_metrics"]

@@ -44,6 +44,7 @@ _FINANCIAL_METRIC_INDEX = (
 _FINANCIAL_METRIC_IDS = {item[0] for item in _FINANCIAL_METRIC_INDEX}
 _FINANCIAL_METRIC_PLAN_MAX_OUTPUT = 256
 _DECISION_CONTRACT_VERSION = "stock-decision-v1"
+_VALUATION_DATA_VERSION = "valuation-data-v1"
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -135,6 +136,7 @@ _V3_CHANGE_TYPES = {"strengthened", "weakened", "falsified", "retired", "calibra
 
 def _v3_contract_prompt(
     *, facts_only: bool, advice_required: bool = False, decision_required: bool = False,
+    valuation_required: bool = False,
 ) -> str:
     numeric_claims = (
         ', "numeric_claims":[{"metric_id":"<metric id>","value":"<exact supplied value>"}]'
@@ -150,7 +152,8 @@ def _v3_contract_prompt(
     )
     decision = (
         ',"valuation":{"status":"unknown","basis":"<valuation method, evidence or specific gap>",'
-        '"evidence_refs":[]},"recommendation":"watch","metric_assessments":[]'
+        '"evidence_refs":[]' + (',"calculation_refs":[]' if valuation_required else "")
+        + '},"recommendation":"watch","metric_assessments":[]'
         if decision_required else ""
     )
     advice = (
@@ -222,7 +225,8 @@ def _v3_contract_prompt(
         "missing field can realistically be located beyond the material already "
         "checked; otherwise omit it. When included, use "
         '{"question":"<one answerable question>","required_fields":["<needed field>"],'
-        '"source_hint":"<report/section to check>","completion_criteria":"<what would answer it>"}. '
+        + ('"kind":"fetch_now",' if valuation_required else "")
+        + '"source_hint":"<report/section to check>","completion_criteria":"<what would answer it>"}. '
         "Do not repeat a broad historical risk as the next task. "
         + (
             "Always provide episode.investment_advice as the actual decision output. "
@@ -265,6 +269,7 @@ def _v3_result_schema(
     available_evidence_refs: list[str] | None = None,
     advice_required: bool = False,
     decision_context: dict[str, Any] | None = None,
+    valuation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Canonical provider schema for the investment V3 result DTO.
 
@@ -332,6 +337,17 @@ def _v3_result_schema(
                         },
                     },
                 })
+                if valuation_context:
+                    computed_ids = [
+                        metric["id"] for metric in valuation_context["metrics"]
+                        if metric["status"] == "computed"
+                    ]
+                    valuation_schema = advice_schema["properties"]["valuation"]
+                    valuation_schema["required"].append("calculation_refs")
+                    valuation_schema["properties"]["calculation_refs"] = {
+                        "type": "array", "uniqueItems": True, "maxItems": len(computed_ids),
+                        "items": {"type": "string", **({"enum": computed_ids} if computed_ids else {})},
+                    }
         episode_properties["claim_checks"] = {
             "type": "array",
             **({"minItems": len(required_claim_ids), "maxItems": len(required_claim_ids)}
@@ -376,6 +392,11 @@ def _v3_result_schema(
             },
             "additionalProperties": False,
         }
+        if valuation_context:
+            episode_properties["next_step"]["required"].append("kind")
+            episode_properties["next_step"]["properties"]["kind"] = {
+                "type": "string", "enum": ["fetch_now", "monitor"],
+            }
     if facts_only:
         episode_properties["numeric_claims"] = {
             "type": "array",
@@ -737,7 +758,7 @@ def _compact_synthesis_request(
         "evidence_draft": evidence_draft,
     }
     for field in ("thesis", "portfolio_context", "product_context",
-                  "calculated_metrics", "market_context", "background_claims", "decision_context"):
+                  "calculated_metrics", "market_context", "background_claims", "decision_context", "valuation_context"):
         if field in context:
             result[field] = context[field]
     if "thesis" in context:
@@ -802,10 +823,20 @@ def _decision_advice_errors(
     advice: dict[str, Any], decision_context: dict[str, Any],
     market_context: dict[str, Any] | None, candidate_refs: set[str],
     available_evidence_refs: set[str] | None,
+    valuation_context: dict[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     valuation = advice.get("valuation")
-    if (not isinstance(valuation, dict) or set(valuation) != {"status", "basis", "evidence_refs"}
+    expected_fields = {"status", "basis", "evidence_refs"}
+    computed_ids = set()
+    if valuation_context:
+        expected_fields.add("calculation_refs")
+        computed_ids = {metric["id"] for metric in valuation_context["metrics"] if metric["status"] == "computed"}
+    calculations = valuation.get("calculation_refs") if isinstance(valuation, dict) else None
+    calculations_valid = not valuation_context or (
+        isinstance(calculations, list) and all(isinstance(ref, str) and ref in computed_ids for ref in calculations)
+    )
+    if (not isinstance(valuation, dict) or set(valuation) != expected_fields or not calculations_valid
             or valuation.get("status") not in ("undervalued", "fair", "overvalued", "unknown")
             or not isinstance(valuation.get("basis"), str)
             or not valuation["basis"].strip() or len(valuation["basis"]) > 480
@@ -816,7 +847,7 @@ def _decision_advice_errors(
         errors.append("investment_advice.valuation requires a status, source-backed basis and valid evidence_refs")
     elif valuation["status"] != "unknown" and (
         not market_context or market_context.get("status") != "available"
-        or not valuation["evidence_refs"]
+        or not valuation["evidence_refs"] and not calculations
     ):
         errors.append("a known valuation needs a recent quote and cited valuation evidence; otherwise use unknown")
     action = advice.get("recommendation")
@@ -848,6 +879,55 @@ def _decision_advice_errors(
     return errors
 
 
+def _validate_valuation_context(value: Any) -> None:
+    if (not isinstance(value, dict) or set(value) != {
+        "version", "as_of", "currency", "data_hash", "metrics", "peers", "gaps",
+    } or value.get("version") != _VALUATION_DATA_VERSION
+            or not isinstance(value.get("data_hash"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", value["data_hash"])
+            or value.get("currency") not in ("CNY", "HKD", "USD", "")
+            or not isinstance(value.get("as_of"), str)
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value["as_of"])):
+        raise ValueError("valuation_context has an unsupported version or metadata")
+    def validate_metrics(metrics: Any) -> None:
+        if not isinstance(metrics, list) or len(metrics) > 16:
+            raise ValueError("valuation metrics must be a bounded list")
+        seen: set[str] = set()
+        for metric in metrics:
+            if (not isinstance(metric, dict) or set(metric) - {
+                "id", "value", "unit", "currency", "period", "status", "reason", "basis", "verification",
+            } or not isinstance(metric.get("id"), str) or not metric["id"]
+                    or len(metric["id"]) > 80 or metric["id"] in seen
+                    or metric.get("status") not in ("computed", "not_computable")
+                    or any(not isinstance(metric.get(field), str) or len(metric[field]) > limit
+                           for field, limit in (("unit", 40), ("period", 10), ("basis", 240), ("verification", 40)))):
+                raise ValueError("valuation metrics contain invalid or duplicate fields")
+            if "currency" in metric and metric["currency"] not in ("CNY", "HKD", "USD", ""):
+                raise ValueError("valuation metric currency is unsupported")
+            if metric["status"] == "computed" and (
+                not isinstance(metric.get("value"), str) or len(metric["value"]) > 64
+                or not re.fullmatch(r"-?\d+(?:\.\d+)?", metric["value"])
+            ):
+                raise ValueError("computed valuation metrics need supplied numeric strings")
+            seen.add(metric["id"])
+    validate_metrics(value.get("metrics"))
+    if not isinstance(value.get("peers"), list) or len(value["peers"]) > 3:
+        raise ValueError("valuation peers must be bounded")
+    for peer in value["peers"]:
+        if (not isinstance(peer, dict) or set(peer) != {"code", "name", "status", "metrics"}
+                or not isinstance(peer["code"], str) or len(peer["code"]) > 16
+                or not isinstance(peer["name"], str) or len(peer["name"]) > 100
+                or peer["status"] not in ("available", "fetch_failed")):
+            raise ValueError("valuation peer identity or state is invalid")
+        validate_metrics(peer["metrics"])
+    if not isinstance(value.get("gaps"), list) or len(value["gaps"]) > 24:
+        raise ValueError("valuation gaps must be bounded")
+    for gap in value["gaps"]:
+        if (not isinstance(gap, dict) or set(gap) != {"field", "kind", "tool_id"}
+                or any(not isinstance(gap[field], str) or len(gap[field]) > 80 for field in gap)):
+            raise ValueError("valuation gaps require field, kind and tool_id")
+
+
 def _v3_result_errors(
     value: Any,
     documents: list[dict[str, Any]],
@@ -862,6 +942,7 @@ def _v3_result_errors(
     has_target_holding: bool = False,
     calculated_metrics: list[dict[str, Any]] | None = None,
     decision_context: dict[str, Any] | None = None,
+    valuation_context: dict[str, Any] | None = None,
 ) -> list[str]:
     """Validate the complete v3 DTO before crossing the Agent boundary."""
 
@@ -1029,6 +1110,7 @@ def _v3_result_errors(
                 if decision_context:
                     errors.extend(_decision_advice_errors(
                         advice, decision_context, market_context, candidate_refs, available_evidence_refs,
+                        valuation_context,
                     ))
         conclusion = episode.get("conclusion")
         if required_claim_ids and conclusion is None:
@@ -1099,7 +1181,10 @@ def _v3_result_errors(
         step = episode.get("next_step")
         if step is not None:
             keys = {"question", "required_fields", "source_hint", "completion_criteria"}
+            if valuation_context:
+                keys.add("kind")
             if (facts_only or not isinstance(step, dict) or set(step) != keys
+                    or valuation_context and step.get("kind") not in ("fetch_now", "monitor")
                     or any(not isinstance(step[k], str) or not step[k].strip()
                            for k in ("question", "source_hint", "completion_criteria"))
                     or not isinstance(step["required_fields"], list)
@@ -1423,6 +1508,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "evidence_selection_version": _EVIDENCE_SELECTION_VERSION,
         "financial_metric_planner_version": _FINANCIAL_METRIC_PLANNER_VERSION,
         "decision_contract_version": _DECISION_CONTRACT_VERSION,
+        "valuation_data_version": _VALUATION_DATA_VERSION,
         "financial_metric_ids": [item[0] for item in _FINANCIAL_METRIC_INDEX],
         "supported": bool(all(limits.values()) and limits["output_tokens"] <= limits["total_tokens"]
                           and request.app.state.config.llm_available
@@ -1618,7 +1704,7 @@ async def stock_research(request: Request):
                 "question", "subject", "thesis", "portfolio_context", "pending_questions", "calculated_metrics",
             }
             if advice_required:
-                allowed_context.update({"market_context", "background_claims", "decision_context"})
+                allowed_context.update({"market_context", "background_claims", "decision_context", "valuation_context"})
                 market = plan.get("market_context")
                 if (not isinstance(market, dict)
                         or market.get("status") not in {"available", "unavailable"}
@@ -1667,6 +1753,11 @@ async def stock_research(request: Request):
                         or product.get("verification") != "unverified_registry_context"):
                     raise ValueError("fund product context is invalid or differs from the confirmed plan")
         decision_context = plan.get("decision_context")
+        valuation_context = plan.get("valuation_context")
+        if valuation_context is not None:
+            if not advice_required or context.get("valuation_context") != valuation_context:
+                raise ValueError("valuation_context must match the confirmed decision plan")
+            _validate_valuation_context(valuation_context)
         if decision_context is not None:
             metrics_by_id = {
                 metric.get("id") for metric in context.get("calculated_metrics", [])
@@ -1747,6 +1838,7 @@ async def stock_research(request: Request):
         system += " " + _v3_contract_prompt(
             facts_only=facts_only, advice_required=advice_required,
             decision_required=bool(decision_context),
+            valuation_required=bool(valuation_context),
         )
         if decision_context:
             system += (
@@ -1768,6 +1860,22 @@ async def stock_research(request: Request):
                 "with impact=positive|negative|mixed|uncertain and a substantive explanation of "
                 "its effect on the action. Do not infer an improvement from one positive ratio "
                 "while ignoring deterioration in the underlying cash or earnings."
+            )
+        if valuation_context:
+            system += (
+                " Valuation tool index: rolling_financials=TTM flows and reported per-share references; "
+                "dividend_metrics=implemented cash yield and payout reference; peer_comparison=same-period relative pricing. "
+                "Use valuation_context before declaring a historical input missing. Its numbers are computed by "
+                "personal-os; do not recompute them or infer fair value from low PE or a peer median alone. "
+                "Cite computed parent metric IDs in investment_advice.valuation.calculation_refs, never in claim_checks "
+                "or thesis patches. Reported EPS bridges are share-basis references, not normalized earnings. "
+                "Trailing ex-date payout ratios are not fiscal-year announced payout ratios. Provider-unverified "
+                "inputs remain provisional. Missing optional or inapplicable metrics do not by themselves block "
+                "every valuation method; choose the supported method and state its limits. Normalized earnings "
+                "are not a blanket prerequisite to every relative or dividend assessment. "
+                "next_step.kind=fetch_now is for inputs realistically obtainable now; kind=monitor is for future "
+                "disclosures or changes and belongs in review_trigger. Do not substitute monitoring a future quarter "
+                "for obtaining today's valuation inputs. Return valuation.evidence_refs and calculation_refs separately."
             )
         if object_type == "fund":
             system += (
@@ -1857,6 +1965,8 @@ async def stock_research(request: Request):
                 model_request["background_claims"] = context["background_claims"]
                 if decision_context:
                     model_request["decision_context"] = decision_context
+                if valuation_context:
+                    model_request["valuation_context"] = valuation_context
             if object_type == "fund":
                 model_request["product_context"] = context["product_context"]
             if "calculated_metrics" in context:
@@ -2037,6 +2147,7 @@ async def stock_research(request: Request):
             available_evidence_refs=reference_refs if not facts_only else None,
             advice_required=advice_required,
             decision_context=decision_context,
+            valuation_context=valuation_context,
         )
         result, first_usage = await invoke_model(
             evidence_system if wants_second_synthesis else system,
@@ -2077,6 +2188,7 @@ async def stock_research(request: Request):
                 available_evidence_refs=sorted(draft_refs) if not facts_only else None,
                 advice_required=advice_required,
                 decision_context=decision_context,
+                valuation_context=valuation_context,
             )
             second_bound = (
                 measure_budget(
@@ -2127,6 +2239,7 @@ async def stock_research(request: Request):
             has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
             calculated_metrics=context.get("calculated_metrics"),
             decision_context=decision_context,
+            valuation_context=valuation_context,
         )
         if model_attempts[-1].get("format_error"):
             result_errors.insert(0, model_attempts[-1]["format_error"])
@@ -2223,6 +2336,7 @@ async def stock_research(request: Request):
                         available_evidence_refs=repair_request.get("available_evidence_refs"),
                         advice_required=advice_required,
                         decision_context=decision_context,
+                        valuation_context=valuation_context,
                     ),
                     "repair", repair_bound,
                 )
@@ -2248,6 +2362,7 @@ async def stock_research(request: Request):
                     advice_required=advice_required,
                     calculated_metrics=context.get("calculated_metrics"),
                     decision_context=decision_context,
+                    valuation_context=valuation_context,
                     market_context=context.get("market_context"),
                     has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
                 )
@@ -2272,6 +2387,7 @@ async def stock_research(request: Request):
                 advice_required=advice_required,
                 calculated_metrics=context.get("calculated_metrics"),
                 decision_context=decision_context,
+                valuation_context=valuation_context,
                 market_context=context.get("market_context"),
                 has_target_holding=bool(context.get("portfolio_context", {}).get("target_holding")),
             )
