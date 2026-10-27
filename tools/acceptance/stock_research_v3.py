@@ -18,6 +18,41 @@ from matrix.server.routes import stock_research as route
 import uvicorn
 
 
+def adapt_v2_fixture(advice, policy, mode=""):
+    if not route.is_deterministic_decision(policy):
+        return advice
+    methods = policy["valuation_methods"]
+    method = next((item for item in methods if item["status"] == "ready"), methods[0])
+    valuation = advice["valuation"]
+    rationale = valuation.get("rationale", valuation.get("basis", "离线方法解释，不代表真实投资建议。"))
+    invalid_refs = valuation.get("calculation_refs") == ["invalid:metric"]
+    advice.pop("new_money", None)
+    advice.pop("review_trigger", None)
+    advice["review_trigger_ids"] = [policy["review_triggers"][0]["id"]]
+    advice["valuation"] = {
+        "status": valuation["status"], "method_id": method["id"],
+        "uncertainty": (
+            "data_missing" if method["status"] == "blocked" else
+            "business_uncertainty" if valuation["status"] == "unknown" else "none"
+        ),
+        "rationale": rationale, "evidence_refs": valuation["evidence_refs"],
+        "calculation_refs": ["invalid:metric"] if invalid_refs else (
+            method["metric_ids"] if method["status"] == "ready" else []
+        ),
+    }
+    if mode == "valuation-false-gap":
+        advice["valuation"].update({"status": "unknown", "uncertainty": "data_missing"})
+    if mode == "valuation-stale-trigger":
+        advice["review_trigger_ids"] = ["already_published_q3"]
+    if mode == "valuation-derived-action":
+        advice["new_money"] = "consider_buy"
+    if mode == "valuation-method-ref":
+        advice["valuation"]["calculation_refs"] = []
+    if mode == "valuation-narrative-override":
+        advice["valuation"]["basis"] = "模型改写的数值结论"
+    return advice
+
+
 class FakeLLM:
     model = "mock-budgeted"
 
@@ -170,6 +205,8 @@ class IntegrationLLM(FakeLLM):
                         episode["investment_advice"]["valuation"]["calculation_refs"] = []
                         if isinstance(episode.get("next_step"), dict):
                             episode["next_step"]["kind"] = "fetch_now"
+            if context.get("decision_context"):
+                adapt_v2_fixture(episode["investment_advice"], context["decision_context"])
             return episode
 
         if plan["question"].startswith("valuation-"):
@@ -217,6 +254,7 @@ class IntegrationLLM(FakeLLM):
                     "kind": "fetch_now", "question": "补齐报告PB与每股净资产",
                     "required_fields": ["pb_reported", "reported_book_value_per_share"],
                 })
+            adapt_v2_fixture(episode["investment_advice"], context["decision_context"], plan["question"])
             return {"episode": episode, "thesis_patch": [], "evidence_candidates": []}, self._usage()
 
         if "required_claim_ids" in payload:
@@ -971,6 +1009,151 @@ async def verify_decision_contract(base_payload):
     return "decision-v1 cross-target valuation/actions, same evidence across synthesis/repair, no prose false positive"
 
 
+async def verify_deterministic_decisions(base_payload):
+    for scenario, code, status, action in (
+        ("optional-bps-missing", "sz000651", "undervalued", "buy"),
+        ("optional-history-missing", "sh600887", "fair", "hold"),
+        ("risk-outweighs-price", "sh601899", "overvalued", "sell"),
+        ("business-uncertain", "sz000651", "unknown", "watch"),
+        ("all-blocked", "sh600887", "unknown", "watch"),
+        ("false-data-gap", "sz000651", "unknown", "watch"),
+        ("blocked-choice", "sh600887", "unknown", "watch"),
+        ("missing-method-ref", "sh601899", "fair", "hold"),
+        ("forged-ref", "sz000651", "fair", "hold"),
+        ("unknown-buy", "sh600887", "unknown", "buy"),
+        ("invented-trigger", "sh601899", "fair", "hold"),
+        ("conflicting-derived-action", "sz000651", "fair", "hold"),
+        ("conflicting-derived-basis", "sh600887", "fair", "hold"),
+        ("invalid-format", "sh601899", "fair", "hold"),
+        ("invalid-action-type", "sz000651", "fair", "hold"),
+    ):
+        payload = json.loads(json.dumps(base_payload))
+        blocked = scenario == "all-blocked"
+        metric_ids = ["peer_target_pe", "peer_pe_median", "pe_to_peer_median"]
+        valuation_data = {
+            "version": "valuation-data-v1", "as_of": "2026-10-27", "currency": "CNY",
+            "data_hash": "b" * 64, "peers": [], "gaps": [],
+            "metrics": [
+                {"id": item, "value": value, "unit": "ratio", "period": "2026-09-30",
+                 "status": "computed", "basis": "isolated same-period reference",
+                 "verification": "provider_unverified"}
+                for item, value in zip(metric_ids, ("8", "12", "0.6667"))
+            ] if not blocked else [],
+        }
+        policy = {
+            "version": "stock-decision-v2", "as_of": "2026-10-27",
+            "latest_report_period": "2026-09-30",
+            "objective": "评估当前估值是高估、正常还是低估，并给出买入、持有或卖出建议",
+            "required_metric_ids": [],
+            "valuation_methods": [
+                {"id": "peer_relative", "name": "同业相对估值",
+                 "status": "blocked" if blocked else "ready", "metric_ids": metric_ids,
+                 "missing_inputs": metric_ids if blocked else [],
+                 "summary": "同业相对估值：同口径比较参考，不能单独证明内在价值。"},
+                {"id": "reported_assets", "name": "账面资产参考", "status": "blocked",
+                 "metric_ids": ["pb_reported"], "missing_inputs": ["pb_reported"],
+                 "summary": "账面资产参考：缺少报告口径市净率。"},
+            ],
+            "review_triggers": [
+                {"id": "next_report", "period": "2026-12-31",
+                 "label": "财报期为2026-12-31的后续定期报告披露时"},
+                {"id": "material_event", "label": "影响经营或估值的重大事项披露时"},
+            ],
+        }
+        # No report-derived PE/PB is available: a supported relative method must
+        # not be blocked by that legacy catch-all prerequisite.
+        market = {"status": "available", "price": 36.58, "quote_datetime": "2026-10-27",
+                  "pe_approx": None, "pb_approx": None, "basis": "isolated quote"}
+        payload["plan"].update({
+            "plan_id": "v2:" + scenario, "advice_required": True,
+            "decision_context": policy, "valuation_context": valuation_data,
+            "market_context": market, "background_claims": [], "calculated_metrics": [],
+        })
+        payload["plan"]["scope"].update({"claim_ids": [], "max_synthesis_calls": 1, "max_repair_calls": 2})
+        payload["context"].update({
+            "subject": {"code": code, "name": "确定性边界场景"},
+            "decision_context": policy, "valuation_context": valuation_data,
+            "market_context": market, "background_claims": [], "calculated_metrics": [],
+        })
+
+        class PolicyLLM(FakeLLM):
+            def complete_json_budgeted(self, system, messages, maximum, schema=None):
+                self.calls.append((system, messages, maximum))
+                request = json.loads(messages[0]["content"])
+                assert all("summary" not in item for item in request["decision_context"]["valuation_methods"])
+                advice_schema = schema["properties"]["episode"]["properties"]["investment_advice"]
+                assert not {"new_money", "review_trigger"}.intersection(advice_schema["properties"])
+                assert "basis" not in advice_schema["properties"]["valuation"]["properties"]
+                assert "stock-decision-v2" in system
+                if scenario == "invalid-format":
+                    raise LLMResponseFormatError(
+                        "invalid JSON", draft="[invalid output]", usage=self._usage(), finish_reason="stop",
+                    )
+                ref = request["available_evidence_refs"][0]
+                advice = {
+                    "recommendation": action, "existing_position": "not_assessed",
+                    "reason": "结合盈利与现金转换的不确定性权衡当前行动。",
+                    "conditions": "经营证据或估值依据发生实质变化。",
+                    "review_trigger_ids": ["next_report"], "evidence_refs": [ref],
+                    "valuation": {
+                        "status": status, "method_id": "peer_relative",
+                        "uncertainty": ("data_missing" if blocked else
+                                        "business_uncertainty" if status == "unknown" else "none"),
+                        "rationale": "估值比较的局限需要结合业务前景判断，不推断绝对公允价格。",
+                        "evidence_refs": [ref], "calculation_refs": [] if blocked else list(metric_ids),
+                    },
+                    "metric_assessments": [],
+                }
+                if scenario == "false-data-gap":
+                    advice["valuation"]["uncertainty"] = "data_missing"
+                if scenario == "blocked-choice":
+                    advice["valuation"].update({"method_id": "reported_assets", "uncertainty": "data_missing"})
+                if scenario == "missing-method-ref":
+                    advice["valuation"]["calculation_refs"].pop()
+                if scenario == "forged-ref":
+                    advice["valuation"]["evidence_refs"] = ["forged:evidence"]
+                if scenario == "invented-trigger":
+                    advice["review_trigger_ids"] = ["already_published_q3"]
+                if scenario == "conflicting-derived-action":
+                    advice["new_money"] = "consider_buy"
+                if scenario == "conflicting-derived-basis":
+                    advice["valuation"]["basis"] = "模型自行覆盖计算摘要"
+                if scenario == "invalid-action-type":
+                    advice["recommendation"] = ["hold"]
+                return {
+                    "episode": {"summary": "离线契约验收。", "pending_questions": [],
+                                "claim_checks": [], "investment_advice": advice},
+                    "thesis_patch": [], "evidence_candidates": [],
+                }, self._usage()
+
+        llm = PolicyLLM()
+        response = await route.stock_research(Request(llm, payload))
+        assert len(llm.calls) == 1, "program projection and invalid DTOs must not start model repairs"
+        if scenario in {
+            "optional-bps-missing", "optional-history-missing", "risk-outweighs-price",
+            "business-uncertain", "all-blocked",
+        }:
+            assert isinstance(response, dict), getattr(response, "body", response)
+            advice = response["result"]["episode"]["investment_advice"]
+            assert advice["new_money"] == {"buy": "consider_buy", "sell": "avoid"}.get(action, "wait")
+            assert advice["valuation"]["basis"] == policy["valuation_methods"][0]["summary"]
+            assert "2026-12-31" in advice["review_trigger"] and "2026-09-30" not in advice["review_trigger"]
+            assert advice["recommendation"] == action and advice["valuation"]["status"] == status
+        else:
+            assert response.status_code == 422, (scenario, getattr(response, "body", response))
+            error = json.loads(response.body)
+            assert error["code"] == "result_contract_invalid"
+            assert error["details"]["model_calls"] == 1 and error["details"]["repair_attempts"] == 0
+        if scenario == "optional-bps-missing":
+            invalid = json.loads(json.dumps(payload))
+            for container in (invalid["plan"], invalid["context"]):
+                container["decision_context"]["review_triggers"][0]["period"] = "2026-09-30"
+            prior_calls = len(llm.calls)
+            bad_request = await route.stock_research(Request(llm, invalid))
+            assert bad_request.status_code in (400, 422) and len(llm.calls) == prior_calls
+    return "decision-v2 deterministic methods/actions/triggers, optional gaps isolated, invalid results fail without LLM repairs"
+
+
 async def main():
     foundation = {
         "version": "fundamental-data-v1", "code": "sz000651", "as_of": "2026-10-27",
@@ -1273,6 +1456,7 @@ async def main():
     scoped_payload = {"plan": scoped_plan, "context": scoped_context, "documents": documents}
     response_check = await verify_response_recovery(scoped_payload)
     decision_check = await verify_decision_contract(scoped_payload)
+    deterministic_check = await verify_deterministic_decisions(scoped_payload)
     for mode in ("missing", "extra", "duplicate", "forged"):
         scoped_llm = ScopedLLM(mode)
         scoped_result = await route.stock_research(Request(scoped_llm, scoped_payload))
@@ -1348,6 +1532,7 @@ async def main():
         "exact scoped IDs in all stages and provider schema",
         "financial metric planner whitelist and bounded response",
         decision_check,
+        deterministic_check,
         response_check,
         "missing/extra/duplicate/forged checklist bounded repair",
         "unrepairable checklist fails closed with usage, not a budget error",

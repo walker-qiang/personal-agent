@@ -20,6 +20,11 @@ from ...build_info import BUILD_SHA
 from ...context.budget import measure_budget
 from ...llm.errors import LLMAuthError, LLMError, LLMRateLimitError, LLMResponseFormatError, LLMTransientError
 from ..request_limits import RequestBodyTooLarge, problem_response, read_json_object
+from .stock_decision_policy import (
+    DECISION_VERSION, LEGACY_DECISION_VERSION, apply_decision_schema,
+    decision_policy_errors, decision_policy_prompt, is_deterministic_decision,
+    model_decision_index, project_decision_result, validate_decision_policy,
+)
 
 router = APIRouter()
 logger = logging.getLogger("matrix.stock_research")
@@ -36,6 +41,7 @@ _FINANCIAL_METRIC_PLANNER_VERSION = "financial-metrics-v1"
 _FINANCIAL_METRIC_INDEX = (
     ("revenue_yoy_pct", "营收同比"),
     ("net_profit_yoy_pct", "归母净利润同比"),
+    ("operating_cash_flow_yoy_pct", "经营现金流同比"),
     ("net_margin_pct", "净利率"),
     ("operating_margin_pct", "营业利润率"),
     ("operating_cash_flow_to_net_profit", "现金转化"),
@@ -45,7 +51,7 @@ _FINANCIAL_METRIC_INDEX = (
 )
 _FINANCIAL_METRIC_IDS = {item[0] for item in _FINANCIAL_METRIC_INDEX}
 _FINANCIAL_METRIC_PLAN_MAX_OUTPUT = 256
-_DECISION_CONTRACT_VERSION = "stock-decision-v1"
+_DECISION_CONTRACT_VERSION = DECISION_VERSION
 _VALUATION_DATA_VERSION = "valuation-data-v2"
 _FUNDAMENTAL_UNITS = {
     "quote_price": "currency_per_share", "pe_market_ttm": "ratio",
@@ -211,6 +217,7 @@ def _trim_uncited_repair_evidence(request: dict[str, Any], draft: Any) -> dict[s
 def _v3_contract_prompt(
     *, facts_only: bool, advice_required: bool = False, decision_required: bool = False,
     valuation_required: bool = False,
+    deterministic_decision: bool = False,
 ) -> str:
     numeric_claims = (
         ', "numeric_claims":[{"metric_id":"<metric id>","value":"<exact supplied value>"}]'
@@ -236,6 +243,15 @@ def _v3_contract_prompt(
         '"review_trigger":"<when to reassess>","evidence_refs":[]' + decision + '}'
         if advice_required else ""
     )
+    if deterministic_decision:
+        advice = (
+            ',"investment_advice":{"recommendation":"<buy|hold|sell|watch>","existing_position":"not_assessed",'
+            '"reason":"<investment reasoning>","conditions":"<what changes the action>",'
+            '"review_trigger_ids":["<supplied trigger ID>"],"evidence_refs":[],'
+            '"valuation":{"status":"<undervalued|fair|overvalued|unknown>","method_id":"<supplied method ID>",'
+            '"uncertainty":"<none|business_uncertainty|data_missing>","rationale":"<valuation reasoning>",'
+            '"evidence_refs":[],"calculation_refs":[]},"metric_assessments":[]}'
+        )
     episode_example = (
         '{"summary":"<analysis>","pending_questions":["<question>"]'
         + numeric_claims
@@ -329,7 +345,7 @@ def _v3_contract_prompt(
             "but treat them as unverified context, not cited facts or additional checked claims. "
             "Give the action now, "
             "its conditions and a review trigger. pending_questions alone are not advice. "
-            if advice_required else ""
+            if advice_required and not deterministic_decision else ""
         )
         +
         "Distinguish checked claims from unresolved questions; an unchanged judgment "
@@ -422,6 +438,8 @@ def _v3_result_schema(
                         "type": "array", "uniqueItems": True, "maxItems": len(computed_ids),
                         "items": {"type": "string", **({"enum": computed_ids} if computed_ids else {})},
                     }
+                if is_deterministic_decision(decision_context):
+                    apply_decision_schema(advice_schema, decision_context)
         episode_properties["claim_checks"] = {
             "type": "array",
             **({"minItems": len(required_claim_ids), "maxItems": len(required_claim_ids)}
@@ -835,6 +853,8 @@ def _compact_synthesis_request(
                   "calculated_metrics", "market_context", "background_claims", "decision_context", "valuation_context"):
         if field in context:
             result[field] = context[field]
+    if is_deterministic_decision(result.get("decision_context")):
+        result["decision_context"] = model_decision_index(result["decision_context"])
     if "thesis" in context:
         refs, catalog = _evidence_reference_catalog(
             evidence_draft, documents, selected_segments,
@@ -906,8 +926,11 @@ def _decision_advice_errors(
     if valuation_context:
         expected_fields.add("calculation_refs")
         computed_ids = {metric["id"] for metric in valuation_context["metrics"] if metric["status"] == "computed"}
+    if is_deterministic_decision(decision_context):
+        expected_fields.update({"method_id", "uncertainty", "rationale", "calculation_refs"})
+        errors.extend(decision_policy_errors(advice, decision_context))
     calculations = valuation.get("calculation_refs") if isinstance(valuation, dict) else None
-    calculations_valid = not valuation_context or (
+    calculations_valid = not valuation_context and not is_deterministic_decision(decision_context) or (
         isinstance(calculations, list) and all(isinstance(ref, str) and ref in computed_ids for ref in calculations)
     )
     if (not isinstance(valuation, dict) or set(valuation) != expected_fields or not calculations_valid
@@ -1032,12 +1055,13 @@ def _validate_valuation_context(value: Any, expected_code: str | None = None) ->
     if "foundation" in value:
         _validate_fundamental_context(value["foundation"], expected_code)
     def validate_metrics(metrics: Any) -> None:
-        if not isinstance(metrics, list) or len(metrics) > 16:
+        if not isinstance(metrics, list) or len(metrics) > 20:
             raise ValueError("valuation metrics must be a bounded list")
         seen: set[str] = set()
         for metric in metrics:
             if (not isinstance(metric, dict) or set(metric) - {
                 "id", "value", "unit", "currency", "period", "as_of", "origin", "status", "reason", "basis", "verification",
+                "sample_count", "window_start", "window_end",
             } or not isinstance(metric.get("id"), str) or not metric["id"]
                     or len(metric["id"]) > 80 or metric["id"] in seen
                     or metric.get("status") not in ("computed", "not_computable")
@@ -1056,6 +1080,16 @@ def _validate_valuation_context(value: Any, expected_code: str | None = None) ->
                 or not re.fullmatch(r"-?\d+(?:\.\d+)?", metric["value"])
             ):
                 raise ValueError("computed valuation metrics need supplied numeric strings")
+            if "sample_count" in metric and (
+                type(metric["sample_count"]) is not int or not 0 <= metric["sample_count"] <= 1100
+            ):
+                raise ValueError("history sample count is invalid")
+            for key in ("window_start", "window_end"):
+                if key in metric:
+                    try:
+                        date.fromisoformat(metric[key])
+                    except (TypeError, ValueError):
+                        raise ValueError("history sample window is invalid") from None
             seen.add(metric["id"])
     validate_metrics(value.get("metrics"))
     if not isinstance(value.get("peers"), list) or len(value["peers"]) > 3:
@@ -1224,11 +1258,13 @@ def _v3_result_errors(
                       "conditions", "review_trigger", "evidence_refs"}
             if decision_context:
                 fields.update({"valuation", "recommendation", "metric_assessments"})
+                if is_deterministic_decision(decision_context):
+                    fields.add("review_trigger_ids")
             if (facts_only or not isinstance(advice, dict) or set(advice) != fields
-                    or advice.get("new_money") not in {"consider_buy", "wait", "avoid"}
-                    or advice.get("existing_position") not in {
+                    or advice.get("new_money") not in ("consider_buy", "wait", "avoid")
+                    or advice.get("existing_position") not in (
                         "hold", "reduce", "exit", "not_assessed",
-                    }
+                    )
                     or any(not isinstance(advice.get(field), str)
                            or not advice[field].strip() or len(advice[field]) > 240
                            for field in ("reason", "conditions", "review_trigger"))
@@ -1244,7 +1280,8 @@ def _v3_result_errors(
                 if advice["new_money"] == "consider_buy" and (
                     not market_context or market_context.get("status") != "available"
                     or not isinstance(market_context.get("price"), (int, float))
-                    or market_context.get("pe_approx") is None
+                    or not is_deterministic_decision(decision_context)
+                    and market_context.get("pe_approx") is None
                     and market_context.get("pb_approx") is None
                     or not advice["evidence_refs"]
                 ):
@@ -1914,8 +1951,9 @@ async def stock_research(request: Request):
             }
             if (not advice_required or context.get("decision_context") != decision_context
                     or not isinstance(decision_context, dict)
-                    or set(decision_context) != {"version", "objective", "required_metric_ids"}
-                    or decision_context.get("version") != _DECISION_CONTRACT_VERSION
+                    or decision_context.get("version") not in {_DECISION_CONTRACT_VERSION, LEGACY_DECISION_VERSION}
+                    or not is_deterministic_decision(decision_context)
+                    and set(decision_context) != {"version", "objective", "required_metric_ids"}
                     or not isinstance(decision_context.get("objective"), str)
                     or not decision_context["objective"].strip() or len(decision_context["objective"]) > 500
                     or not isinstance(decision_context.get("required_metric_ids"), list)
@@ -1924,6 +1962,8 @@ async def stock_research(request: Request):
                            for item in decision_context["required_metric_ids"])
                     or len(set(decision_context["required_metric_ids"])) != len(decision_context["required_metric_ids"])):
                 raise ValueError("decision_context must match the confirmed version, objective and visible computed metric IDs")
+            if is_deterministic_decision(decision_context):
+                validate_decision_policy(decision_context, valuation_context, context.get("market_context"))
         if object_type == "fund" and facts_only:
             raise ValueError("fund research requires official product excerpts, not company financial metrics")
         scope = plan.get("scope") if isinstance(plan.get("scope"), dict) else {}
@@ -1945,6 +1985,8 @@ async def stock_research(request: Request):
         if (not isinstance(max_repair_calls, int) or isinstance(max_repair_calls, bool)
                 or not 0 <= max_repair_calls <= cap["max_repair_calls"]):
             raise ValueError("repair call limit is outside the server capability")
+        if is_deterministic_decision(decision_context):
+            max_repair_calls = 0
         if len(documents) > max_documents:
             raise ValueError(f"at most {max_documents} documents are allowed")
         for doc in documents:
@@ -1988,8 +2030,11 @@ async def stock_research(request: Request):
             facts_only=facts_only, advice_required=advice_required,
             decision_required=bool(decision_context),
             valuation_required=bool(valuation_context),
+            deterministic_decision=is_deterministic_decision(decision_context),
         )
-        if decision_context:
+        if is_deterministic_decision(decision_context):
+            system += decision_policy_prompt()
+        elif decision_context:
             system += (
                 " This run uses stock-decision-v1. Its primary objective is the supplied "
                 "decision_context.objective; a follow-up question supplements, never replaces it. "
@@ -2119,7 +2164,7 @@ async def stock_research(request: Request):
                 model_request["market_context"] = context["market_context"]
                 model_request["background_claims"] = context["background_claims"]
                 if decision_context:
-                    model_request["decision_context"] = decision_context
+                    model_request["decision_context"] = model_decision_index(decision_context)
                 if valuation_context:
                     model_request["valuation_context"] = valuation_context
             if object_type == "fund":
@@ -2292,7 +2337,7 @@ async def stock_research(request: Request):
                 if moved:
                     attempt["envelope_fields_moved"] = moved
                     budget_adjustments.append("result_envelope_normalized")
-                return normalized, used
+                return project_decision_result(normalized, decision_context), used
             except LLMResponseFormatError as exc:
                 attempt["usage"] = exc.usage
                 retain_draft(exc.draft, _safe_error_detail(exc), exc.finish_reason)
