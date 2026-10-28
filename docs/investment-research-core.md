@@ -54,3 +54,20 @@ OS 提供只读 `/api/investment/research/core/capabilities`，返回与独立 C
 
 第二阶段离线验收在 OS 的 `tools/acceptance/research_preparation.py`，
 包括临时 API 能力握手、复合证据身份验证、跨标的绑定以及准备完成不能冒充分析完成。
+
+## 第三阶段离线分析
+
+`matrix.investment.analysis.AnalysisReplayInputs` 消费同一份 Schema 中的 `AnalysisContext`。
+它核对目标、父计划、上下文摘要、方法及授权，只生成可检视的精简模型请求数据。
+系统提示词仅有规则和输出字段；工具目录仍只有 ID、版本及短说明，不发送完整 Schema 或来源信任目录。
+原文明确标为不可信数据，不能当作指令。
+
+`replay_envelope` 包装假模型原文，特意不在包装时丢弃无效 JSON/无效建议：
+OS 先归档回执，再执行共享 Schema、引用图、方法覆盖、数值引用和建议维度检查。
+Agent 不负责计算、持久化父预算、判定完成或写 Vault。
+
+本模块没有调用真实 `LLMClient` 的入口，也没有新增服务路由。
+`require_analysis_enabled()` 的 live gate 保持关闭，不能拿离线回放绕过它发起真实模型请求。
+OS 的 `tools/acceptance/research_analysis.py` 提供跨仓隔离验收；不新增单元测试。
+真实数值提供方、元数据补全、自主补查/计划修订和真实建议质量仍是未完成工作，
+不能把假场景 `completed` 当作第三阶段全部完成。
