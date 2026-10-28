@@ -27,6 +27,7 @@ from .stock_decision_policy import (
     capital_return_ranges,
     valuation_calculation_ids, comparison_claim_errors,
 )
+from .stock_decision_tools import TOOLS_VERSION, decision_analysis_text
 
 router = APIRouter()
 logger = logging.getLogger("matrix.stock_research")
@@ -886,7 +887,7 @@ def _advice_quality_errors(
     check_metric_prose: bool = True,
 ) -> list[str]:
     errors: list[str] = []
-    text = advice["reason"] + " " + advice["conditions"]
+    text = advice["reason"] + " " + advice["conditions"] + " " + decision_analysis_text(advice)
     if isinstance(advice.get("valuation"), dict):
         text += " " + str(advice["valuation"].get("rationale") or "")
     if "回购尚未实施" in text or "暂未实施本次回购" in text:
@@ -1271,6 +1272,8 @@ def _v3_result_errors(
                 fields.update({"valuation", "recommendation", "metric_assessments"})
                 if is_deterministic_decision(decision_context):
                     fields.add("review_trigger_ids")
+                    if decision_context.get("decision_tools") is not None:
+                        fields.add("decision_analysis")
             if (facts_only or not isinstance(advice, dict) or set(advice) != fields
                     or advice.get("new_money") not in ("consider_buy", "wait", "avoid")
                     or advice.get("existing_position") not in (
@@ -1704,6 +1707,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "evidence_selection_version": _EVIDENCE_SELECTION_VERSION,
         "financial_metric_planner_version": _FINANCIAL_METRIC_PLANNER_VERSION,
         "decision_contract_version": _DECISION_CONTRACT_VERSION,
+        "decision_tools_version": TOOLS_VERSION,
         "valuation_data_version": _VALUATION_DATA_VERSION,
         "financial_metric_ids": [item[0] for item in _FINANCIAL_METRIC_INDEX],
         "supported": bool(all(limits.values()) and limits["output_tokens"] <= limits["total_tokens"]

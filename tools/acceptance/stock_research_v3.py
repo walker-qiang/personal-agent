@@ -51,6 +51,34 @@ def adapt_v2_fixture(advice, policy, mode=""):
         advice["valuation"]["calculation_refs"] = []
     if mode == "valuation-narrative-override":
         advice["valuation"]["basis"] = "模型改写的数值结论"
+    if "decision_tools" in policy:
+        tools = policy["decision_tools"]
+        selected, seen = [], set()
+        for case in tools["cases"]:
+            if case["tool_id"] not in seen and len(selected) < 2:
+                selected.append({"case_id": case["id"],
+                                 "implication": "离线情景用于检查价格承受能力，不是经营预测或买入规则。"})
+                seen.add(case["tool_id"])
+        selected_ids = {item["case_id"] for item in selected}
+        conditions = [item["id"] for item in tools["conditions"] if item["case_id"] in selected_ids][:2]
+        advice.pop("conditions", None)
+        advice["decision_analysis"] = {
+            "case_assessments": selected,
+            "current_price_reasoning": "离线验收结合条件测算解释当前价格下的行动，不证明投资建议正确。",
+            "condition_ids": conditions,
+            "unresolved_premise": "后续盈利是否持续低于所选压力情景仍没有足够证据判断。" if advice["valuation"]["status"] == "unknown" else "",
+        }
+        if mode == "valuation-no-price-reasoning":
+            advice["decision_analysis"]["current_price_reasoning"] = ""
+        elif mode == "valuation-forged-case":
+            advice["decision_analysis"]["case_assessments"][0]["case_id"] = "invented:stress"
+        elif mode == "valuation-forged-condition":
+            advice["decision_analysis"]["condition_ids"] = ["invented:price"]
+        elif mode == "valuation-generic-unknown":
+            advice["valuation"].update({"status": "unknown", "uncertainty": "business_uncertainty"})
+            advice["decision_analysis"]["unresolved_premise"] = ""
+        elif mode == "valuation-conflicting-condition":
+            advice["conditions"] = "程序未计算的价格会自动触发买入。"
     return advice
 
 
@@ -2057,6 +2085,71 @@ async def replay_prepared_response(path: str) -> None:
     }))
 
 
+async def replay_decision_tools(path: str) -> None:
+    """Use the actual saved inputs with a fake response, never update the opinion."""
+    from matrix.server.routes.stock_decision_tools import decision_analysis_errors
+    recorded = json.loads(Path(path).read_text())
+    payload = recorded["updated_payload"]
+    policy = payload["plan"]["decision_context"]
+    original = recorded["result"]["episode"]["investment_advice"]
+    assert decision_analysis_errors(original, policy)
+    untouched = json.dumps(recorded["result"], sort_keys=True)
+    budget = payload["plan"]["budget"]
+    env = {name: str(budget[field]) for name, field in (
+        ("MATRIX_STOCK_V3_INPUT_TOKENS", "input_tokens"),
+        ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "output_tokens"),
+        ("MATRIX_STOCK_V3_TOTAL_TOKENS", "total_tokens"),
+    )}
+
+    class DecisionReplayLLM(FakeLLM):
+        model = payload["plan"]["model"]
+
+        def complete_json_budgeted(self, system, messages, maximum, schema=None):
+            self.calls.append((system, messages, maximum))
+            value = json.loads(messages[0]["content"])
+            assert value["decision_context"]["decision_tools"]["cases"]
+            assert any("24.71%" in segment["text"] for segment in value["evidence_segments"])
+            assert all("summary" not in item for item in value["decision_context"]["decision_tools"]["cases"])
+            assert route.measure_budget([system, messages[0]["content"]], overhead_tokens=2048).input_tokens <= budget["input_tokens"]
+            assert "conditions" not in schema["properties"]["episode"]["properties"]["investment_advice"]["properties"]
+            evidence = value["available_evidence_candidates"][0]["evidence_ref"]
+            advice = json.loads(json.dumps(original))
+            advice["evidence_refs"] = [evidence]
+            advice["valuation"]["evidence_refs"] = [evidence]
+            adapt_v2_fixture(advice, policy)
+            return {
+                "episode": {
+                    "summary": "真实输入的离线协议回放，不代表真实模型生成了新的建议。",
+                    "pending_questions": [],
+                    "conclusion": {"supported": "压力测算输入可追溯。", "unverified": "未来盈利仍有不确定性。",
+                                   "impact": "离线验收不改变真实投资意见。"},
+                    "claim_checks": [
+                        {"claim_id": item, "status": "unresolved", "finding": "离线验收不改变真实判断。",
+                         "evidence_refs": []} for item in value["required_claim_ids"]
+                    ],
+                    "investment_advice": advice,
+                },
+                "thesis_patch": [], "evidence_candidates": [],
+            }, self._usage()
+
+    llm = DecisionReplayLLM()
+    request = Request(llm, payload)
+    request.url = SimpleNamespace(path="/api/research/investment.v3")
+    with patch.dict(os.environ, env):
+        response = await route.stock_research(request)
+    if not isinstance(response, dict):
+        raise AssertionError(json.loads(response.body).get("details", {}).get("validation_errors"))
+    assert len(llm.calls) == response["model_calls"] == 1
+    assert json.dumps(recorded["result"], sort_keys=True) == untouched
+    print(json.dumps({
+        "real_model_calls": 0, "fake_calls": 1, "actual_saved_inputs": True,
+        "old_generic_advice_requires_decision_analysis": True,
+        "decision_cases": len(policy["decision_tools"]["cases"]),
+        "confirmed_input_budget_preserved": True, "saved_opinion_unchanged": True,
+        "investment_quality_verified": False,
+    }))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--serve"]:
         serve()
@@ -2068,5 +2161,7 @@ if __name__ == "__main__":
         asyncio.run(replay_current_response(sys.argv[2]))
     elif sys.argv[1:2] == ["--recorded-prepared-response"]:
         asyncio.run(replay_prepared_response(sys.argv[2]))
+    elif sys.argv[1:2] == ["--recorded-decision-tools"]:
+        asyncio.run(replay_decision_tools(sys.argv[2]))
     else:
         asyncio.run(main())

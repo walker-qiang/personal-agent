@@ -7,6 +7,10 @@ from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import re
 from typing import Any
+from .stock_decision_tools import (
+    apply_decision_analysis_schema, decision_analysis_errors,
+    decision_condition_text, validate_decision_tools, decision_analysis_text,
+)
 
 DECISION_VERSION = "stock-decision-v2"
 LEGACY_DECISION_VERSION = "stock-decision-v1"
@@ -30,6 +34,7 @@ def validate_decision_policy(
                 "valuation_methods", "review_triggers"}
     if not required <= set(policy) or set(policy) - required - {
         "latest_report_period", "capital_return_facts", "analysis_profile", "reported_explanations", "comparisons",
+        "decision_tools",
     }:
         raise ValueError("decision-v2 requires program-owned method and review-trigger indexes")
     try:
@@ -90,6 +95,7 @@ def validate_decision_policy(
     validate_capital_return_facts(policy, documents or [], code)
     validate_prepared_evidence(policy, documents or [])
     validate_comparisons(policy, code)
+    validate_decision_tools(policy, valuation_context, market_context)
 
 
 def validate_prepared_evidence(policy: dict[str, Any], documents: list[dict[str, Any]]) -> None:
@@ -218,6 +224,7 @@ def comparison_claim_errors(advice: dict[str, Any], policy: dict[str, Any], summ
     assessments = advice.get("metric_assessments")
     assessments = assessments if isinstance(assessments, list) else []
     text = " ".join([advice["reason"], str(summary), str(valuation.get("rationale") or ""),
+                     decision_analysis_text(advice),
                      *(item["explanation"] for item in assessments
                        if isinstance(item, dict) and isinstance(item.get("explanation"), str))])
     refs = valuation.get("calculation_refs", [])
@@ -370,6 +377,14 @@ def model_decision_index(policy: dict[str, Any]) -> dict[str, Any]:
                 })
             compact.append(value)
         result["comparisons"] = compact
+    if result.get("decision_tools") is not None:
+        tools = result["decision_tools"]
+        result["decision_tools"] = {
+            **tools,
+            "cases": [{key: value for key, value in case.items() if key != "summary"} for case in tools["cases"]],
+            "conditions": [{key: condition[key] for key in ("id", "case_id", "label")}
+                           for condition in tools["conditions"]],
+        }
     return result
 
 
@@ -411,7 +426,14 @@ def decision_policy_prompt() -> str:
         "recomputing figures, repeating valuation categories or exposing internal field IDs. "
         "Use review_trigger_ids from the supplied index; do not invent dates or free-text "
         "review triggers. Do not request already-computed fields or optional inputs of "
-        "a different method. Technical/protocol failure is not a watch recommendation."
+        "a different method. Technical/protocol failure is not a watch recommendation. "
+        "decision_tools indexes computed sensitivities and conditions. In decision_analysis explain "
+        "cases from two distinct available tools (all if fewer), give current_price_reasoning and "
+        "matching condition_ids; do not return conditions prose. Explain how each case affects the "
+        "action. Cases are conditional, not forecasts, worst-case bounds, return hurdles or fair prices; "
+        "inherit input verification limits. Peer parity retains its common-period basis. Earnings yield "
+        "is not expected return. Deterioration alone does not make value unknowable: weigh price against "
+        "stress; if still unknown, name a specific unresolved_premise. Such a decision remains limited."
     )
 
 
@@ -443,6 +465,7 @@ def apply_decision_schema(advice: dict[str, Any], policy: dict[str, Any]) -> Non
         )},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 240},
     })
+    apply_decision_analysis_schema(advice, policy)
 
 
 def review_text(policy: dict[str, Any], ids: Any) -> str:
@@ -467,6 +490,8 @@ def project_decision_result(result: Any, policy: dict[str, Any] | None) -> Any:
     # an action, a valuation judgment, or a fabricated citation.
     advice.setdefault("new_money", _new_money(advice.get("recommendation")))
     advice.setdefault("review_trigger", review_text(policy, advice.get("review_trigger_ids")))
+    if policy.get("decision_tools") is not None and isinstance(advice.get("decision_analysis"), dict):
+        advice.setdefault("conditions", decision_condition_text(policy, advice["decision_analysis"].get("condition_ids")))
     if isinstance(advice.get("valuation"), dict):
         valuation = dict(advice["valuation"])
         method = next((item for item in policy["valuation_methods"]
@@ -512,4 +537,5 @@ def decision_policy_errors(advice: dict[str, Any], policy: dict[str, Any]) -> li
         errors.append("review_trigger_ids must select supplied future/event triggers without invented dates")
     if advice.get("new_money") != _new_money(advice.get("recommendation")):
         errors.append("new_money is program-derived from the recommendation")
+    errors.extend(decision_analysis_errors(advice, policy))
     return errors
