@@ -14,6 +14,7 @@ SCHEMA_ID = "urn:personal-os:investment-research:core:v1"
 RECORD_KINDS = frozenset({
     "Instrument", "Evidence", "Observation", "ToolSpec", "Calculation",
     "Permission", "Plan", "Result", "Event",
+    "Publisher", "Candidate", "MethodSpec", "PreparationRequest", "Attempt", "Preparation",
 })
 
 

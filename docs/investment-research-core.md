@@ -1,6 +1,6 @@
 # 投资研究核心契约
 
-本轮在 `codex/investment-research-core` 建立第一阶段的消费端，不修改现用 V3 研究路由。
+在 `codex/investment-research-core` 建立契约与资料准备消费端，不修改现用 V3 研究路由。
 长期目标是由 OS 持有资料、公式、执行及写回，Agent 负责规划、补查意图和建议分析。
 
 ## 所有权
@@ -38,3 +38,19 @@ contract.validate("Plan", proposed_plan)
 
 跨仓验收入口在 OS 的 `tools/acceptance/research_core.py`，全部使用假数据和临时资产仓。
 不新增单元测试、不运行真实模型、不直接对真实 Vault 执行迁移或 Git 操作。
+
+## 第二阶段资料准备
+
+OS 提供只读 `/api/investment/research/core/capabilities`，返回与独立 CLI 同源的契约及注册信息。
+`ResearchCapabilities` 读取这一可信响应；`PreparedResearchInputs` 绑定操作和标的身份、
+引擎、方法及契约摘要，避免把另一标的或旧版本输出当成本轮输入。
+
+`tool_index(method_id)` 仅返回工具 ID、版本和短说明。完整 Schema、来源目录和恢复快照不放进模型提示词。
+本仓仍不执行任何金融公式，也不读取相邻 OS 仓源码作为运行时集成方式。
+
+`Preparation.ready` 只表示资料准备要求得到满足，不是投资建议。
+全部新方法仍 `analysis_ready=false`；`require_analysis_enabled()` 会拒绝模型执行，
+离线回放也不能作为实网研究输入。第三阶段完成方法闭环、权限/预算绑定和建议质量验收后再启用。
+
+第二阶段离线验收在 OS 的 `tools/acceptance/research_preparation.py`，
+包括临时 API 能力握手、复合证据身份验证、跨标的绑定以及准备完成不能冒充分析完成。
