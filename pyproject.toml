@@ -11,6 +11,9 @@ dependencies = [
     "python-multipart>=0.0.6",
     "bcrypt>=4.0.0",
     "PyJWT>=2.8.0",
+    "jsonschema>=4.18,<5",
+    "rfc3339-validator>=0.1.4,<1",
+    "rfc3986-validator>=0.1.1,<1",
 ]
 
 [project.optional-dependencies]

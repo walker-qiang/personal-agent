@@ -5,7 +5,7 @@
 - 不修改 `personal-os` 代码；与 `personal-os` 的集成通过 HTTP 代理（`agent.go`）、
   远程 Tool Provider 和共享只读 SQLite cache 实现。
 - 不把运行态提交到 Git：`.env`、`var/`、`__pycache__`、`*.pyc`、`dist`、`build` 都必须忽略。
-- `var/` 保存本地 cache 和可丢弃的运行态，不是 durable fact source，不提交。
+- `var/` 不是 durable fact source，也不提交；但会话、恢复检查点、模型/工具原始结果、授权和审计等可能不可重建，在完成受控归档前不得按普通缓存清理。投研重构的数据保全由 `personal-os` 工具统一执行，Agent 不直接迁移 Vault。
 - 配置指向 `personal-assets` 的 Skills、RAG 和 Memory projection 只允许读取；
   `personal-agent` 不直接修改 Vault，也不对 Vault 执行 Git 操作。
 - 默认 Agent mode 为只读；受控写操作必须通过 `personal-os` API、Runtime approval 和明确 allowlist。
