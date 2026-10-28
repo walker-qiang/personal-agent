@@ -81,3 +81,10 @@ OS 的 `tools/acceptance/research_analysis.py` 提供跨仓隔离验收；不新
 原生准备目前是冻结分析计划之前的阶段，不是 Agent 可自行启用的真实分析路径。
 市场 PE/PB 参考、相关指数和日级报告 NAV 不能被解释成报告倍数、完整穿透关系或实时交易溢价。
 全部方法的 live gate 保持关闭，本仓没有添加付费模型调用或 Vault 写入能力。
+
+## 同一研究范围
+
+`CoordinatedResearchInputs` 消费 OS 的 `ResearchRun`，核对稳定研究 ID、范围指纹、已确认身份、
+冻结计划、准备子任务与结果归属。预算和计划生成仍由 OS 持有；Agent 不创建新预算或复写身份。
+源自公共资料的上下文可只读检视，但 `AnalysisReplayInputs` 明确拒绝它用于假模型重放。
+当前没有任何真实模型综合入口，不能因整轮数据账本贯通而宣称投资建议已可用。

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-from .preparation import ResearchCapabilities
+from .preparation import PreparedResearchInputs, ResearchCapabilities
 
 
 SYSTEM_PROMPT = """You are an investment research analyst. Return one JSON object with
@@ -42,6 +42,8 @@ class AnalysisReplayInputs:
         expected_plan_id: str, expected_instrument_id: str, expected_context_hash: str,
     ) -> AnalysisReplayInputs:
         capabilities.contract.validate("AnalysisContext", payload)
+        if payload["source_mode"] != "offline_replay":
+            raise ValueError("real source inputs are not authorized for this replay-only synthesis path")
         plan, instrument, method = payload["plan"], payload["instrument"], payload["method"]
         methods = {item["method_id"]: item for item in json.loads(capabilities.payload_json)["methods"]}
         if (
@@ -112,3 +114,58 @@ class AnalysisReplayInputs:
         }
         prefix = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         return prefix[:-1] + ',"draft":' + raw_draft + "}"
+
+
+@dataclass(frozen=True)
+class CoordinatedResearchInputs:
+    """Consume one OS-owned scope without planning, calculating or calling LLMs."""
+
+    capabilities: ResearchCapabilities
+    payload_json: str
+
+    @classmethod
+    def from_payload(
+        cls, capabilities: ResearchCapabilities, payload: dict[str, Any], *,
+        expected_research_id: str, expected_instrument_id: str, expected_scope_fingerprint: str,
+    ) -> CoordinatedResearchInputs:
+        capabilities.contract.validate("ResearchRun", payload)
+        cap = json.loads(capabilities.payload_json)
+        if (
+            payload["research_id"] != expected_research_id
+            or payload["instrument"]["instrument_id"] != expected_instrument_id
+            or payload["scope_fingerprint"] != expected_scope_fingerprint
+            or payload["engine_version"] != cap["engine_version"]
+            or payload["contract_digest"] != capabilities.contract.digest
+        ):
+            raise ValueError("research scope, target, engine or contract differs from trusted inputs")
+        methods = {item["method_id"]: item for item in cap["methods"]}
+        plan, context, result = payload["plan"], payload["context"], payload["result"]
+        if plan is not None:
+            method = methods.get(plan["method_id"])
+            if (
+                plan["plan_id"] != expected_research_id
+                or plan["instrument_id"] != expected_instrument_id
+                or method is None or method["version"] != plan["method_version"]
+                or set(plan["required_questions"]) != set(method["required_questions"])
+            ):
+                raise ValueError("frozen plan differs from the parent scope or registered method")
+        if context is not None and (
+            context["plan"] != plan or context["instrument"] != payload["instrument"]
+            or context["source_mode"] != payload["source_mode"]
+        ):
+            raise ValueError("analysis context changed the frozen plan, instrument or source mode")
+        for prepared in payload["preparations"]:
+            if prepared["source_mode"] != payload["source_mode"]:
+                raise ValueError("preparation source mode differs from the parent")
+            PreparedResearchInputs.from_payload(
+                capabilities, prepared, expected_preparation_id=prepared["preparation_id"],
+                expected_instrument_id=expected_instrument_id,
+            )
+        if result is not None and (
+            result["plan_id"] != expected_research_id or result["instrument_id"] != expected_instrument_id
+            or result["status"] != payload["status"]
+        ):
+            raise ValueError("research result differs from the parent identity or status")
+        if payload["source_mode"] == "public_retrieval" and payload["usage"]["model_calls"] != 0:
+            raise ValueError("live model usage is not enabled in this research release")
+        return cls(capabilities, json.dumps(payload, ensure_ascii=False))
