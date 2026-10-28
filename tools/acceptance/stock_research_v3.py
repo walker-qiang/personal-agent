@@ -195,6 +195,15 @@ class IntegrationLLM(FakeLLM):
             }
             documents = payload.get("documents", [])
         self.calls.append(plan["plan_id"])
+        policy = context.get("decision_context")
+        if policy and policy.get("decision_tools") is not None:
+            begin = system.index('{"episode":', system.index("The investment-research-v3 result contract is strict."))
+            example = json.loads(system[begin:system.index(". episode.summary", begin)])
+            example_advice = example["episode"]["investment_advice"]
+            advice_schema = schema["properties"]["episode"]["properties"]["investment_advice"]
+            assert set(example_advice) == set(advice_schema["required"])
+            assert "conditions" not in example_advice
+            assert "decision_analysis" in example_advice
         if plan["question"] == "response-failed":
             raise LLMResponseFormatError(
                 "response root must be a JSON object",
@@ -2150,6 +2159,56 @@ async def replay_decision_tools(path: str) -> None:
     }))
 
 
+async def prepare_quarantined_recovery(path: str, output: str) -> None:
+    """Revalidate the exact paid response in-process; no provider or asset writes."""
+    recorded = json.loads(Path(path).read_text())
+    payload = recorded["payload"]
+    from matrix.llm.protocol import parse_json_object_response
+    original = parse_json_object_response(recorded["raw_result_draft"])
+    budget = payload["plan"]["budget"]
+    used = recorded["recorded_usage"]
+
+    class QuarantinedLLM(FakeLLM):
+        model = payload["plan"]["model"]
+
+        def complete_json_budgeted(self, system, messages, maximum, schema=None):
+            self.calls.append((system, messages, maximum))
+            begin = system.index('{"episode":', system.index("The investment-research-v3 result contract is strict."))
+            example = json.loads(system[begin:system.index(". episode.summary", begin)])["episode"]["investment_advice"]
+            advice_schema = schema["properties"]["episode"]["properties"]["investment_advice"]
+            assert set(example) == set(advice_schema["required"])
+            assert "conditions" not in example and "decision_analysis" in example
+            return json.loads(json.dumps(original)), used
+
+    env = {name: str(budget[field]) for name, field in (
+        ("MATRIX_STOCK_V3_INPUT_TOKENS", "input_tokens"),
+        ("MATRIX_STOCK_V3_OUTPUT_TOKENS", "output_tokens"),
+        ("MATRIX_STOCK_V3_TOTAL_TOKENS", "total_tokens"),
+    )}
+    llm = QuarantinedLLM()
+    request = Request(llm, payload)
+    request.url = SimpleNamespace(path="/api/research/investment.v3")
+    with patch.dict(os.environ, env):
+        response = await route.stock_research(request)
+    if not isinstance(response, dict):
+        raise AssertionError(json.loads(response.body).get("details", {}).get("validation_errors"))
+    assert len(llm.calls) == response["model_calls"] == 1
+    response.pop("private_diagnostics", None)
+    response["usage"] = {"call_1": used}
+    target = Path(output)
+    target.touch(mode=0o600, exist_ok=True)
+    target.chmod(0o600)
+    target.write_text(json.dumps({
+        "version": "stock-response-recovery-v1",
+        "run_id": recorded["run_id"], "diagnostics_hash": recorded["diagnostics_hash"],
+        "draft_hash": recorded["draft_hash"], "response": response,
+    }, ensure_ascii=False))
+    print(json.dumps({
+        "additional_real_model_calls": 0, "preserved_model_calls": 1,
+        "full_agent_validation_passed": True, "candidate": str(target),
+    }))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--serve"]:
         serve()
@@ -2163,5 +2222,7 @@ if __name__ == "__main__":
         asyncio.run(replay_prepared_response(sys.argv[2]))
     elif sys.argv[1:2] == ["--recorded-decision-tools"]:
         asyncio.run(replay_decision_tools(sys.argv[2]))
+    elif sys.argv[1:2] == ["--prepare-quarantined-recovery"]:
+        asyncio.run(prepare_quarantined_recovery(sys.argv[2], sys.argv[3]))
     else:
         asyncio.run(main())

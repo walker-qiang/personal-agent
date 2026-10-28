@@ -221,6 +221,7 @@ def _v3_contract_prompt(
     *, facts_only: bool, advice_required: bool = False, decision_required: bool = False,
     valuation_required: bool = False,
     deterministic_decision: bool = False,
+    decision_tools: dict[str, Any] | None = None,
 ) -> str:
     numeric_claims = (
         ', "numeric_claims":[{"metric_id":"<metric id>","value":"<exact supplied value>"}]'
@@ -247,13 +248,31 @@ def _v3_contract_prompt(
         if advice_required else ""
     )
     if deterministic_decision:
+        decision_analysis = ""
+        if decision_tools is not None:
+            cases, seen = [], set()
+            for case in decision_tools["cases"]:
+                if case["tool_id"] not in seen and len(cases) < 2:
+                    cases.append({"case_id": case["id"], "implication": "<effect on the action>"})
+                    seen.add(case["tool_id"])
+            selected = {item["case_id"] for item in cases}
+            example = {
+                "case_assessments": cases,
+                "current_price_reasoning": "<why this action follows at the supplied price>",
+                "condition_ids": [item["id"] for item in decision_tools["conditions"]
+                                  if item["case_id"] in selected][:2],
+                "unresolved_premise": "<specific unresolved premise, or empty>",
+            }
+            decision_analysis = ',"decision_analysis":' + json.dumps(example, separators=(",", ":"))
         advice = (
             ',"investment_advice":{"recommendation":"<buy|hold|sell|watch>","existing_position":"not_assessed",'
-            '"reason":"<investment reasoning>","conditions":"<what changes the action>",'
-            '"review_trigger_ids":["<supplied trigger ID>"],"evidence_refs":[],'
+            '"reason":"<investment reasoning>",'
+            + ("" if decision_tools is not None else '"conditions":"<what changes the action>",')
+            + '"review_trigger_ids":["<supplied trigger ID>"],"evidence_refs":[],'
             '"valuation":{"status":"<undervalued|fair|overvalued|unknown>","method_id":"<supplied method ID>",'
             '"uncertainty":"<none|business_uncertainty|data_missing>","rationale":"<valuation reasoning>",'
-            '"evidence_refs":[],"calculation_refs":[]},"metric_assessments":[]}'
+            '"evidence_refs":[],"calculation_refs":[]},"metric_assessments":[]'
+            + decision_analysis + '}'
         )
     episode_example = (
         '{"summary":"<analysis>","pending_questions":["<question>"]'
@@ -276,7 +295,8 @@ def _v3_contract_prompt(
         '"fact_id":"<stable fact id>",'
         '"statement":"<what the quote establishes>"}]}. '
         "episode.summary may be empty, pending_questions must be an array of strings, "
-        "and arrays may be empty. A thesis_patch requires a matching evidence_candidate "
+        "and array lengths follow the supplied schema and required_claim_ids. "
+        "A thesis_patch requires a matching evidence_candidate "
         "and must use evidence_refs in the exact source_id:fact_id format. "
         "Evidence candidates must select an excerpt_id from evidence_segments; never "
         "invent or return quote text. The application will materialize the exact quote. "
@@ -2050,6 +2070,7 @@ async def stock_research(request: Request):
             decision_required=bool(decision_context),
             valuation_required=bool(valuation_context),
             deterministic_decision=is_deterministic_decision(decision_context),
+            decision_tools=decision_context.get("decision_tools") if decision_context else None,
         )
         if is_deterministic_decision(decision_context):
             system += decision_policy_prompt()

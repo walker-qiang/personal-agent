@@ -486,12 +486,14 @@ def project_decision_result(result: Any, policy: dict[str, Any] | None) -> Any:
     if not isinstance(episode, dict) or not isinstance(episode.get("investment_advice"), dict):
         return result
     advice = dict(episode["investment_advice"])
-    # setdefault preserves conflicting model fields for rejection, never rewrites
-    # an action, a valuation judgment, or a fabricated citation.
+    # Opinions and references remain untouched. Conditions are only a rendering
+    # of validated IDs; obsolete model prose cannot override that rendering.
     advice.setdefault("new_money", _new_money(advice.get("recommendation")))
     advice.setdefault("review_trigger", review_text(policy, advice.get("review_trigger_ids")))
     if policy.get("decision_tools") is not None and isinstance(advice.get("decision_analysis"), dict):
-        advice.setdefault("conditions", decision_condition_text(policy, advice["decision_analysis"].get("condition_ids")))
+        conditions = decision_condition_text(policy, advice["decision_analysis"].get("condition_ids"))
+        if conditions:
+            advice["conditions"] = conditions
     if isinstance(advice.get("valuation"), dict):
         valuation = dict(advice["valuation"])
         method = next((item for item in policy["valuation_methods"]
