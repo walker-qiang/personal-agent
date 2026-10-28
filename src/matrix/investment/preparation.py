@@ -73,6 +73,19 @@ class PreparedResearchInputs:
             raise ValueError("preparation method version differs from trusted capabilities")
         if payload["status"] == "ready" and not method_id:
             raise ValueError("ready preparation requires a selected supported method")
+        resolved = payload.get("instrument")
+        if resolved is not None and resolved["instrument_id"] != expected_instrument_id:
+            raise ValueError("resolved metadata belongs to another instrument")
+        known_evidence = {item["evidence_id"] for item in payload["evidence"]}
+        for claim in payload.get("metadata_claims", []):
+            if not set(claim["evidence_refs"]) <= known_evidence:
+                raise ValueError("metadata claim references evidence outside this preparation")
+        if resolved is not None:
+            if not set(resolved["source_refs"]) <= known_evidence:
+                raise ValueError("resolved metadata has unknown source references")
+            related = resolved.get("related_index")
+            if related is not None and not set(related["source_refs"]) <= known_evidence:
+                raise ValueError("related index has unknown source references")
         return cls(capabilities, json.dumps(payload, ensure_ascii=False))
 
     def snapshot(self) -> dict[str, Any]:
