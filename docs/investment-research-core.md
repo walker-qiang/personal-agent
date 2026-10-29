@@ -88,3 +88,18 @@ OS 的 `tools/acceptance/research_analysis.py` 提供跨仓隔离验收；不新
 冻结计划、准备子任务与结果归属。预算和计划生成仍由 OS 持有；Agent 不创建新预算或复写身份。
 源自公共资料的上下文可只读检视，但 `AnalysisReplayInputs` 明确拒绝它用于假模型重放。
 当前没有任何真实模型综合入口，不能因整轮数据账本贯通而宣称投资建议已可用。
+
+## 原生财务与跟踪关系
+
+`research-native-valuations-v7` 新增 `financial_data` 与 `index_valuation` 证据类型。
+前者是提供方编制的财务数值，不代替原始 `financial_report` 中的经营与风险证据。
+后者必须保留 `tracking_index` 和 `index_reference`；消费端检查与产品条款证据的关联，
+不把 `related_index`、净值或产品名称当作实际跟踪关系。
+
+股票 PB、收入 TTM 与归母净利润 TTM 由 Go 持有和重算。
+Agent 仍不拼接 EPS，不估算缺项，不因为公式正确就提升提供方数值的核验状态。
+精简提示只增加来源语义、跟踪关系和穿透标记，不加入详细适配器说明。
+
+跨仓验证使用 OS 的 `tools/acceptance/research_valuations.py`。
+真实数据准备与真实建议有用性分别验收；盘中时点设计、必要财报和基金穿透仍未闭环，
+公开上下文继续禁止进入假回放或真实模型执行。

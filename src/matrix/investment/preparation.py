@@ -83,9 +83,22 @@ class PreparedResearchInputs:
         if resolved is not None:
             if not set(resolved["source_refs"]) <= known_evidence:
                 raise ValueError("resolved metadata has unknown source references")
-            related = resolved.get("related_index")
-            if related is not None and not set(related["source_refs"]) <= known_evidence:
-                raise ValueError("related index has unknown source references")
+            for field in ("related_index", "tracking_index"):
+                reference = resolved.get(field)
+                if reference is not None and not set(reference["source_refs"]) <= known_evidence:
+                    raise ValueError(f"{field} has unknown source references")
+        for evidence in payload["evidence"]:
+            reference = evidence.get("index_reference")
+            if reference is not None:
+                if (
+                    evidence["document_type"] != "index_valuation"
+                    or evidence.get("subject_basis") != "confirmed_tracking_index"
+                    or (resolved is not None and (
+                        reference != resolved.get("tracking_index")
+                        or not set(reference["source_refs"]) <= known_evidence
+                    ))
+                ):
+                    raise ValueError("index valuation has no preserved product tracking evidence")
         return cls(capabilities, json.dumps(payload, ensure_ascii=False))
 
     def snapshot(self) -> dict[str, Any]:
