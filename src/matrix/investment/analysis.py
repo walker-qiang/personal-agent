@@ -21,6 +21,8 @@ Index multiples are linked market references, not proof of fair value or fund
 lookthrough. Missing data is not an investment reason to watch.
 Use the supplied frozen valuation time; it is not necessarily the research start
 or the time you answer. Do not update it or treat a restored snapshot as live.
+Use the supplied question-specific issuer sections. A report cover, contents list
+or summary is not full-report evidence; section coverage is not a valuation conclusion.
 Keep existing_position=not_assessed. Every answer, assessment and risk needs
 valid refs. Numeric prose must use {{observation_id}} for supplied observations;
 decision refs must cite the execution price or NAV, directly or through a Go
@@ -98,6 +100,24 @@ def _validate_temporal_context(context: dict[str, Any]) -> None:
         ):
             raise ValueError("observation follows its source receipt or valuation cutoff")
 
+def _validate_stock_excerpts(context: dict[str, Any]) -> None:
+    if context["instrument"]["kind"] != "equity":
+        return
+    sources = {item["evidence_id"]: item for item in context["evidence"]}
+    seen = set()
+    for excerpt in context["excerpts"]:
+        key = (excerpt["evidence_ref"], excerpt.get("question_id"))
+        evidence = sources.get(excerpt["evidence_ref"])
+        if (
+            key in seen or evidence is None or evidence.get("report_form") != "full_report"
+            or excerpt.get("question_id") not in ("business_quality", "financial_quality", "risk_factors")
+            or excerpt.get("start_byte") is None or excerpt.get("end_byte") is None
+            or excerpt["end_byte"] - excerpt["start_byte"] != len(excerpt["text"].encode("utf-8"))
+            or not excerpt.get("source_text_hash")
+        ):
+            raise ValueError("stock excerpt has no program-selected full-report topic and exact UTF-8 range")
+        seen.add(key)
+
 
 @dataclass(frozen=True)
 class AnalysisReplayInputs:
@@ -115,6 +135,7 @@ class AnalysisReplayInputs:
         plan, instrument, method = payload["plan"], payload["instrument"], payload["method"]
         _validate_index_links(payload)
         _validate_temporal_context(payload)
+        _validate_stock_excerpts(payload)
         methods = {item["method_id"]: item for item in json.loads(capabilities.payload_json)["methods"]}
         if (
             plan["plan_id"] != expected_plan_id
@@ -162,7 +183,8 @@ class AnalysisReplayInputs:
             "evidence": [
                 {**{key: item[key] for key in
                  ("evidence_id", "document_type", "published_at", "report_period", "source_url")},
-                 **({"index_reference": item["index_reference"]} if "index_reference" in item else {})}
+                 **({"index_reference": item["index_reference"]} if "index_reference" in item else {}),
+                 **({"report_form": item["report_form"]} if "report_form" in item else {})}
                 for item in data["evidence"]
             ],
             "observations": data["observations"],
@@ -233,6 +255,7 @@ class CoordinatedResearchInputs:
         if context is not None:
             _validate_index_links(context)
             _validate_temporal_context(context)
+            _validate_stock_excerpts(context)
         for prepared in payload["preparations"]:
             if prepared["source_mode"] != payload["source_mode"]:
                 raise ValueError("preparation source mode differs from the parent")
