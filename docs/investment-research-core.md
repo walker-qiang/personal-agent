@@ -149,3 +149,19 @@ Agent 不选择发布者账号、不推导机构 ID、不绕过访问拒绝，�
 新约束的跨仓隔离验收在 OS 的 `tools/acceptance/research_valuation_basis.py`。
 匿名公开验证只检查参考数据和明确阻断，不连接真实 `LLMClient`，
 不将假回放成功当作真实建议质量或 App 可用性通过。
+
+## 可复用基本面规则
+
+`research-fundamental-rules-v11` 消费共享 `ValuationRule`，同一币种和财务画像的规则
+跨标的复用，不由模型逐标的生成 PE/PB。
+提供方明确的银行/通用类型及年度、已实施分红事实由 Go 核验，
+先补足必要事实，再等待缺失的投资参数批准。
+
+综合只发送选中规则、计算结果和必要直接输入，不发送全部模板或原始年度数值表。
+银行 PB-ROE、非金融盈利收益率和 DDM 均是带来源及假设的条件结果，
+不是审计内在价值、FCFE 或未来承诺；相关模型也不算独立确认。
+公司评估使用 `conditional_fundamental_scenario` 并引用选中规则全部假设；
+程序确认的方法分歧使用 `uncertain`，不得改写成正常，也不能给出违背保守入场条件的买入建议。
+
+OS 的 `tools/acceptance/research_fundamentals.py` 覆盖跨标的复用、内部补数及建议约束。
+新方法仍不连接真实模型或 App，真实建议的有用性未因合成回放成功而通过。

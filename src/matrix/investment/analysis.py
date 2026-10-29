@@ -24,12 +24,16 @@ or the time you answer. Do not update it or treat a restored snapshot as live.
 Use the supplied question-specific issuer sections. A report cover, contents list
 or summary is not full-report evidence; section coverage is not a valuation conclusion.
 Historical positions and peer snapshots are descriptive relative pricing, not
-intrinsic value. Company valuation uses only an approved conditional multiple
-scenario, with valuation_basis=conditional_multiple_scenario and every configured
-assumption_id in assumption_refs. Disclose its conditional nature; never present
-an assumption as an observed fact or invent missing scenario values.
-When required_margin_pct is configured, a buy recommendation must cite the Go
-conditional margin calculation and satisfy its conditional_entry_reference.
+intrinsic value. With a selected fundamental rule, cite the Go fundamental band,
+use valuation_basis=conditional_fundamental_scenario and every selected rule
+assumption_id in assumption_refs. Its classification code means under, inside
+both models, over, or method disagreement; use uncertain for disagreement, not
+fair. Historical anchors are not forecasts; earnings capitalization is not FCFE,
+and correlated models are not independent confirmations. Otherwise the approved
+multiple scenario uses conditional_multiple_scenario and its policy assumptions.
+Disclose conditional results; never turn assumptions into facts or invent inputs.
+A buy recommendation must cite and satisfy the applicable Go entry reference
+and its approved required margin; do not average away model disagreement.
 Keep existing_position=not_assessed. Every answer, assessment and risk needs
 valid refs. Numeric prose must use {{observation_id}} for supplied observations;
 decision refs must cite the execution price or NAV, directly or through a Go
@@ -39,7 +43,8 @@ must have calculation_ref=null. Do not choose execution status or result IDs.
 Output fields: answers[{question_id,text,refs}], decision{recommendation,
 existing_position,current_price_reasoning,assessments[{dimension,value,reason,
 refs,valuation_basis?,assumption_refs?}],refs,risks[{text,refs}],review_conditions[{kind,description,
-calculation_ref}]}. Valuation values: undervalued|fair|overvalued. Product and
+calculation_ref}]}. Company valuation values: undervalued|fair|overvalued|uncertain.
+Underlying valuation excludes uncertain. Product and
 trading values: favorable|acceptable|unfavorable. An unknown assessment is not a
 completed recommendation. The compact tool index describes OS-owned tools,
 not tools for you to reimplement."""
@@ -149,6 +154,21 @@ def _validate_valuation(context: dict[str, Any]) -> None:
                 raise ValueError("valuation peers are duplicated or contain the target")
             allowed.add(key)
     sources = {item["evidence_id"]:item for item in context["evidence"]}
+    rules = data.get("rules", [])
+    profiles = set()
+    ids = set()
+    for rule in rules:
+        key = (rule["profile"], rule["currency"])
+        if key in profiles or rule["rule_id"] in ids or rule["currency"] != instrument["currency"]:
+            raise ValueError("shared valuation rules are ambiguous or use another currency")
+        profiles.add(key)
+        ids.add(rule["rule_id"])
+    for observation in context["observations"]:
+        if observation["field"] == "reported_bank_flag" and any(
+            ref not in sources or sources[ref]["document_type"] not in ("financial_data", "annual_financial_data")
+            for ref in observation["evidence_refs"]
+        ):
+            raise ValueError("financial profile cannot come from quotes or model claims")
     seen = set()
     for series in data["series"]:
         subject = series["subject"]
@@ -214,6 +234,19 @@ class AnalysisReplayInputs:
         """Return inspectable prompt data, never call a configured LLM client."""
         data = json.loads(self.payload_json)
         method = data["method"]
+        observations = data["observations"]
+        calculations = data["calculations"]
+        if data.get("valuation", {}).get("rules"):
+            calculations = [item for item in calculations if item["status"] == "computed"]
+            direct_refs = {
+                ref for calculation in data["calculations"]
+                if calculation["status"] == "computed" and calculation["tool_id"] not in ("equity.annual_anchors", "equity.dividend_anchors")
+                for ref in calculation["input_refs"]
+            }
+            observations = [
+                item for item in observations
+                if item["observation_id"] in direct_refs or item["field"] == "market_price"
+            ]
         content = {
             "objective": data["plan"]["objective"],
             "instrument": {
@@ -236,13 +269,21 @@ class AnalysisReplayInputs:
                  **({"report_form": item["report_form"]} if "report_form" in item else {})}
                 for item in data["evidence"]
             ],
-            "observations": data["observations"],
-            "calculations": data["calculations"],
+            "observations": observations,
+            "calculations": calculations,
             "source_excerpts": data["excerpts"],
         }
         if data.get("valuation") is not None:
             content["valuation"] = {
                 "policy": data["valuation"]["policy"],
+                "selected_rule": next(
+                    (rule for rule in data["valuation"].get("rules", [])
+                     if any(calculation["tool_id"] == "equity.fundamental_band"
+                            and calculation["status"] == "computed"
+                            and rule["rule_id"] in calculation["input_refs"]
+                            for calculation in data["calculations"])),
+                    None,
+                ),
                 "series_metadata": [
                     {**{key:item[key] for key in ("series_id","subject","provider_id","metric","basis",
                                                   "window_start","window_end","evidence_refs")},

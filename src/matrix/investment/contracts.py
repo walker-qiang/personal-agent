@@ -19,6 +19,7 @@ RECORD_KINDS = frozenset({
     "MetadataClaim",
     "ResearchRequest", "ResearchPlanSnapshot", "ResearchRun", "ResearchTimePolicy", "ResearchWindow",
     "ValuationSubject", "ValuationSeries", "ValuationPolicy", "ScenarioAssumption", "ValuationContext",
+    "ValuationRule", "RuleAssumption",
 })
 
 
