@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import json
 from typing import Any
 
@@ -18,6 +19,8 @@ calculate, estimate missing inputs, infer a personal position or substitute NAV
 for underlying valuation. Provider financial_data is not an original financial_report.
 Index multiples are linked market references, not proof of fair value or fund
 lookthrough. Missing data is not an investment reason to watch.
+Use the supplied frozen valuation time; it is not necessarily the research start
+or the time you answer. Do not update it or treat a restored snapshot as live.
 Keep existing_position=not_assessed. Every answer, assessment and risk needs
 valid refs. Numeric prose must use {{observation_id}} for supplied observations;
 decision refs must cite the execution price or NAV, directly or through a Go
@@ -50,6 +53,52 @@ def _validate_index_links(context: dict[str, Any]) -> None:
             raise ValueError("index valuation is not backed by the confirmed product tracking evidence")
 
 
+def _timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _validate_window(window: dict[str, Any]) -> None:
+    start, deadline = _timestamp(window["started_at"]), _timestamp(window["deadline"])
+    if not start < deadline <= start + timedelta(seconds=900):
+        raise ValueError("collection deadline is not bounded by the original start")
+    cutoff, frozen = window["as_of"], window["frozen_at"]
+    if window["mode"] == "fixed" and (cutoff is None or _timestamp(cutoff) > start):
+        raise ValueError("fixed cutoff cannot follow research start")
+    if frozen is None:
+        if window["mode"] == "current" and cutoff is not None:
+            raise ValueError("current valuation time cannot precede snapshot freeze")
+    elif (
+        not start <= _timestamp(frozen) <= deadline or cutoff is None
+        or (window["mode"] == "current" and cutoff != frozen)
+    ):
+        raise ValueError("frozen valuation time differs from the collection window")
+
+
+def _validate_temporal_context(context: dict[str, Any]) -> None:
+    window = context.get("time_window")
+    if window is None:
+        return
+    _validate_window(window)
+    if window["frozen_at"] is None or window["as_of"] != context["as_of"]:
+        raise ValueError("analysis requires one frozen valuation cutoff")
+    sources = {item["evidence_id"]: item for item in context["evidence"]}
+    for evidence in sources.values():
+        received = _timestamp(evidence["retrieved_at"])
+        if (
+            received > _timestamp(window["frozen_at"])
+            or (window["mode"] == "current" and received < _timestamp(window["started_at"]))
+            or (evidence["published_at"] is not None and _timestamp(evidence["published_at"]) > received)
+        ):
+            raise ValueError("evidence lies outside its collection snapshot")
+    for value in context["observations"]:
+        observed = _timestamp(value["as_of"])
+        if observed > _timestamp(context["as_of"]) or any(
+            ref not in sources or observed > _timestamp(sources[ref]["retrieved_at"])
+            for ref in value["evidence_refs"]
+        ):
+            raise ValueError("observation follows its source receipt or valuation cutoff")
+
+
 @dataclass(frozen=True)
 class AnalysisReplayInputs:
     capabilities: ResearchCapabilities
@@ -65,6 +114,7 @@ class AnalysisReplayInputs:
             raise ValueError("real source inputs are not authorized for this replay-only synthesis path")
         plan, instrument, method = payload["plan"], payload["instrument"], payload["method"]
         _validate_index_links(payload)
+        _validate_temporal_context(payload)
         methods = {item["method_id"]: item for item in json.loads(capabilities.payload_json)["methods"]}
         if (
             plan["plan_id"] != expected_plan_id
@@ -103,6 +153,7 @@ class AnalysisReplayInputs:
                             "management", "structure", "underlying_asset", "trading_mode", "cross_border")
             },
             "as_of": data["as_of"],
+            "time_window": data.get("time_window"),
             "tracking_index": data["instrument"].get("tracking_index"),
             "lookthrough_required": data["instrument"].get("lookthrough_required", False),
             "required_questions": method["required_questions"],
@@ -163,6 +214,7 @@ class CoordinatedResearchInputs:
             raise ValueError("research scope, target, engine or contract differs from trusted inputs")
         methods = {item["method_id"]: item for item in cap["methods"]}
         plan, context, result = payload["plan"], payload["context"], payload["result"]
+        _validate_window(payload["time_window"])
         if plan is not None:
             method = methods.get(plan["method_id"])
             if (
@@ -175,10 +227,12 @@ class CoordinatedResearchInputs:
         if context is not None and (
             context["plan"] != plan or context["instrument"] != payload["instrument"]
             or context["source_mode"] != payload["source_mode"]
+            or context.get("time_window") != payload["time_window"]
         ):
             raise ValueError("analysis context changed the frozen plan, instrument or source mode")
         if context is not None:
             _validate_index_links(context)
+            _validate_temporal_context(context)
         for prepared in payload["preparations"]:
             if prepared["source_mode"] != payload["source_mode"]:
                 raise ValueError("preparation source mode differs from the parent")
