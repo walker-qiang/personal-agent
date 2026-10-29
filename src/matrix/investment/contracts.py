@@ -18,6 +18,7 @@ RECORD_KINDS = frozenset({
     "Answer", "AnalysisDraft", "ResearchReplayRequest", "AnalysisContext",
     "MetadataClaim",
     "ResearchRequest", "ResearchPlanSnapshot", "ResearchRun", "ResearchTimePolicy", "ResearchWindow",
+    "ValuationSubject", "ValuationSeries", "ValuationPolicy", "ScenarioAssumption", "ValuationContext",
 })
 
 

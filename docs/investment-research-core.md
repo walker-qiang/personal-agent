@@ -131,3 +131,21 @@ Agent 不选择发布者账号、不推导机构 ID、不绕过访问拒绝，�
 
 跨仓隔离验收在 OS 的 `tools/acceptance/research_disclosures.py`，公开样本验证只取数。
 现用路由、真实模型、资产迁移和 App gate 均未切换。
+
+## 估值依据与条件建议
+
+`research-valuation-basis-v10` 增加 `ValuationPolicy`、`ScenarioAssumption`、
+`ValuationSeries` 及 `ValuationContext`。配置由 OS 操作者注册，不来自模型草稿；
+消费端核对目标、实际测量的同行证券、提供方和证据归属，公司配置不能应用于基金。
+
+系统提示区分事实、假设与 Go 计算结果。历史分位和同行倍数只是相对定价描述，
+不能单独支持低估、正常或高估；公司估值需要已批准的条件倍数情景，
+声明 `conditional_multiple_scenario` 并引用全部假设 ID。
+条件重定价不等于内在价值、报告 EPS 估计或未来价格预测。
+若配置必要买入余量，买入建议须引用并满足程序生成的条件入场参考。
+
+模型只收到序列元信息、样本数及原子计算结果，不收到完整历史数组；
+工具索引继续仅含 ID、版本与短说明，金融公式、预算、完成状态及写回仍属于 Go。
+新约束的跨仓隔离验收在 OS 的 `tools/acceptance/research_valuation_basis.py`。
+匿名公开验证只检查参考数据和明确阻断，不连接真实 `LLMClient`，
+不将假回放成功当作真实建议质量或 App 可用性通过。

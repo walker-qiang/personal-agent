@@ -23,6 +23,13 @@ Use the supplied frozen valuation time; it is not necessarily the research start
 or the time you answer. Do not update it or treat a restored snapshot as live.
 Use the supplied question-specific issuer sections. A report cover, contents list
 or summary is not full-report evidence; section coverage is not a valuation conclusion.
+Historical positions and peer snapshots are descriptive relative pricing, not
+intrinsic value. Company valuation uses only an approved conditional multiple
+scenario, with valuation_basis=conditional_multiple_scenario and every configured
+assumption_id in assumption_refs. Disclose its conditional nature; never present
+an assumption as an observed fact or invent missing scenario values.
+When required_margin_pct is configured, a buy recommendation must cite the Go
+conditional margin calculation and satisfy its conditional_entry_reference.
 Keep existing_position=not_assessed. Every answer, assessment and risk needs
 valid refs. Numeric prose must use {{observation_id}} for supplied observations;
 decision refs must cite the execution price or NAV, directly or through a Go
@@ -31,7 +38,7 @@ must name the calculation_ref and reference one of its outputs. Event conditions
 must have calculation_ref=null. Do not choose execution status or result IDs.
 Output fields: answers[{question_id,text,refs}], decision{recommendation,
 existing_position,current_price_reasoning,assessments[{dimension,value,reason,
-refs}],refs,risks[{text,refs}],review_conditions[{kind,description,
+refs,valuation_basis?,assumption_refs?}],refs,risks[{text,refs}],review_conditions[{kind,description,
 calculation_ref}]}. Valuation values: undervalued|fair|overvalued. Product and
 trading values: favorable|acceptable|unfavorable. An unknown assessment is not a
 completed recommendation. The compact tool index describes OS-owned tools,
@@ -118,6 +125,46 @@ def _validate_stock_excerpts(context: dict[str, Any]) -> None:
             raise ValueError("stock excerpt has no program-selected full-report topic and exact UTF-8 range")
         seen.add(key)
 
+def _validate_valuation(context: dict[str, Any]) -> None:
+    data = context.get("valuation")
+    if data is None:
+        return
+    instrument = context["instrument"]
+    if instrument["kind"] != "equity":
+        raise ValueError("company valuation policies cannot substitute for fund analysis")
+    prefix = {"SHSE":"sh","SZSE":"sz"}.get(instrument["market"], "")
+    target = (instrument["market"], instrument["code"].lower().removeprefix(prefix))
+    policy = data["policy"]
+    allowed = {target}
+    if policy is not None:
+        if (
+            (policy["target"]["market"], policy["target"]["code"]) != target
+            or (policy["profile"] == "financial_asset" and policy["metric"] != "pb_mrq")
+            or (policy["profile"] == "stable_profit" and policy["metric"] != "pe_ttm")
+        ):
+            raise ValueError("valuation method does not match the configured target and financial profile")
+        for peer in policy["peers"]:
+            key = (peer["market"],peer["code"])
+            if key in allowed:
+                raise ValueError("valuation peers are duplicated or contain the target")
+            allowed.add(key)
+    sources = {item["evidence_id"]:item for item in context["evidence"]}
+    seen = set()
+    for series in data["series"]:
+        subject = series["subject"]
+        key = (subject["market"],subject["code"])
+        if series["series_id"] in seen or key not in allowed or series["instrument_id"] != instrument["instrument_id"]:
+            raise ValueError("valuation series changed its target or declared measured security")
+        seen.add(series["series_id"])
+        for ref in series["evidence_refs"]:
+            evidence = sources.get(ref)
+            measured = None if evidence is None else evidence.get("valuation_subject")
+            if (
+                evidence is None or measured is None or evidence["document_type"] != "valuation_reference"
+                or (measured["market"],measured["code"]) != key or evidence["publisher_id"] != series["provider_id"]
+            ):
+                raise ValueError("valuation series has no matching source evidence")
+
 
 @dataclass(frozen=True)
 class AnalysisReplayInputs:
@@ -136,6 +183,7 @@ class AnalysisReplayInputs:
         _validate_index_links(payload)
         _validate_temporal_context(payload)
         _validate_stock_excerpts(payload)
+        _validate_valuation(payload)
         methods = {item["method_id"]: item for item in json.loads(capabilities.payload_json)["methods"]}
         if (
             plan["plan_id"] != expected_plan_id
@@ -184,6 +232,7 @@ class AnalysisReplayInputs:
                 {**{key: item[key] for key in
                  ("evidence_id", "document_type", "published_at", "report_period", "source_url")},
                  **({"index_reference": item["index_reference"]} if "index_reference" in item else {}),
+                 **({"valuation_subject": item["valuation_subject"]} if "valuation_subject" in item else {}),
                  **({"report_form": item["report_form"]} if "report_form" in item else {})}
                 for item in data["evidence"]
             ],
@@ -191,6 +240,16 @@ class AnalysisReplayInputs:
             "calculations": data["calculations"],
             "source_excerpts": data["excerpts"],
         }
+        if data.get("valuation") is not None:
+            content["valuation"] = {
+                "policy": data["valuation"]["policy"],
+                "series_metadata": [
+                    {**{key:item[key] for key in ("series_id","subject","provider_id","metric","basis",
+                                                  "window_start","window_end","evidence_refs")},
+                     "sample_count":len(item["samples"])}
+                    for item in data["valuation"]["series"]
+                ],
+            }
         return {"system": SYSTEM_PROMPT, "messages": [
             {"role": "user", "content": json.dumps(content, ensure_ascii=False, separators=(",", ":"))}
         ]}
@@ -256,6 +315,7 @@ class CoordinatedResearchInputs:
             _validate_index_links(context)
             _validate_temporal_context(context)
             _validate_stock_excerpts(context)
+            _validate_valuation(context)
         for prepared in payload["preparations"]:
             if prepared["source_mode"] != payload["source_mode"]:
                 raise ValueError("preparation source mode differs from the parent")
