@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+research = [
+    "deepseek-recipe==0.2.0",
+]
 rag = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",

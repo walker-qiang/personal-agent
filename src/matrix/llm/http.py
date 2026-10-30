@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import time
@@ -20,6 +21,13 @@ STREAM_READ_CHUNK = 4096
 
 # Module-level rate limiter — can be replaced per provider
 _rate_limiter: TokenBucketRateLimiter | None = None
+
+
+class _NoModelRedirect(request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str,
+    ) -> None:
+        return None
 
 
 def set_rate_limiter(limiter: TokenBucketRateLimiter | None) -> None:
@@ -68,6 +76,35 @@ def post_json(
     if not isinstance(data, dict):
         raise LLMError("model provider returned non-object response")
     return data
+
+
+def post_json_raw_once(
+    url: str, body: bytes, headers: dict[str, str], timeout_sec: float,
+    max_response_bytes: int = 1 << 20,
+) -> tuple[int, bytes, str]:
+    """Retain provider bytes, including HTTP failures, without retry or JSON parsing."""
+    _acquire_rate_limit()
+    req = request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        response = request.build_opener(_NoModelRedirect()).open(req, timeout=timeout_sec)
+    except error.HTTPError as exc:
+        response = exc
+    except (TimeoutError, socket.timeout, error.URLError) as exc:
+        return 0, b"", type(exc).__name__
+    with response:
+        status = response.code
+        raw = bytearray()
+        try:
+            while len(raw) <= max_response_bytes:
+                chunk = response.read(min(65536, max_response_bytes + 1 - len(raw)))
+                if not chunk:
+                    return status, bytes(raw), ""
+                raw.extend(chunk)
+        except (TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
+            if isinstance(exc, http.client.IncompleteRead):
+                raw.extend(exc.partial)
+            return status, bytes(raw), type(exc).__name__
+        return status, bytes(raw), "response_too_large"
 
 
 def post_json_with_retry(
