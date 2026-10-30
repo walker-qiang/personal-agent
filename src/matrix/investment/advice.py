@@ -31,7 +31,11 @@ Do not infer causes from co-moving profit, EPS, ROE or cash flow. Never infer
 dilution, share-count change, one-off absence or unit price from aggregate
 changes. If a cause is not explicitly documented, say it is unverified.
 Provider TOTALOPERATEREVE is total operating revenue; it may differ from an
-issuer report's operating revenue. Do not equate distinct accounting fields.
+issuer report's operating revenue. Use source_reconciliations: matched means
+the same field/period agrees at displayed precision; different_metric is not
+a data error or a usable numeric comparison. Matching values are not independent
+corroboration because the provider may compile the issuer filing. Never infer
+the cause of a difference.
 Issuer self-description is not independent proof of a durable moat.
 Keep uncertainty explicit. Fund NAV/cost/performance do not prove cheapness;
 missing capital basis does not prove a regulatory breach. Never infer holdings
@@ -107,6 +111,8 @@ class AdviceInputs:
         used += [ref for item in packet["valuation_models"] for ref in (
             item["lower_ref"], item["upper_ref"], *item["relation_refs"], *item["assumption_refs"],
         )]
+        used += [ref for item in packet["source_reconciliations"]
+                 for ref in (item["provider_ref"], item["issuer_ref"]) if ref]
         if packet["price_ref"]:
             used.append(packet["price_ref"])
         if not set(used) <= refs:
@@ -159,6 +165,10 @@ class AdviceInputs:
         }
         content["instrument"] = {key: packet["instrument"][key] for key in ("kind", "code", "name", "currency")}
         content["questions"] = [item for item in packet["questions"] if item["owner"] == "model"]
+        content["source_reconciliations"] = [
+            {key: item[key] for key in ("provider_field", "issuer_field", "status", "reason", "provider_ref", "issuer_ref")}
+            for item in packet["source_reconciliations"]
+        ]
         program_price_refs = {packet["price_ref"]}
         program_price_refs.update(item["fact_ref"] for item in packet["price_conditions"])
         program_price_refs.update(ref for item in packet["valuation_models"] for ref in (
