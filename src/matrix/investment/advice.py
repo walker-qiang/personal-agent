@@ -13,17 +13,23 @@ from .contracts import _local_references_only
 from .preparation import ResearchCapabilities
 
 
-VERSION = "investment-advice-v4"
-SCHEMA_ID = "urn:personal-os:investment-research:advice:v4"
+VERSION = "investment-advice-v5"
+SCHEMA_ID = "urn:personal-os:investment-research:advice:v5"
 SYSTEM_PROMPT = """Give useful investment advice in concise Simplified Chinese.
 Return only version, packet_hash, answers, unheld and held. Answer each task
 with a conclusion, the best supporting facts, and genuine limits. Do not restate
 the question. Use question IDs in action answer_refs.
 For unheld choose buy/wait; for hypothetical held choose hold/reduce/sell.
-business_case and tradeoff must explain operating prospects, counter-evidence,
-and why the alternatives are less suitable. A profitable company is not
+Name the alternative_action you considered. business_case and tradeoff must
+explain operating prospects, counter-evidence and why that alternative is
+less suitable. change_condition must name a future observable change and how
+it would alter this action; do not request another click to continue research.
+A profitable company is not
 automatically a hold; conditional overvaluation is not automatically a sell.
-Read valuation_context to choose actions. OS assembles the exact price and
+Read method role and decision_use in valuation_context. A context_only method
+cannot establish overall cheapness or expensiveness, even when several such
+methods agree. A primary eligible method remains conditional; explain any
+conflicting cross-check. OS assembles the exact price and
 valuation argument into both actions; do not write prices, price comparisons,
 valuation labels or entry thresholds in business_case, tradeoff or answers.
 Buy requires buy_constraint.state=allowed, which is necessary but insufficient.
@@ -159,7 +165,7 @@ class AdviceInputs:
         content["valuation_context"] = {
             "assessments": [{key: item[key] for key in ("dimension", "value", "basis")}
                             for item in packet["assessments"]],
-            "method_positions": [{key: item[key] for key in ("model_id", "position", "scope", "limitation")}
+            "method_positions": [{key: item[key] for key in ("model_id", "position", "scope", "limitation", "role", "decision_use")}
                                  for item in packet["valuation_models"]],
             "buy_constraint": {key: packet["buy_constraint"][key] for key in ("state", "reason")},
         }
