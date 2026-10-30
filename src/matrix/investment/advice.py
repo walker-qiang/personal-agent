@@ -37,8 +37,8 @@ or forecast; methods sharing inputs are not independent corroboration. Positive
 earnings alone do not justify holding; overvaluation alone does not force selling.
 Buy requires buy_constraint.state=allowed. This gate is necessary, not sufficient.
 Explain every required_risk_ref directly in risks. Missing bank capital basis
-does not prove regulatory breach; zero risk-led disposal support does not forbid
-reducing an asset with an applicable valuation model.
+does not prove regulatory breach. Inapplicable facts are excluded, not evidence
+that a company is safe or that disposal is forbidden.
 review_conditions describe FUTURE observable business/product changes: trigger
 starts with 若/如果; verification names relevant disclosure/data to check; impact
 explains how the hypothetical unheld_action/held_action follows if it happens.
@@ -165,7 +165,7 @@ class AdviceInputs:
         content["facts"] = [
             {key: item[key] for key in (
                 "ref", "kind", "key", "label", "display", "as_of", "period", "status", "basis", "text",
-            )} for item in packet["facts"]
+            )} for item in packet["facts"] if item["status"] != "not_applicable"
         ]
         content["tool_index"] = self.capabilities.tool_index(packet["method_id"])
         return {"system": SYSTEM_PROMPT, "messages": [{
