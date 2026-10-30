@@ -20,6 +20,7 @@ RECORD_KINDS = frozenset({
     "ResearchRequest", "ResearchPlanSnapshot", "ResearchRun", "ResearchTimePolicy", "ResearchWindow",
     "ValuationSubject", "ValuationSeries", "ValuationPolicy", "ScenarioAssumption", "ValuationContext",
     "ValuationRule", "RuleAssumption",
+    "BankCapitalFact",
 })
 
 

@@ -34,6 +34,11 @@ multiple scenario uses conditional_multiple_scenario and its policy assumptions.
 Disclose conditional results; never turn assumptions into facts or invent inputs.
 A buy recommendation must cite and satisfy the applicable Go entry reference
 and its approved required margin; do not average away model disagreement.
+Every required_risk_ref must appear directly in risks.refs and be explained.
+Risky observed facts are not missing data. A program-declared unavailable price
+method uses not_applicable and fundamental_method_unavailable with no assumption
+refs; never invent a value or recommend buying. Capital basis matching is not
+full regulatory compliance. Missing capital basis restricts buys, not research.
 Keep existing_position=not_assessed. Every answer, assessment and risk needs
 valid refs. Numeric prose must use {{observation_id}} for supplied observations;
 decision refs must cite the execution price or NAV, directly or through a Go
@@ -45,8 +50,8 @@ existing_position,current_price_reasoning,assessments[{dimension,value,reason,
 refs,valuation_basis?,assumption_refs?}],refs,risks[{text,refs}],review_conditions[{kind,description,
 calculation_ref}]}. Company valuation values: undervalued|fair|overvalued|uncertain.
 Underlying valuation excludes uncertain. Product and
-trading values: favorable|acceptable|unfavorable. An unknown assessment is not a
-completed recommendation. The compact tool index describes OS-owned tools,
+trading values: favorable|acceptable|unfavorable. Unknown is not accepted;
+not_applicable requires the explicit program scope above. The compact tool index describes OS-owned tools,
 not tools for you to reimplement."""
 
 
@@ -169,6 +174,16 @@ def _validate_valuation(context: dict[str, Any]) -> None:
             for ref in observation["evidence_refs"]
         ):
             raise ValueError("financial profile cannot come from quotes or model claims")
+    for fact in data.get("capital_facts", []):
+        if fact["instrument_id"] != instrument["instrument_id"]:
+            raise ValueError("capital basis belongs to another entity")
+        for ref in fact["evidence_refs"]:
+            evidence = sources.get(ref)
+            if evidence is None or (
+                fact["role"] == "required"
+                and (evidence["document_type"] != "capital_requirement" or not evidence.get("regulatory_authority", False))
+            ):
+                raise ValueError("capital requirement has no authorized regulatory evidence")
     seen = set()
     for series in data["series"]:
         subject = series["subject"]
@@ -220,7 +235,7 @@ class AnalysisReplayInputs:
         ):
             raise ValueError("analysis method or required questions differ from trusted capabilities")
         if any(gap["blocking"] for gap in payload["gaps"]):
-            raise ValueError("analysis context is blocked; supplement evidence before synthesis")
+            raise ValueError("analysis context is blocked; resolve its source or approval gaps before synthesis")
         permission = plan["permission"]
         if (
             permission["include_portfolio"]
@@ -271,11 +286,23 @@ class AnalysisReplayInputs:
             ],
             "observations": observations,
             "calculations": calculations,
+            "required_risk_refs": [
+                output["observation_id"] for calculation in calculations
+                if calculation["tool_id"] == "equity.fundamental_risk_review" and calculation["status"] == "computed"
+                for output in calculation["outputs"]
+                if output["field"].startswith("risk_") and output["value"] not in (None, "0", "0.00000000")
+            ],
+            "model_applicability": [
+                {key:item[key] for key in ("tool_id","status","reason")}
+                for item in data["calculations"] if item["tool_id"] in
+                ("equity.pb_roe_band","equity.earnings_yield_band","equity.dividend_discount_band")
+            ],
             "source_excerpts": data["excerpts"],
         }
         if data.get("valuation") is not None:
             content["valuation"] = {
                 "policy": data["valuation"]["policy"],
+                "capital_facts": data["valuation"].get("capital_facts", []),
                 "selected_rule": next(
                     (rule for rule in data["valuation"].get("rules", [])
                      if any(calculation["tool_id"] == "equity.fundamental_band"
