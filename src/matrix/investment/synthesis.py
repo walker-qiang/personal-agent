@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 from .analysis import AnalysisInputs
+from .advice import AdviceInputs, VERSION as ADVICE_VERSION
 from .preparation import ResearchCapabilities
 from ..llm.deepseek import DeepSeekClient
 from ..llm.http import post_json_raw_once
@@ -24,24 +25,6 @@ def _digest(value: bytes) -> str:
 
 def _encoded(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-
-def _output_schema(bundle: dict[str, Any]) -> dict[str, Any]:
-    schema = json.loads(bundle["schema_json"])
-
-    def resolve(value: Any) -> Any:
-        if isinstance(value, list):
-            return [resolve(item) for item in value]
-        if not isinstance(value, dict):
-            return value
-        if "$ref" in value:
-            ref = value["$ref"]
-            if not ref.startswith("#/$defs/"):
-                raise ValueError("nonlocal output schema reference")
-            return resolve(schema["$defs"][ref.removeprefix("#/$defs/")])
-        return {key: resolve(item) for key, item in value.items()}
-
-    return resolve(schema["$defs"]["AnalysisDraft"])
 
 
 def count_input(payload: dict[str, Any], tokenizer_path: str, expected_hash: str) -> int:
@@ -62,6 +45,8 @@ def count_input(payload: dict[str, Any], tokenizer_path: str, expected_hash: str
 
 def prepare(value: dict[str, Any]) -> dict[str, Any]:
     auth, context, caps = value["authorization"], value["context"], value["capabilities"]
+    if auth.get("advice_protocol") != ADVICE_VERSION:
+        raise ValueError("legacy output contracts are read-only; prepare the program-owned advice protocol")
     if auth["provider"] != "deepseek" or auth["model"] != "deepseek-flash":
         raise ValueError("provider/model differs from the controlled synthesis scope")
     if auth["encoding_version"] != ENCODING_VERSION:
@@ -75,20 +60,27 @@ def prepare(value: dict[str, Any]) -> dict[str, Any]:
     capabilities = ResearchCapabilities.from_payload(
         caps, expected_contract_digest=auth["contract_digest"],
     )
-    view = AnalysisInputs.from_authorized_payload(
+    AnalysisInputs.from_authorized_payload(
         capabilities, context, expected_plan_id=context["plan"]["plan_id"],
         expected_instrument_id=context["instrument"]["instrument_id"],
         expected_context_hash=context["context_hash"],
         external_authorization=auth["permission"],
     )
-    prompt = view.model_request()
+    packet = value["decision_facts"]
+    advice = AdviceInputs.from_packet(
+        capabilities, packet, expected_advice_digest=auth["advice_contract_digest"],
+        expected_context_hash=context["context_hash"],
+        expected_instrument_id=context["instrument"]["instrument_id"],
+        expected_packet_hash=value["decision_facts_hash"],
+    )
+    prompt = advice.model_request()
     # Truncation is forbidden at this boundary: admission covers the exact payload.
     client = DeepSeekClient(api_key="", model=auth["model"], max_message_chars=0)
     payload = client._build_payload(
         prompt["system"], prompt["messages"],
         tools=[{
             "name": "return_json", "description": "Return the requested structured research result.",
-            "input_schema": _output_schema(caps["contract"]),
+            "input_schema": advice.output_schema(),
         }],
         tool_choice="required", max_tokens=auth["max_output_tokens"],
         temperature=0.0, thinking={"type": "disabled"},
@@ -99,12 +91,14 @@ def prepare(value: dict[str, Any]) -> dict[str, Any]:
     if bound > auth["max_input_tokens"]:
         raise ValueError(f"input budget exceeded: encoded={count}, admission_bound={bound}")
     body = _encoded(payload)
-    return {
+    prepared = {
         "endpoint": ENDPOINT, "model": auth["model"], "body": body.decode("utf-8"),
         "body_sha256": _digest(body), "input_tokens": count, "input_token_bound": bound,
         "max_output_tokens": auth["max_output_tokens"], "encoding_version": ENCODING_VERSION,
         "tokenizer_sha256": auth["tokenizer_sha256"],
     }
+    prepared.update(advice_protocol=ADVICE_VERSION, decision_facts_hash=packet["packet_hash"])
+    return prepared
 
 
 def execute(value: dict[str, Any]) -> dict[str, Any]:
@@ -112,6 +106,10 @@ def execute(value: dict[str, Any]) -> dict[str, Any]:
     from ..config import load_config
 
     auth, prepared = value["authorization"], value["request"]
+    if auth.get("advice_protocol") != ADVICE_VERSION:
+        raise ValueError("legacy output contracts are read-only; do not dispatch a legacy request")
+    if auth.get("advice_protocol", "") != prepared.get("advice_protocol", ""):
+        raise ValueError("archived advice protocol changed")
     load_dotenv(Path.cwd() / ".env", override=False)
     config = load_config()
     if config.deepseek_base_url.rstrip("/") != "https://api.deepseek.com":
@@ -126,6 +124,9 @@ def execute(value: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("archived request binding changed")
     payload = json.loads(body)
+    if auth.get("advice_protocol"):
+        if payload["tools"][0]["function"]["parameters"]["properties"]["packet_hash"] != {"const": prepared["decision_facts_hash"]}:
+            raise ValueError("advice schema changed its frozen packet")
     if (
         payload["model"] != auth["model"]
         or payload["max_tokens"] != auth["max_output_tokens"]
