@@ -189,8 +189,9 @@ def peers(code: str) -> dict[str, Any]:
 
 
 def research_context(code: str = "", name: str = "", object_type: str = "") -> dict[str, Any]:
-    if not str(code).strip() and not str(name).strip():
-        return tool_error("personal_os.research_context", "读取研究上下文", "code or name is required")
+    if not str(code).strip():
+        return tool_error("personal_os.research_context", "读取研究上下文",
+                          "code is required; resolve a name with personal_os.resolve_security first")
     return _get(
         "/api/tools/research/context",
         {"code": str(code).strip(), "name": name, "object_type": object_type},
@@ -356,7 +357,7 @@ def register_all(registry: ToolRegistry) -> None:
     registry.register(
         ToolDefinition(
             name="personal_os.research_context",
-            description="读取 personal-assets 中该标的已经保存的 schema v2 研究记录，以及已完成官方核验的 observed facts。优先使用 observed_facts 的已核验报告事实；缺失或过期时再调用实时财务工具。只读。",
+            description="读取该标的当前协议的研究报告和已核验客观档案，不读取旧研究卡。优先使用已核验事实，缺失或过期再查询补充。只读。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -364,6 +365,7 @@ def register_all(registry: ToolRegistry) -> None:
                     "name": {"type": "string"},
                     "object_type": {"type": "string", "enum": ["stock", "fund", ""]},
                 },
+                "required": ["code"],
             },
             handler=research_context,
             capabilities=["research_context"],
