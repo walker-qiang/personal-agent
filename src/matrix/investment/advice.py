@@ -19,19 +19,32 @@ SYSTEM_PROMPT = """Give useful investment advice in concise Simplified Chinese.
 Return only version, packet_hash, answers, unheld and held. Answer each task
 with a conclusion, the best supporting facts, and genuine limits. Do not restate
 the question. Use question IDs in action answer_refs.
+Keep each conclusion about one short paragraph. business_case and tradeoff
+should each be brief and nonrepetitive; name the choice, decisive evidence and
+opportunity cost. Use at most two short limits and one short change condition.
 For unheld choose buy/wait; for hypothetical held choose hold/reduce/sell.
 Name the alternative_action you considered. business_case and tradeoff must
 explain operating prospects, counter-evidence and why that alternative is
 less suitable. change_condition must name a future observable change and how
 it would alter this action; do not request another click to continue research.
-A profitable company is not
-automatically a hold; conditional overvaluation is not automatically a sell.
+Holding commits the current market value and must be compared with reducing
+exposure or retaining cash. A profitable company is not automatically a hold.
+Do not require losses, negative cash flow or permanent business damage before
+reducing. Conditional overvaluation is evidence to weigh, not an automatic sale.
+Apply held_task for this specific valuation state. Do not impose an above-range
+hurdle when the programme says the price is inside or below the primary range.
+An observed-capacity-maintained scenario is a conditional benchmark, not a
+future earnings forecast; a missing forecast is not an adverse business fact.
 Read method role and decision_use in valuation_context. A context_only method
 cannot establish overall cheapness or expensiveness, even when several such
 methods agree. A primary eligible method remains conditional; explain any
 conflicting cross-check. OS assembles the exact price and
 valuation argument into both actions; do not write prices, price comparisons,
 valuation labels or entry thresholds in business_case, tradeoff or answers.
+Historical payout/ROE scenario anchors test persistence; they are not forecasts.
+When forecast reports predate the latest filing, explain that the consensus
+has not been shown to incorporate the new information.
+Report dates alone do not establish incorporation or that risks are priced in.
 Buy requires buy_constraint.state=allowed, which is necessary but insufficient.
 Do not infer causes from co-moving profit, EPS, ROE or cash flow. Never infer
 dilution, share-count change, one-off absence or unit price from aggregate
@@ -157,7 +170,7 @@ class AdviceInputs:
             result["properties"][position]["properties"]["answer_refs"]["items"] = {"enum": questions}
         return result
 
-    def model_request(self) -> dict[str, Any]:
+    def model_request(self, *, research_focus: str = "") -> dict[str, Any]:
         packet = json.loads(self.payload_json)
         if packet["readiness"] == "blocked":
             raise ValueError("method evidence is incomplete; resolve program gaps before model synthesis")
@@ -169,7 +182,30 @@ class AdviceInputs:
                                  for item in packet["valuation_models"]],
             "buy_constraint": {key: packet["buy_constraint"][key] for key in ("state", "reason")},
         }
+        eligible = [item for item in packet["valuation_models"]
+                    if item["role"] == "primary" and item["decision_use"] == "eligible"]
+        content["valuation_context"]["holding_hurdle"] = (
+            "above_all_eligible_scenarios" if eligible and all(item["position"] == "above" for item in eligible)
+            else "compare_current_capital_exposure_with_alternatives"
+        )
+        if content["valuation_context"]["holding_hurdle"] == "above_all_eligible_scenarios":
+            content["held_task"] = (
+                "Holding above the eligible primary ranges needs a specific documented forward value driver; "
+                "historical business quality alone does not offset that hurdle. Compare reducing exposure with holding."
+            )
+        else:
+            content["held_task"] = (
+                "Compare holding with reducing or retaining cash using the reported operating trend and conditional value. "
+                "There is no above-range hurdle. Absence of a new growth driver alone does not require reducing a mature business."
+            )
+        content["valuation_context"]["forecast_use"] = (
+            "covered_institution_forecasts_used_conditionally"
+            if any(item["model_id"] == "residual_income" and item["role"] == "primary" for item in eligible)
+            else "not_used_in_primary; do not infer forecast staleness or earnings revisions from a source URL or query date range"
+        )
         content["instrument"] = {key: packet["instrument"][key] for key in ("kind", "code", "name", "currency")}
+        if research_focus:
+            content["research_focus"] = research_focus
         content["questions"] = [item for item in packet["questions"] if item["owner"] == "model"]
         content["source_reconciliations"] = [
             {key: item[key] for key in ("provider_field", "issuer_field", "status", "reason", "provider_ref", "issuer_ref")}
@@ -186,6 +222,9 @@ class AdviceInputs:
             {key: item[key] for key in (
                 "ref", "kind", "key", "label", "display", "as_of", "period", "status", "basis", "text",
             )} for item in packet["facts"] if item["status"] != "not_applicable" and item["ref"] not in program_price_refs
+            and item["kind"] != "evidence"
+            and not item["key"].startswith(("pe_history_", "pb_history_", "peer_snapshot_", "target_to_peer_"))
+            and item["key"] not in ("market_pe_reference", "market_pb_reference")
         ]
         content["tool_index"] = self.capabilities.tool_index(packet["method_id"])
         return {"system": SYSTEM_PROMPT, "messages": [{

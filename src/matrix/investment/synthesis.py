@@ -73,7 +73,7 @@ def prepare(value: dict[str, Any]) -> dict[str, Any]:
         expected_instrument_id=context["instrument"]["instrument_id"],
         expected_packet_hash=value["decision_facts_hash"],
     )
-    prompt = advice.model_request()
+    prompt = advice.model_request(research_focus=context["plan"].get("focus", ""))
     # Truncation is forbidden at this boundary: admission covers the exact payload.
     client = DeepSeekClient(api_key="", model=auth["model"], max_message_chars=0)
     payload = client._build_payload(
