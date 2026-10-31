@@ -195,8 +195,20 @@ class AdviceInputs:
         answers = result["properties"]["answers"]
         answers["minItems"] = answers["maxItems"] = len(questions)
         answers["items"]["properties"]["question_id"] = {"enum": questions}
+        qualitative = ("仅写简短定性判断；数值由程序展示。不得写年份、日期、金额、比例、倍数、"
+                       "中文近似数量或数值占位符，也不得自行计算。例：写‘最近一期盈利下降’，"
+                       "不写具体年度或下降幅度。引用编号只能写在 refs 中。")
+        answer = answers["items"]["properties"]
+        answer["conclusion"]["properties"]["text"].update(maxLength=320, description=qualitative)
+        answer["limits"]["maxItems"] = 2
+        answer["limits"]["items"]["properties"]["text"].update(maxLength=120, description=qualitative)
         for position in ("unheld", "held"):
-            result["properties"][position]["properties"]["answer_refs"]["items"] = {"enum": questions}
+            fields = result["properties"][position]["properties"]
+            fields["answer_refs"]["items"] = {"enum": questions}
+            for field, length in (("business_case", 220), ("tradeoff", 160), ("change_condition", 130)):
+                fields[field].update(maxLength=length, description=qualitative + "价格条件与估值标签由程序拼接，不在此重复。")
+        if packet["buy_constraint"]["state"] != "allowed":
+            result["properties"]["unheld"]["properties"]["action"]["enum"] = ["wait"]
         return result
 
     def model_request(self, *, research_focus: str = "") -> dict[str, Any]:
@@ -213,6 +225,10 @@ class AdviceInputs:
         }
         eligible = [item for item in packet["valuation_models"]
                     if item["role"] == "primary" and item["decision_use"] == "eligible"]
+        content["valuation_context"]["primary_valuation_available"] = bool(eligible)
+        if not eligible:
+            for item in content["valuation_context"]["method_positions"]:
+                item.pop("position", None)
         content["valuation_context"]["holding_hurdle"] = (
             "above_all_eligible_scenarios" if eligible and all(item["position"] == "above" for item in eligible)
             else "compare_current_capital_exposure_with_alternatives"
@@ -222,10 +238,17 @@ class AdviceInputs:
                 "Holding above the eligible primary ranges needs a specific documented forward value driver; "
                 "historical business quality alone does not offset that hurdle. Compare reducing exposure with holding."
             )
-        else:
+        elif eligible:
             content["held_task"] = (
                 "Compare holding with reducing or retaining cash using the reported operating trend and conditional value. "
                 "There is no above-range hurdle. Absence of a new growth driver alone does not require reducing a mature business."
+            )
+        else:
+            content["held_task"] = (
+                "No eligible primary valuation exists. No price range can support this action. "
+                "Compare holding with reducing or retaining cash using actual business and risk evidence. "
+                "Do not claim that current price is covered by a range, offers a discount or is not overvalued. "
+                "Do not infer business deterioration from the missing valuation."
             )
         if packet["instrument"]["kind"] == "fund":
             content["held_task"] = (
@@ -265,6 +288,12 @@ class AdviceInputs:
             and item["key"] not in ("market_pe_reference", "market_pb_reference")
         ]
         content["tool_index"] = self.capabilities.tool_index(packet["method_id"])
+        content["output_instructions"] = (
+            "输出仅含定性解释和 refs，不写数值、日期、中文近似比例、价格位置或估值标签；程序负责展示这些内容。"
+            "每个结论一小段，行动理由与取舍各一小段。区分已披露事实与待核验的原因；"
+            "数值对账通过不等于审计认可或利润真实的证明。"
+            "说明所选行动为何优于备选及占用资金的代价，不以缺数推断经营恶化，也不要求用户再次点击。"
+        )
         system = FUND_SYSTEM_PROMPT if packet["instrument"]["kind"] == "fund" else SYSTEM_PROMPT
         return {"system": system, "messages": [{
             "role": "user", "content": json.dumps(content, ensure_ascii=False, separators=(",", ":")),
